@@ -1,6 +1,6 @@
 # AGENTS.md - physics-ppt-toolkit 项目规则（Codex）
 
-**项目**: physics-ppt-toolkit  
+**项目**: physics-ppt-toolkit
 **类型**: Windows PowerPoint / PowerShell COM 自动化工具包  
 **适用范围**: 仓库根目录  
 **最后更新**: 2026-05-29

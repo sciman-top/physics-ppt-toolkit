@@ -2166,16 +2166,16 @@ if ($Mode -eq 'CheckOnly') {
 
 Write-Host "Step 4/${stepCount}: build review artifacts and manifest"
 $rows = Convert-ReportCsv -Path $finalReportPath
-    $sourceImageDirs = if ($Mode -eq 'CheckOnly' -or -not $IncludeReviewArtifacts) { @{} } else { Export-SourcePageImages -Files $files -OutputRoot $OutputRoot }
-    $contactSheets = if ($Mode -eq 'CheckOnly' -or -not $IncludeReviewArtifacts) { @{} } else { New-ContactSheets -Files $files -OutputRoot $OutputRoot -IdentityMap $identityMap }
-    $reviewSheets = if ($Mode -eq 'CheckOnly' -or -not $IncludeReviewArtifacts) { @{} } else { New-ReviewContactSheets -Files $files -OutputRoot $OutputRoot -Rows $rows -IdentityMap $identityMap }
-    $beforeAfterSheets = if ($Mode -eq 'CheckOnly' -or -not $IncludeReviewArtifacts) { @{} } else { New-BeforeAfterReviewSheets -Files $files -OutputRoot $OutputRoot -Rows $rows -SourceImageDirs $sourceImageDirs -IdentityMap $identityMap }
-    $reviewPagePackages = if ($Mode -eq 'CheckOnly' -or -not $IncludeReviewArtifacts) { @{} } else { New-ReviewPagePackages -Files $files -OutputRoot $OutputRoot -Rows $rows -IdentityMap $identityMap }
-    $reviewIndexes = if ($Mode -eq 'CheckOnly' -or -not $IncludeReviewArtifacts) { @{} } else { New-ReviewIndexes -Files $files -OutputRoot $OutputRoot -Rows $rows -SourceImageDirs $sourceImageDirs -IdentityMap $identityMap }
-    $formulaReviewIndex = New-FormulaReviewIndex -Rows $rows -OutputRoot $OutputRoot -IdentityMap $identityMap
-    $manifestPath = Join-Path $OutputRoot 'review-manifest.json'
-    $summaryPath = Join-Path $OutputRoot 'summary.md'
-    $manifest = New-Manifest -Files $files -InputFullPath $inputFullPath -OutputRoot $OutputRoot -ReportPath $finalReportPath -Mode $Mode -IncludeReviewArtifacts ([bool]$IncludeReviewArtifacts) -ReportRows $rows -ContactSheets $contactSheets -ReviewSheets $reviewSheets -SourceImageDirs $sourceImageDirs -BeforeAfterSheets $beforeAfterSheets -ReviewPagePackages $reviewPagePackages -ReviewIndexes $reviewIndexes -FormulaReviewIndex $formulaReviewIndex -IdentityMap $identityMap
+$sourceImageDirs = if ($Mode -eq 'CheckOnly' -or -not $IncludeReviewArtifacts) { @{} } else { Export-SourcePageImages -Files $files -OutputRoot $OutputRoot -IdentityMap $identityMap }
+$contactSheets = if ($Mode -eq 'CheckOnly' -or -not $IncludeReviewArtifacts) { @{} } else { New-ContactSheets -Files $files -OutputRoot $OutputRoot -IdentityMap $identityMap }
+$reviewSheets = if ($Mode -eq 'CheckOnly' -or -not $IncludeReviewArtifacts) { @{} } else { New-ReviewContactSheets -Files $files -OutputRoot $OutputRoot -Rows $rows -IdentityMap $identityMap }
+$beforeAfterSheets = if ($Mode -eq 'CheckOnly' -or -not $IncludeReviewArtifacts) { @{} } else { New-BeforeAfterReviewSheets -Files $files -OutputRoot $OutputRoot -Rows $rows -SourceImageDirs $sourceImageDirs -IdentityMap $identityMap }
+$reviewPagePackages = if ($Mode -eq 'CheckOnly' -or -not $IncludeReviewArtifacts) { @{} } else { New-ReviewPagePackages -Files $files -OutputRoot $OutputRoot -Rows $rows -IdentityMap $identityMap }
+$reviewIndexes = if ($Mode -eq 'CheckOnly' -or -not $IncludeReviewArtifacts) { @{} } else { New-ReviewIndexes -Files $files -OutputRoot $OutputRoot -Rows $rows -SourceImageDirs $sourceImageDirs -IdentityMap $identityMap }
+$formulaReviewIndex = New-FormulaReviewIndex -Rows $rows -OutputRoot $OutputRoot -IdentityMap $identityMap
+$manifestPath = Join-Path $OutputRoot 'review-manifest.json'
+$summaryPath = Join-Path $OutputRoot 'summary.md'
+$manifest = New-Manifest -Files $files -InputFullPath $inputFullPath -OutputRoot $OutputRoot -ReportPath $finalReportPath -Mode $Mode -IncludeReviewArtifacts ([bool]$IncludeReviewArtifacts) -ReportRows $rows -ContactSheets $contactSheets -ReviewSheets $reviewSheets -SourceImageDirs $sourceImageDirs -BeforeAfterSheets $beforeAfterSheets -ReviewPagePackages $reviewPagePackages -ReviewIndexes $reviewIndexes -FormulaReviewIndex $formulaReviewIndex -IdentityMap $identityMap
 
 $formulaWhitelistSuggestionArtifacts = Invoke-FormulaWhitelistSuggestionArtifacts -FormulaReviewIndex $formulaReviewIndex -OutputRoot $OutputRoot -MaxSuggestions 120
 $manifest | Add-Member -NotePropertyName formulaWhitelistSuggestionArtifacts -NotePropertyValue $formulaWhitelistSuggestionArtifacts -Force
