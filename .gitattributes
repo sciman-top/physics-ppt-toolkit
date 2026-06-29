@@ -1,0 +1,38 @@
+# Text defaults
+* text=auto
+
+# Windows-facing scripts
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.bas text eol=crlf
+
+# Docs and structured config
+*.md text eol=lf
+*.json text eol=lf
+*.csv text eol=crlf
+*.xml text eol=lf
+*.mjs text eol=lf
+*.js text eol=lf
+*.py text eol=lf
+*.cs text eol=lf
+*.csproj text eol=lf
+
+# Office/media/binary artifacts
+*.ppt binary
+*.pptx binary
+*.pptm binary
+*.potx binary
+*.pdf binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.mp4 binary
+*.zip binary
+*.7z binary
+*.exe binary
+*.dll binary
+*.bin binary
+*.param binary

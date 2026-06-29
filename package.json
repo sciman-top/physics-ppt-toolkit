@@ -1,0 +1,11 @@
+{
+  "name": "physics-ppt-toolkit",
+  "private": true,
+  "scripts": {
+    "render:formula-svg": "node tools/Render-FormulaSvg.mjs"
+  },
+  "dependencies": {
+    "@mathjax/src": "4.1.2",
+    "sharp": "^0.34.5"
+  }
+}

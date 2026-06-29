@@ -1,0 +1,128 @@
+﻿{
+  "fonts": {
+    "chinese": "微软雅黑",
+    "latin": "Arial",
+    "math": "Cambria Math"
+  },
+  "fontSizes": {
+    "title1": 46,
+    "sectionTitle": 56,
+    "title2": 38,
+    "body": 32,
+    "auxiliary": 28,
+    "minimum": 24,
+    "tableHeader": 30,
+    "tableBody": 28,
+    "formulaInline": 34,
+    "formulaStandalone": 38,
+    "formulaCore": 42,
+    "footer": 20
+  },
+  "colors": {
+    "white": "#FFFFFF",
+    "black": "#000000",
+    "body": "#000000",
+    "darkGray": "#222222",
+    "emphasisRed": "#C00000",
+    "formulaBlue": "#0066CC",
+    "experimentGreen": "#008000",
+    "yellowFill": "#FFF2CC",
+    "yellowBorder": "#D6A300",
+    "blueFill": "#D9EAF7",
+    "grayFill": "#F2F2F2",
+    "videoYellow": "#FFD966",
+    "videoBlue": "#4DA3FF",
+    "videoRed": "#FF4D4D",
+    "videoGreen": "#00B050"
+  },
+  "formulaWhitelist": [
+    {
+      "name": "功",
+      "sourcePattern": "^W=F[∙·*×]?s$",
+      "targetUnicodeMath": "W=Fs",
+      "targetTex": "W=Fs",
+      "note": "机械功基本公式；初中课件默认保留教材常见的隐式乘法写法。"
+    },
+    {
+      "name": "总功",
+      "sourcePattern": "^W总=F[∙·*×]?s$",
+      "targetUnicodeMath": "W_总=Fs",
+      "targetTex": "W_{\\text{总}}=Fs",
+      "note": "总功常用式；中文角标按下标处理，保留 Fs 隐式乘法。"
+    },
+    {
+      "name": "有用功",
+      "sourcePattern": "^W有=G物h$",
+      "targetUnicodeMath": "W_有=G_物h",
+      "targetTex": "W_{\\text{有}}=G_{\\text{物}}h",
+      "note": "有用功常用式；中文角标按下标处理，不强制插入乘点。"
+    },
+    {
+      "name": "额外功",
+      "sourcePattern": "^W额=W总-W有$",
+      "targetUnicodeMath": "W_额=W_总-W_有",
+      "targetTex": "W_{\\text{额}}=W_{\\text{总}}-W_{\\text{有}}",
+      "note": "额外功关系式；中文角标按下标处理。"
+    },
+    {
+      "name": "功率",
+      "sourcePattern": "^P=W/t$",
+      "targetUnicodeMath": "P=W/t",
+      "targetTex": "P=\\frac{W}{t}",
+      "note": "功率定义式，适合人工确认后转换为上下分式。"
+    },
+    {
+      "name": "机械效率",
+      "sourcePattern": "^η=W有/W总$",
+      "targetUnicodeMath": "η=W_有/W_总",
+      "targetTex": "\\eta=\\frac{W_{\\text{有}}}{W_{\\text{总}}}",
+      "note": "机械效率常用式；中文角标按下标处理，同时保留隐式乘法等初中课件写法。"
+    },
+    {
+      "name": "欧姆定律电流",
+      "sourcePattern": "^I=U/R$",
+      "targetUnicodeMath": "I=U/R",
+      "targetTex": "I=\\frac{U}{R}",
+      "note": "欧姆定律，适合人工确认后转换为上下分式。"
+    },
+    {
+      "name": "欧姆定律电阻",
+      "sourcePattern": "^R=U/I$",
+      "targetUnicodeMath": "R=U/I",
+      "targetTex": "R=\\frac{U}{I}",
+      "note": "欧姆定律变形式，适合人工确认后转换为上下分式。"
+    },
+    {
+      "name": "速度",
+      "sourcePattern": "^v=s/t$",
+      "targetUnicodeMath": "v=s/t",
+      "targetTex": "v=\\frac{s}{t}",
+      "note": "速度定义式，适合人工确认后转换为上下分式。"
+    },
+    {
+      "name": "压强",
+      "sourcePattern": "^p=F/S$",
+      "targetUnicodeMath": "p=F/S",
+      "targetTex": "p=\\frac{F}{S}",
+      "note": "压强定义式，适合人工确认后转换为上下分式。"
+    },
+    {
+      "name": "密度",
+      "sourcePattern": "^ρ=m/V$",
+      "targetUnicodeMath": "ρ=m/V",
+      "targetTex": "\\rho=\\frac{m}{V}",
+      "note": "密度定义式，适合人工确认后转换为上下分式。"
+    }
+  ],
+  "rules": {
+    "doNotModifyTextContent": true,
+    "doNotMoveShapes": true,
+    "doNotResizeShapes": true,
+    "allowTextBoxWidthExpansion": true,
+    "doNotModifyAnimations": true,
+    "doNotCropImages": true,
+    "formulaTextStyleDefault": true,
+    "formulaConversionDefault": false,
+    "videoSlideKeywords": ["视频", "播放", "观察视频"]
+  }
+}

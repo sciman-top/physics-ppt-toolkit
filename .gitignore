@@ -1,0 +1,38 @@
+# PowerPoint working files
+~$*.ppt*
+*.tmp
+node_modules/
+__pycache__/
+*.pyc
+
+# Build outputs
+**/bin/
+**/obj/
+
+# Backup directories created by the toolkit
+_backup_originals/
+**/_backup_originals/
+_physics_ppt_output_*/
+
+# Generated reports
+physics-ppt-normalize-report.csv
+physics-ppt-vba-normalize-report.csv
+physics-ppt-vba-report-only.csv
+reports/**
+
+# Generated presentation outputs
+*.normalized.pptx
+*.normalized.pptm
+*.normalized.pdf
+*.media-optimized.pptx
+*.formula-omml.pptx
+*.formula-svg.pptx
+*.visual-fixed.pptx
+
+# Local portable tool downloads and unpacked caches
+tools/vendor/_downloads/
+
+# OS generated files
+Thumbs.db
+Desktop.ini
+.DS_Store
