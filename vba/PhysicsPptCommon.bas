@@ -7,6 +7,9 @@ Option Explicit
 ' When updating the JSON config, sync these constants manually to keep PowerShell and VBA behavior consistent.
 ' Mapping: FONT_CN -> fonts.chinese | FONT_LATIN -> fonts.latin | FONT_MATH -> fonts.math
 '          SIZE_* -> fontSizes.* | COLOR_* -> colors.*
+' Background normalization is intentionally opt-in in the VBA fallback, matching the
+' PowerShell default. Set this constant to True only after visual review of the deck.
+Public Const NORMALIZE_SLIDE_BACKGROUND As Boolean = False
 
 ' --- Font & Size Constants ---
 Public Const FONT_CN As String = "微软雅黑"

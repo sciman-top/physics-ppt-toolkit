@@ -17,6 +17,9 @@
 param(
     [switch]$Deep,
     [switch]$LaunchPowerPoint,
+    [switch]$RequireFormulaValidator,
+    [switch]$RequireFormulaSvg,
+    [switch]$RequireMediaOptimization,
     [switch]$Strict,
     [switch]$AsJson
 )
@@ -24,8 +27,14 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+. (Join-Path $PSScriptRoot 'PhysicsPpt.Common.ps1')
+
 $root = Split-Path -Parent $PSScriptRoot
 $checks = New-Object System.Collections.Generic.List[object]
+$nodeTier = if ($RequireFormulaSvg -or $RequireMediaOptimization) { 'Required' } else { 'Recommended' }
+$mathJaxTier = if ($RequireFormulaSvg) { 'Required' } else { 'Recommended' }
+$sharpTier = if ($RequireMediaOptimization) { 'Required' } else { 'Recommended' }
+$dotNetTier = if ($RequireFormulaValidator) { 'Required' } else { 'Recommended' }
 
 function Add-ToolchainCheck {
     param(
@@ -164,6 +173,7 @@ function Test-PythonModule {
 }
 
 function Test-DotNetSdk {
+    param([Parameter(Mandatory = $true)][string]$Tier)
     $candidates = New-Object System.Collections.Generic.List[string]
     $userDotnet = Join-Path $env:USERPROFILE '.dotnet\dotnet.exe'
     if (Test-Path -LiteralPath $userDotnet) { $candidates.Add($userDotnet) | Out-Null }
@@ -174,7 +184,7 @@ function Test-DotNetSdk {
     }
 
     if ($candidates.Count -eq 0) {
-        Add-ToolchainCheck -Name '.NET SDK' -Tier 'Required' -Status 'MISSING' -Details 'FormulaOfficeMathValidator requires a dotnet SDK.'
+        Add-ToolchainCheck -Name '.NET SDK' -Tier $Tier -Status 'MISSING' -Details 'FormulaOfficeMathValidator requires a dotnet SDK.'
         return
     }
 
@@ -182,12 +192,12 @@ function Test-DotNetSdk {
         $sdks = & $candidate --list-sdks 2>&1
         $sdkLines = @($sdks | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
         if ($LASTEXITCODE -eq 0 -and $sdkLines.Count -gt 0) {
-            Add-ToolchainCheck -Name '.NET SDK' -Tier 'Required' -Status 'OK' -Version ([string]$sdkLines[0]) -Path $candidate
+            Add-ToolchainCheck -Name '.NET SDK' -Tier $Tier -Status 'OK' -Version ([string]$sdkLines[0]) -Path $candidate
             return
         }
     }
 
-    Add-ToolchainCheck -Name '.NET SDK' -Tier 'Required' -Status 'FAIL' -Path ($candidates -join '; ') -Details 'dotnet exists, but no SDK is available.'
+    Add-ToolchainCheck -Name '.NET SDK' -Tier $Tier -Status 'FAIL' -Path ($candidates -join '; ') -Details 'dotnet exists, but no SDK is available.'
 }
 
 function Test-PowerPointCom {
@@ -219,7 +229,7 @@ function Test-PowerPointCom {
             } catch {
                 # Release below is still useful even if PowerPoint refuses Quit.
             }
-            [System.Runtime.InteropServices.Marshal]::ReleaseComObject($pp) | Out-Null
+            Release-ComObjectSafe -ComObject $pp
         }
     }
 }
@@ -260,10 +270,11 @@ Test-PowerPointCom
 
 $nodePath = Resolve-CommandPath 'node'
 if ([string]::IsNullOrWhiteSpace($nodePath)) {
-    Add-ToolchainCheck -Name 'Node.js' -Tier 'Required' -Status 'MISSING' -Details 'MathJax SVG rendering and sharp/libvips media optimization require Node.js.'
+    Add-ToolchainCheck -Name 'Node.js' -Tier $nodeTier -Status 'MISSING' -Details 'MathJax SVG rendering and sharp/libvips media optimization require Node.js.'
 } else {
     $nodeVersion = Invoke-VersionProbe -FilePath $nodePath -Arguments @('--version')
-    Add-ToolchainCheck -Name 'Node.js' -Tier 'Required' -Status 'OK' -Version $nodeVersion.Text -Path $nodePath
+    $nodeStatus = if ($nodeVersion.ExitCode -eq 0) { 'OK' } else { 'FAIL' }
+    Add-ToolchainCheck -Name 'Node.js' -Tier $nodeTier -Status $nodeStatus -Version $nodeVersion.Text -Path $nodePath
 }
 
 $npmPath = Resolve-CommandPath 'npm'
@@ -271,11 +282,12 @@ if ([string]::IsNullOrWhiteSpace($npmPath)) {
     Add-ToolchainCheck -Name 'npm' -Tier 'Recommended' -Status 'MISSING' -Details 'Needed only when restoring node_modules.'
 } else {
     $npmVersion = Invoke-VersionProbe -FilePath $npmPath -Arguments @('--version')
-    Add-ToolchainCheck -Name 'npm' -Tier 'Recommended' -Status 'OK' -Version $npmVersion.Text -Path $npmPath
+    $npmStatus = if ($npmVersion.ExitCode -eq 0) { 'OK' } else { 'FAIL' }
+    Add-ToolchainCheck -Name 'npm' -Tier 'Recommended' -Status $npmStatus -Version $npmVersion.Text -Path $npmPath
 }
 
-Test-NodePackage -PackageName '@mathjax/src' -RelativePackageJson 'node_modules\@mathjax\src\package.json' -Tier 'Required' | Out-Null
-Test-NodePackage -PackageName 'sharp' -RelativePackageJson 'node_modules\sharp\package.json' -Tier 'Required' | Out-Null
+Test-NodePackage -PackageName '@mathjax/src' -RelativePackageJson 'node_modules\@mathjax\src\package.json' -Tier $mathJaxTier | Out-Null
+Test-NodePackage -PackageName 'sharp' -RelativePackageJson 'node_modules\sharp\package.json' -Tier $sharpTier | Out-Null
 
 if ($Deep -and -not [string]::IsNullOrWhiteSpace($nodePath)) {
     $svgOut = Join-Path ([System.IO.Path]::GetTempPath()) ("physics-ppt-toolchain-" + [guid]::NewGuid().ToString('N') + ".svg")
@@ -299,7 +311,7 @@ if ($Deep -and -not [string]::IsNullOrWhiteSpace($nodePath)) {
     }
 }
 
-Test-DotNetSdk
+Test-DotNetSdk -Tier $dotNetTier
 
 # Recommended and optional portable tools.
 Test-VendoredExecutable -Name 'oxipng portable' -Tier 'Recommended' -RelativePath 'tools\vendor\oxipng-10.1.1\oxipng-10.1.1-x86_64-pc-windows-msvc\oxipng.exe' -VersionArguments @('--version')
@@ -354,6 +366,9 @@ if ($AsJson) {
         deep = [bool]$Deep
         launchPowerPoint = [bool]$LaunchPowerPoint
         strict = [bool]$Strict
+        requireFormulaValidator = [bool]$RequireFormulaValidator
+        requireFormulaSvg = [bool]$RequireFormulaSvg
+        requireMediaOptimization = [bool]$RequireMediaOptimization
         requiredFailureCount = $requiredFailures.Count
         strictFailureCount = $strictFailures.Count
         checks = $ordered
@@ -365,5 +380,5 @@ if ($AsJson) {
 }
 
 if ($requiredFailures.Count -gt 0 -or ($Strict -and $strictFailures.Count -gt 0)) {
-    exit 1
+    throw "Toolchain check failed: required=$($requiredFailures.Count), strict=$($strictFailures.Count)."
 }

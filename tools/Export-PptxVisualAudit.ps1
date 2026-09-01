@@ -51,6 +51,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+. (Join-Path $PSScriptRoot 'PhysicsPpt.Common.ps1')
+
 $script:MsoTrue = -1
 $script:MsoFalse = 0
 $script:MsoGroup = 6
@@ -91,13 +93,6 @@ function Add-AuditRow {
         Severity = $Severity
         Details = $Details
     }) | Out-Null
-}
-
-function Write-Utf8BomCsv {
-    param([object[]]$Rows, [string]$Path)
-    $utf8Bom = New-Object System.Text.UTF8Encoding($true)
-    $csvLines = $Rows | ConvertTo-Csv -NoTypeInformation
-    [System.IO.File]::WriteAllLines($Path, $csvLines, $utf8Bom)
 }
 
 function Get-ShapeText {
@@ -213,7 +208,10 @@ function Get-ImageVisualMetrics {
         $whitePercent = if ($total -gt 0) { [Math]::Round(($nearWhite / [double]$total) * 100, 2) } else { 0 }
         $nonWhitePercent = if ($total -gt 0) { [Math]::Round(($nonWhite / [double]$total) * 100, 2) } else { 0 }
         $darkPercent = if ($total -gt 0) { [Math]::Round(($dark / [double]$total) * 100, 2) } else { 0 }
-        $touchMargin = [int][Math]::Round([Math]::Min($image.Width, $image.Height) * 0.015)
+        # Use a conservative floor so content exactly at the 1.5% boundary is
+        # not promoted to an edge warning by midpoint rounding (e.g. y=14 on
+        # a 900px render). Actual clipping remains covered by shape bounds.
+        $touchMargin = [int][Math]::Floor([Math]::Min($image.Width, $image.Height) * 0.015)
         $touchesEdge = $false
         if ($nonWhite -gt 0) {
             $touchesEdge = ($minX -le $touchMargin -or $minY -le $touchMargin -or ($image.Width - $maxX) -le $touchMargin -or ($image.Height - $maxY) -le $touchMargin)
@@ -444,11 +442,11 @@ try {
 } finally {
     if ($null -ne $pres) {
         try { $pres.Close() | Out-Null } catch { }
-        [System.Runtime.InteropServices.Marshal]::ReleaseComObject($pres) | Out-Null
+        Release-ComObjectSafe -ComObject $pres
     }
     if ($null -ne $pp) {
         try { $pp.Quit() | Out-Null } catch { }
-        [System.Runtime.InteropServices.Marshal]::ReleaseComObject($pp) | Out-Null
+        Release-ComObjectSafe -ComObject $pp
     }
     [System.GC]::Collect()
     [System.GC]::WaitForPendingFinalizers()

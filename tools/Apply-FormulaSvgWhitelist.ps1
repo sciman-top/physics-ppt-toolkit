@@ -49,30 +49,10 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+. (Join-Path $PSScriptRoot 'PhysicsPpt.Common.ps1')
+
 $script:MsoTrue = -1
 $script:MsoFalse = 0
-
-function Convert-ToSafePathSegment {
-    param([string]$Name)
-    $safe = $Name
-    foreach ($ch in [System.IO.Path]::GetInvalidFileNameChars()) {
-        $safe = $safe.Replace([string]$ch, '_')
-    }
-    $safe = $safe -replace '\s+', '_'
-    $safe = $safe -replace '[^\p{L}\p{Nd}_-]+', '_'
-    $safe = $safe.Trim('_')
-    if ([string]::IsNullOrWhiteSpace($safe)) { return 'formula' }
-    return $safe
-}
-
-function Get-FormulaDetailValue {
-    param([string]$Details, [string]$Key)
-    if ([string]::IsNullOrWhiteSpace($Details)) { return '' }
-    $pattern = '(?:^|;\s*)' + [regex]::Escape($Key) + '=(.*?)(?=;\s*\w+=|$)'
-    $match = [regex]::Match($Details, $pattern)
-    if (-not $match.Success) { return '' }
-    return $match.Groups[1].Value.Trim()
-}
 
 function Get-ShapeText {
     param($Shape)
@@ -82,12 +62,6 @@ function Get-ShapeText {
         }
     } catch { }
     return ''
-}
-
-function Get-NormalizedFormulaText {
-    param([string]$Text)
-    if ([string]::IsNullOrWhiteSpace($Text)) { return '' }
-    return (($Text -replace '\s+', '') -replace '＝', '=').Trim()
 }
 
 function Find-MatchingShape {
@@ -192,7 +166,7 @@ try {
             continue
         }
 
-        $svgName = 'slide-{0:000}-{1}.svg' -f $slideNo, (Convert-ToSafePathSegment -Name $shapeName)
+        $svgName = 'slide-{0:000}-{1}.svg' -f $slideNo, (Convert-ToSafeFormulaPathSegment -Name $shapeName)
         $svgPath = Join-Path $SvgOutputDir $svgName
         $renderArgs = @($renderer, '--tex', $tex, '--out', $svgPath)
         $renderOutput = & $NodeExe @renderArgs 2>&1
@@ -214,7 +188,7 @@ try {
             $width = [single]$shape.Width
             $height = [single]$shape.Height
             $inserted = $slide.Shapes.AddPicture($svgPath, $script:MsoFalse, $script:MsoTrue, $left, $top, $width, $height)
-            $inserted.Name = 'FormulaSvg_' + (Convert-ToSafePathSegment -Name $shapeName)
+            $inserted.Name = 'FormulaSvg_' + (Convert-ToSafeFormulaPathSegment -Name $shapeName)
             $shape.Visible = $script:MsoFalse
             Add-ReportRow -Rows $rows -File $row.File -Slide $slideNo -Shape $shapeName -Issue 'FormulaSvgInserted' -Details ("tex={0}; svg={1}; original hidden." -f $tex, $svgPath)
         } catch {
@@ -227,11 +201,11 @@ try {
 } finally {
     if ($null -ne $pres) {
         try { $pres.Close() | Out-Null } catch { }
-        [System.Runtime.InteropServices.Marshal]::ReleaseComObject($pres) | Out-Null
+        Release-ComObjectSafe -ComObject $pres
     }
     if ($null -ne $pp) {
         try { $pp.Quit() | Out-Null } catch { }
-        [System.Runtime.InteropServices.Marshal]::ReleaseComObject($pp) | Out-Null
+        Release-ComObjectSafe -ComObject $pp
     }
     [System.GC]::Collect()
     [System.GC]::WaitForPendingFinalizers()

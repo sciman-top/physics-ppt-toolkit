@@ -56,35 +56,6 @@ $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'PhysicsPpt.Common.ps1')
 
-function Get-PptxFiles {
-    param([string]$Path, [string]$Pattern, [switch]$Recurse)
-    if (-not (Test-Path -LiteralPath $Path)) { throw "InputPath not found: $Path" }
-    $item = Get-Item -LiteralPath $Path
-    if ($item.PSIsContainer) {
-        $opt = @{ LiteralPath = $item.FullName; Filter = $Pattern; File = $true }
-        if ($Recurse) { $opt.Recurse = $true }
-        return @(Get-ChildItem @opt | Where-Object { $_.Name -notlike '~$*' })
-    }
-    if ($item.Extension -ne '.pptx') { throw "Only .pptx files are supported: $($item.FullName)" }
-    return @($item)
-}
-
-function Get-BasicImageInfo {
-    param([string]$Path)
-    Add-Type -AssemblyName System.Drawing
-    $image = $null
-    try {
-        $image = [System.Drawing.Image]::FromFile($Path)
-        return [pscustomobject]@{
-            Width = [int]$image.Width
-            Height = [int]$image.Height
-            Bytes = [int64](Get-Item -LiteralPath $Path).Length
-        }
-    } finally {
-        if ($null -ne $image) { $image.Dispose() }
-    }
-}
-
 function Get-ReplacementPath {
     param([object]$Row)
 
@@ -152,7 +123,7 @@ function Apply-ReplacementsToPresentation {
 
     try {
         New-Item -ItemType Directory -Path $workRoot -Force | Out-Null
-        [System.IO.Compression.ZipFile]::ExtractToDirectory($File.FullName, $workRoot)
+        Expand-PptxPackageSafely -PptxPath $File.FullName -DestinationDir $workRoot
         $videoPosterMap = Get-VideoPosterImageMap -PptxFile $File
 
         foreach ($row in $Rows) {
@@ -222,7 +193,7 @@ function Apply-ReplacementsToPresentation {
         }
     }
 
-    $reportRows | Export-Csv -LiteralPath $reportPath -NoTypeInformation -Encoding UTF8
+    Write-Utf8BomCsv -InputObject $reportRows.ToArray() -Path $reportPath
     $replacedRows = @($reportRows | Where-Object { $_.Action -eq 'Replaced' })
     $savedBytes = 0
     if ($replacedRows.Count -gt 0) {
@@ -264,7 +235,7 @@ foreach ($row in $probeRows) {
     $rowsByDeck[$deck].Add($row) | Out-Null
 }
 
-$files = @(Get-PptxFiles -Path $InputPath -Pattern $FilePattern -Recurse:$Recurse)
+$files = @(Get-PresentationFiles -Path $InputPath -Pattern $FilePattern -Recurse:$Recurse -SupportedExtensions @('.pptx') -ExcludedRoots @($OutputDir))
 foreach ($file in $files) {
     if (-not $rowsByDeck.ContainsKey($file.Name)) { continue }
     Write-Host "Applying image enhancements: $($file.Name)"

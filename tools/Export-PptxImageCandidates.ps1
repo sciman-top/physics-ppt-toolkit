@@ -69,30 +69,6 @@ $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'PhysicsPpt.Common.ps1')
 
-function Get-PptxFiles {
-    param([string]$Path, [string]$Pattern, [switch]$Recurse)
-    if (-not (Test-Path -LiteralPath $Path)) { throw "InputPath not found: $Path" }
-    $item = Get-Item -LiteralPath $Path
-    if ($item.PSIsContainer) {
-        $opt = @{ LiteralPath = $item.FullName; Filter = $Pattern; File = $true }
-        if ($Recurse) { $opt.Recurse = $true }
-        return @(Get-ChildItem @opt | Where-Object { $_.Name -notlike '~$*' })
-    }
-    if ($item.Extension -ne '.pptx') { throw "Only .pptx files are supported: $($item.FullName)" }
-    return @($item)
-}
-
-function Convert-ToSafePathSegment {
-    param([string]$Name)
-    $safe = $Name
-    foreach ($ch in [System.IO.Path]::GetInvalidFileNameChars()) {
-        $safe = $safe.Replace([string]$ch, '_')
-    }
-    $safe = $safe.Trim()
-    if ([string]::IsNullOrWhiteSpace($safe)) { return 'presentation' }
-    return $safe
-}
-
 function Get-SlideMediaMap {
     param([System.IO.FileInfo]$PptxFile)
 
@@ -443,7 +419,7 @@ function Scan-PresentationImages {
     Add-Type -AssemblyName System.Drawing
 
     $rows = New-Object System.Collections.Generic.List[object]
-    $safeDeck = Convert-ToSafePathSegment -Name ([System.IO.Path]::GetFileNameWithoutExtension($File.Name))
+    $safeDeck = Convert-ToSafeFileNameSegment -Name ([System.IO.Path]::GetFileNameWithoutExtension($File.Name))
     $extractDir = Join-Path $OutputDir 'candidate-images'
     if ($ExportCandidates -and -not (Test-Path -LiteralPath $extractDir)) {
         New-Item -ItemType Directory -Path $extractDir -Force | Out-Null
@@ -452,7 +428,7 @@ function Scan-PresentationImages {
     $workRoot = Join-Path $OutputDir ('_candidate_scan_' + [Guid]::NewGuid().ToString('N'))
     try {
         New-Item -ItemType Directory -Path $workRoot -Force | Out-Null
-        [System.IO.Compression.ZipFile]::ExtractToDirectory($File.FullName, $workRoot)
+        Expand-PptxPackageSafely -PptxPath $File.FullName -DestinationDir $workRoot
         $slideMap = Get-SlideMediaMap -PptxFile $File
         $videoPosterMap = Get-VideoPosterImageMap -PptxFile $File
         $mediaRoot = Join-Path $workRoot 'ppt\media'
@@ -500,7 +476,7 @@ function Scan-PresentationImages {
                 }
                 $extractedPath = ''
                 if ($ExportCandidates -and $assessment.EnhancementCandidate) {
-                    $outName = Convert-ToSafePathSegment -Name ($safeDeck + '__' + $media.Name)
+                    $outName = Convert-ToSafeFileNameSegment -Name ($safeDeck + '__' + $media.Name)
                     $extractedPath = Join-Path $extractDir $outName
                     Copy-Item -LiteralPath $media.FullName -Destination $extractedPath -Force
                 }
@@ -571,7 +547,7 @@ $InputPath = [System.IO.Path]::GetFullPath($InputPath)
 $OutputDir = [System.IO.Path]::GetFullPath($OutputDir)
 if (-not (Test-Path -LiteralPath $OutputDir)) { New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null }
 
-$files = @(Get-PptxFiles -Path $InputPath -Pattern $FilePattern -Recurse:$Recurse)
+$files = @(Get-PresentationFiles -Path $InputPath -Pattern $FilePattern -Recurse:$Recurse -SupportedExtensions @('.pptx') -ExcludedRoots @($OutputDir))
 if ($files.Count -eq 0) { throw "No PPTX files found in $InputPath" }
 
 $allRows = New-Object System.Collections.Generic.List[object]
@@ -588,7 +564,7 @@ $manifestPath = Join-Path $OutputDir 'pptx-image-candidates-manifest.json'
 $contactSheetPath = Join-Path $OutputDir 'pptx-image-candidates.contact-sheet.png'
 
 $allRows | Sort-Object Deck, @{ Expression = 'EnhancementCandidate'; Descending = $true }, @{ Expression = 'PhotoScore'; Descending = $true }, MediaPath |
-    Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
+    Write-Utf8BomCsv -InputObject $rows.ToArray() -Path $csvPath
 $allRows | Sort-Object Deck, @{ Expression = 'EnhancementCandidate'; Descending = $true }, @{ Expression = 'PhotoScore'; Descending = $true }, MediaPath |
     ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $jsonPath -Encoding UTF8
 

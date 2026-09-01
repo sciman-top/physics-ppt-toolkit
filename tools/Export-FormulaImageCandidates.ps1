@@ -42,6 +42,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+. (Join-Path $PSScriptRoot 'PhysicsPpt.Common.ps1')
+
 function Convert-ToSafePathSegment {
     param([string]$Name)
     $safe = $Name
@@ -354,7 +356,7 @@ $manifestPath = Join-Path $OutputDir 'formula-image-candidates-manifest.json'
 $contactSheetPath = Join-Path $OutputDir 'formula-image-candidates.contact-sheet.png'
 
 $sorted = @($rows | Sort-Object @{ Expression = 'FormulaImageCandidate'; Descending = $true }, @{ Expression = 'FormulaImageScore'; Descending = $true }, Deck, MediaPath)
-$sorted | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
+Write-Utf8BomCsv -InputObject $sorted -Path $csvPath
 $sorted | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $jsonPath -Encoding UTF8
 
 $contactSheetCreated = $false

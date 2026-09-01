@@ -32,6 +32,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+. (Join-Path $PSScriptRoot 'PhysicsPpt.Common.ps1')
+
 $script:NsA14 = 'http://schemas.microsoft.com/office/drawing/2010/main'
 $script:NsA = 'http://schemas.openxmlformats.org/drawingml/2006/main'
 $script:NsM = 'http://schemas.openxmlformats.org/officeDocument/2006/math'
@@ -48,42 +50,6 @@ if (Test-Path -LiteralPath $configPath) {
     } catch {
         Write-Warning "Formula config could not be loaded: $($_.Exception.Message)"
     }
-}
-
-function Convert-ToSafePathSegment {
-    param([string]$Name)
-    $safe = $Name
-    foreach ($ch in [System.IO.Path]::GetInvalidFileNameChars()) {
-        $safe = $safe.Replace([string]$ch, '_')
-    }
-    $safe = $safe -replace '\s+', '_'
-    $safe = $safe -replace '[^\p{L}\p{Nd}_-]+', '_'
-    $safe = $safe.Trim('_')
-    if ([string]::IsNullOrWhiteSpace($safe)) { return 'formula' }
-    return $safe
-}
-
-function Get-FormulaDetailValue {
-    param([string]$Details, [string]$Key)
-    if ([string]::IsNullOrWhiteSpace($Details)) { return '' }
-    $pattern = '(?:^|;\s*)' + [regex]::Escape($Key) + '=(.*?)(?=;\s*\w+=|$)'
-    $match = [regex]::Match($Details, $pattern)
-    if (-not $match.Success) { return '' }
-    return $match.Groups[1].Value.Trim()
-}
-
-function Get-NormalizedFormulaText {
-    param([string]$Text)
-    if ([string]::IsNullOrWhiteSpace($Text)) { return '' }
-    return (($Text -replace '\s+', '') -replace '＝', '=').Trim()
-}
-
-function Get-FormulaRuleValue {
-    param($Rule, [string]$Name, [string]$Default = '')
-    if ($null -eq $Rule) { return $Default }
-    $prop = $Rule.PSObject.Properties[$Name]
-    if ($null -eq $prop -or $null -eq $prop.Value) { return $Default }
-    return [string]$prop.Value
 }
 
 function Get-CurrentWhitelistRule {
@@ -390,12 +356,6 @@ function Convert-XmlDocumentToString {
     return $builder.ToString()
 }
 
-function Write-Utf8BomText {
-    param([string]$Path, [string]$Text)
-    $utf8Bom = New-Object System.Text.UTF8Encoding($true)
-    [System.IO.File]::WriteAllText($Path, $Text, $utf8Bom)
-}
-
 $FormulaReviewCsv = [System.IO.Path]::GetFullPath($FormulaReviewCsv)
 $OutputDir = [System.IO.Path]::GetFullPath($OutputDir)
 if (-not (Test-Path -LiteralPath $FormulaReviewCsv)) { throw "FormulaReviewCsv not found: $FormulaReviewCsv" }
@@ -423,13 +383,13 @@ for ($i = 0; $i -lt $reviewRows.Count; $i++) {
         $targetTex = Get-FormulaRuleValue -Rule $currentRule -Name 'targetTex' -Default $targetTex
     }
     $fileStem = if ($null -ne $row.PSObject.Properties['FileRelativePath'] -and -not [string]::IsNullOrWhiteSpace([string]$row.FileRelativePath)) {
-        Convert-ToSafePathSegment -Name ([string]$row.FileRelativePath -replace '[\\/]', '__')
+        Convert-ToSafeFormulaPathSegment -Name ([string]$row.FileRelativePath -replace '[\\/]', '__')
     } elseif ($null -ne $row.PSObject.Properties['FilePath'] -and -not [string]::IsNullOrWhiteSpace([string]$row.FilePath)) {
-        Convert-ToSafePathSegment -Name ([System.IO.Path]::GetFileNameWithoutExtension([string]$row.FilePath))
+        Convert-ToSafeFormulaPathSegment -Name ([System.IO.Path]::GetFileNameWithoutExtension([string]$row.FilePath))
     } else {
-        Convert-ToSafePathSegment -Name ([string]$row.File)
+        Convert-ToSafeFormulaPathSegment -Name ([string]$row.File)
     }
-    $baseName = '{0:000}_{1}_slide-{2:000}_{3}_{4}' -f ($i + 1), $fileStem, ([int]$row.Slide), (Convert-ToSafePathSegment -Name ([string]$row.Shape)), (Convert-ToSafePathSegment -Name $name)
+    $baseName = '{0:000}_{1}_slide-{2:000}_{3}_{4}' -f ($i + 1), $fileStem, ([int]$row.Slide), (Convert-ToSafeFormulaPathSegment -Name ([string]$row.Shape)), (Convert-ToSafeFormulaPathSegment -Name $name)
     $ommlPath = Join-Path $fragmentDir ($baseName + '.omml.xml')
     $mathMlPath = Join-Path $fragmentDir ($baseName + '.mathml.xml')
 
@@ -471,7 +431,7 @@ $csvPath = Join-Path $OutputDir 'formula-omml-candidates.csv'
 $jsonPath = Join-Path $OutputDir 'formula-omml-candidates.json'
 $manifestPath = Join-Path $OutputDir 'formula-omml-candidates-manifest.json'
 
-$results | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
+Write-Utf8BomCsv -InputObject $results.ToArray() -Path $csvPath
 $results | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $jsonPath -Encoding UTF8
 
 $manifest = [pscustomobject]@{

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "invariant-comparison.schema.json",
+  "title": "Physics PPT invariant comparison",
+  "type": "object",
+  "required": ["schemaVersion", "before", "after", "passed", "blockerCount", "allowedChangeCount", "differences"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "before": { "type": "string" },
+    "after": { "type": "string" },
+    "passed": { "type": "boolean" },
+    "blockerCount": { "type": "integer", "minimum": 0 },
+    "allowedChangeCount": { "type": "integer", "minimum": 0 },
+    "differences": { "type": "array" }
+  },
+  "additionalProperties": true
+}

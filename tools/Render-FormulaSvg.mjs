@@ -53,6 +53,12 @@ Options:
 `);
 }
 
+function assertPositiveFinite(value, name) {
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`${name} must be a positive finite number.`);
+  }
+}
+
 async function ensureOutputDir(outputPath) {
   const dir = path.dirname(path.resolve(outputPath));
   await fs.mkdir(dir, { recursive: true });
@@ -104,6 +110,8 @@ try {
   if (!args.out.trim()) {
     throw new Error('Missing --out.');
   }
+  assertPositiveFinite(args.em, '--em');
+  assertPositiveFinite(args.widthEm, '--width-em');
 
   const svg = await texToSvg(args.tex, args);
   await ensureOutputDir(args.out);

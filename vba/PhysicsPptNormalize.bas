@@ -21,7 +21,11 @@ Public Sub NormalizeCurrentPresentation()
 
     For Each sld In pres.Slides
         isVideo = IsVideoSlide(sld)
-        SetSlideBackground sld, isVideo
+        If NORMALIZE_SLIDE_BACKGROUND Then
+            SetSlideBackground sld, isVideo
+        Else
+            report.Add CsvLine(pres.Name, CStr(sld.SlideIndex), "(slide)", "SlideBackgroundCandidate", "Background preserved by default; enable NORMALIZE_SLIDE_BACKGROUND only after visual review.")
+        End If
         report.Add CsvLine(pres.Name, CStr(sld.SlideIndex), "(slide)", "SlideType", IIf(isVideo, "VideoOrMediaCandidate", "Normal"))
 
         For Each shp In sld.Shapes

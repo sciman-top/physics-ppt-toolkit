@@ -25,18 +25,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-function Write-Utf8BomCsv {
-    param([object[]]$Rows, [string]$Path)
-    $utf8Bom = New-Object System.Text.UTF8Encoding($true)
-    $csvLines = $Rows | ConvertTo-Csv -NoTypeInformation
-    [System.IO.File]::WriteAllLines($Path, $csvLines, $utf8Bom)
-}
-
-function Write-Utf8BomText {
-    param([string]$Text, [string]$Path)
-    $utf8Bom = New-Object System.Text.UTF8Encoding($true)
-    [System.IO.File]::WriteAllText($Path, $Text, $utf8Bom)
-}
+. (Join-Path $PSScriptRoot 'PhysicsPpt.Common.ps1')
 
 function Normalize-FormulaSource {
     param([string]$Text)

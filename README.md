@@ -8,6 +8,8 @@ A Windows toolkit for normalizing, auditing, and exporting junior-high physics P
 
 核心原则：**只统一样式，不修改教学内容和对象位置。**
 
+产品边界、默认样式、目标架构、分阶段路线图和 AI 编码任务清单统一维护在 [`docs/产品需求与工程路线图.md`](docs/产品需求与工程路线图.md)。该文档是默认主线的单一事实源；公式、OCR、媒体和 AI 清晰化仅保留为非默认实验能力。
+
 ---
 
 ## 目录结构
@@ -23,11 +25,18 @@ physics-ppt-toolkit/
 │  ├─ 自动化边界与风险控制.md
 │  └─ 公式处理说明.md
 ├─ config/
-│  └─ physics-ppt-style.config.json
+│  ├─ physics-ppt-style.config.json
+│  ├─ presentation-snapshot.schema.json
+│  └─ invariant-comparison.schema.json
 ├─ tools/
 │  ├─ Normalize-PhysicsPpt.ps1
 │  ├─ Report-PhysicsPptStyle.ps1
 │  ├─ Invoke-PhysicsPptWorkflow.ps1
+│  ├─ Export-PptxInvariantSnapshot.ps1
+│  ├─ Compare-PptxInvariantSnapshot.ps1
+│  ├─ Export-PptxAiReviewPacket.ps1
+│  ├─ Build-PptxAiReviewResult.ps1
+│  ├─ Import-PptxAiReviewResult.ps1
 │  └─ Test-ToolkitFiles.ps1
 ├─ vba/
 │  ├─ PhysicsPptCommon.bas
@@ -77,6 +86,7 @@ _physics_ppt_output_yyyyMMdd_HHmmss/
 ├─ 01_规范化PPTX/
 ├─ 02_导出PDF/
 ├─ 03_原始备份/
+├─ 16_不可变快照/
 ├─ summary.md
 └─ review-manifest.json
 ```
@@ -96,15 +106,28 @@ _physics_ppt_output_yyyyMMdd_HHmmss/
 # 需要详细视觉复核产物时，再额外生成页面图片、总览图和复核索引
 .\tools\Invoke-PhysicsPptWorkflow.ps1 -InputPath "D:\课件\原始PPT" -Recurse -Mode NormalizeAndPdf -IncludeReviewArtifacts
 
+# 准备宿主 AI 的只读逐页视觉审查包；不写回 PPTX
+.\tools\Invoke-PhysicsPptWorkflow.ps1 -InputPath "D:\课件\原始PPT" -Recurse -Mode NormalizeAndPdf -PrepareAiVisualReview
+
+# 宿主 AI 审查后，验证结果 JSON 并写入 manifest；Blocked 会明确标记为不可交付
+.\tools\Import-PptxAiReviewResult.ps1 -ManifestPath "D:\课件\输出\review-manifest.json" -ResultPath "D:\课件\输出\ai-visual-review-result.json"
+
 # 增强一键：白名单公式转可编辑 OfficeMath/OMML，并做 Open XML 结构校验
 .\tools\Invoke-PhysicsPptWorkflow.ps1 -InputPath "D:\课件\原始PPT" -Recurse -Mode NormalizeAndPdf -SkipPreflightReport -ApplyFormulaOmmlWhitelist
 
 # 深度视觉审查：需要逐页 PNG、自动确认和低风险修复副本时再开启
 .\tools\Invoke-PhysicsPptWorkflow.ps1 -InputPath "D:\课件\原始PPT" -Recurse -Mode NormalizeAndPdf -IncludeReviewArtifacts -IncludeVisualAudit -ApplyVisualAuditFixes -ApplyFormulaOmmlWhitelist -FormulaOmmlVisualAudit
 
+# 可选防误触模式：仅在明确需要时关闭鼠标单击换片
+.\tools\Invoke-PhysicsPptWorkflow.ps1 -InputPath "D:\课件\原始PPT" -Recurse -Mode NormalizeAndPdf -DisableAdvanceOnClick
+
 # 忽略已有输出，重新处理
 .\tools\Invoke-PhysicsPptWorkflow.ps1 -InputPath "D:\课件\原始PPT" -Recurse -Mode ForceRebuild
 ```
+
+依赖按功能启用：默认规范化/检查只需要 PowerPoint；启用 `-ApplyFormulaOmmlWhitelist` 时才强制要求 .NET 验证器；MathJax SVG 与 sharp 媒体优化仅在对应功能使用时需要。可用 `tools\Assert-Toolchain.ps1 -Deep` 检查推荐组件，使用 `-RequireFormulaValidator`、`-RequireFormulaSvg` 或 `-RequireMediaOptimization` 将指定功能提升为必需门禁。
+
+批量递归输入会自动排除临时 `~$` 文件、工作流输出目录和历史 `_physics_ppt_output_yyyyMMdd_HHmmss` 目录，避免重复处理生成文件。所有 CSV 报告统一写入 UTF-8 BOM，兼容 Windows PowerShell 5.1、PowerShell 7 和 Excel。
 
 ---
 
@@ -125,6 +148,9 @@ VBA 宏是独立的离线方案，不读取 JSON 配置。如需调整，请手�
 - 脚本不会移动对象。
 - 脚本不会裁剪图片。
 - 脚本不会修改动画顺序。
+- 默认保留“单击鼠标时移至下一页幻灯片”的讲授行为；仅使用 `-DisableAdvanceOnClick` 时才逐页关闭，且不改变其他切换和计时属性。
+- 每次规范化都会比较前后页面、文本、对象几何、动画、切换、关系和媒体摘要；除显式启用的 `AdvanceOnClick: true -> false` 外的差异均为阻断项。
+- `-PrepareAiVisualReview` 只导出配对页面图与请求包。AI 结果仅能更新报告门禁，不能访问或写回 PPTX。
 - 公式转换默认不启用；低风险独立文本公式只做样式归一和候选报告。
 - 启用 `-ApplyFormulaOmmlWhitelist` 时，只转换白名单精确匹配公式，并默认要求 Open XML 校验通过；逐页视觉审查和视觉自动确认需额外使用 `-FormulaOmmlVisualAudit`。
 
@@ -134,7 +160,7 @@ VBA 宏是独立的离线方案，不读取 JSON 配置。如需调整，请手�
 
 - 批量统一标题、正文、表格、重点框样式。
 - 批量设置普通页白底、视频页黑底。
-- 批量检查小字号、疑似公式、非规范字体。
+- 批量检查小字号、疑似公式、非规范字体、配置字体回退风险和非 16:9 画布。
 - 对既有 PPT 进行低风险视觉规范化。
 
 ---

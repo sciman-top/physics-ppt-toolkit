@@ -35,7 +35,12 @@ $required = @(
     'docs\公式排版优化路线图.md',
     'docs\编码与兼容性规范.md',
     'docs\媒体优化路线图.md',
+    'docs\产品需求与工程路线图.md',
+    'manual\physics-ppt-visual-review\SKILL.md',
+    'manual\physics-ppt-visual-review\references\review-result.schema.json',
     'config\physics-ppt-style.config.json',
+    'config\presentation-snapshot.schema.json',
+    'config\invariant-comparison.schema.json',
     'tools\Normalize-PhysicsPpt.ps1',
     'tools\Apply-FormulaSvgWhitelist.ps1',
     'tools\Export-FormulaOmmlCandidates.ps1',
@@ -61,6 +66,12 @@ $required = @(
     'tools\Apply-PptxImageEnhancement.ps1',
     'tools\Render-FormulaSvg.mjs',
     'tools\Export-PptxExternalLinks.ps1',
+    'tools\Export-PptxInvariantSnapshot.ps1',
+    'tools\Compare-PptxInvariantSnapshot.ps1',
+    'tools\Export-PptxAiReviewPacket.ps1',
+    'tools\Import-PptxAiReviewResult.ps1',
+    'tools\Build-PptxAiReviewResult.ps1',
+    'tools\Test-PhysicsPptPolicy.ps1',
     'vba\PhysicsPptCommon.bas',
     'vba\PhysicsPptNormalize.bas',
     'vba\PhysicsPptReportOnly.bas',
@@ -81,31 +92,114 @@ foreach ($rel in $required) {
 $configPath = Join-Path $root 'config\physics-ppt-style.config.json'
 $config = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
 
-$requiredSections = @('fonts', 'fontSizes', 'colors', 'formulaWhitelist', 'rules')
+if ($config.schemaVersion -ne 1) { throw "Unsupported config schemaVersion: $($config.schemaVersion)" }
+
+$requiredSections = @('fonts', 'fontSizes', 'colors', 'styleRules', 'formulaWhitelist', 'rules')
 foreach ($section in $requiredSections) {
     if ($null -eq $config.$section) { throw "Config missing required section: $section" }
 }
 
-$requiredFontFields = @('chinese', 'latin', 'math')
+$requiredFontFields = @('chinese', 'compactChinese', 'latin', 'math')
 foreach ($field in $requiredFontFields) {
     if ([string]::IsNullOrWhiteSpace($config.fonts.$field)) { throw "Config fonts.$field is missing or empty" }
 }
 
-$requiredSizeFields = @('title1', 'body', 'minimum', 'tableHeader', 'tableBody', 'formulaInline', 'formulaStandalone', 'formulaCore')
+$requiredSizeFields = @('title1', 'sectionTitle', 'title2', 'body', 'auxiliary', 'minimum', 'tableHeader', 'tableBody', 'formulaInline', 'formulaStandalone', 'formulaCore', 'footer')
 foreach ($field in $requiredSizeFields) {
-    if ($null -eq $config.fontSizes.$field) { throw "Config fontSizes.$field is missing" }
+    if ($null -eq $config.fontSizes.$field -or $config.fontSizes.$field -isnot [ValueType] -or [double]$config.fontSizes.$field -ne [math]::Floor([double]$config.fontSizes.$field) -or $config.fontSizes.$field -lt 8 -or $config.fontSizes.$field -gt 96) { throw "Config fontSizes.$field must be an integer between 8 and 96" }
 }
+if ($config.fontSizes.minimum -gt $config.fontSizes.body) { throw 'Config fontSizes.minimum must not exceed body.' }
 
 # Validate color values are hex strings
-$requiredColorFields = @('white', 'black', 'body', 'emphasisRed', 'formulaBlue', 'yellowFill', 'yellowBorder')
+$requiredColorFields = @('white', 'black', 'body', 'darkGray', 'emphasisRed', 'sectionTitle', 'extensionTitle', 'formulaBlue', 'experimentGreen', 'yellowFill', 'yellowBorder', 'blueFill', 'grayFill', 'videoYellow', 'videoBlue', 'videoRed', 'videoGreen')
 foreach ($field in $requiredColorFields) {
     $val = $config.colors.$field
     if ([string]::IsNullOrWhiteSpace($val)) { throw "Config colors.$field is missing or empty" }
     if ($val -notmatch '^#[0-9A-Fa-f]{6}$') { throw "Config colors.$field is not a valid hex color: $val" }
 }
 
+function Get-RelativeLuminance {
+    param([Parameter(Mandatory = $true)][string]$Hex)
+    $value = $Hex.TrimStart('#')
+    $channels = @(
+        [Convert]::ToInt32($value.Substring(0, 2), 16),
+        [Convert]::ToInt32($value.Substring(2, 2), 16),
+        [Convert]::ToInt32($value.Substring(4, 2), 16)
+    )
+    $linear = New-Object double[] 3
+    for ($i = 0; $i -lt 3; $i++) {
+        $channel = $channels[$i] / 255.0
+        $linear[$i] = if ($channel -le 0.04045) { $channel / 12.92 } else { [Math]::Pow(($channel + 0.055) / 1.055, 2.4) }
+    }
+    return (0.2126 * $linear[0]) + (0.7152 * $linear[1]) + (0.0722 * $linear[2])
+}
+
+function Get-ContrastRatio {
+    param([string]$Foreground, [string]$Background)
+    $foregroundLuminance = Get-RelativeLuminance $Foreground
+    $backgroundLuminance = Get-RelativeLuminance $Background
+    $lighter = [Math]::Max($foregroundLuminance, $backgroundLuminance)
+    $darker = [Math]::Min($foregroundLuminance, $backgroundLuminance)
+    return (($lighter + 0.05) / ($darker + 0.05))
+}
+
+$contrastChecks = @(
+    @{ Name = 'body on white'; Foreground = $config.colors.body; Background = $config.colors.white; Minimum = 7.0 },
+    @{ Name = 'darkGray on white'; Foreground = $config.colors.darkGray; Background = $config.colors.white; Minimum = 7.0 },
+    @{ Name = 'emphasisRed on white'; Foreground = $config.colors.emphasisRed; Background = $config.colors.white; Minimum = 4.5 },
+    @{ Name = 'sectionTitle on white'; Foreground = $config.colors.sectionTitle; Background = $config.colors.white; Minimum = 7.0 },
+    @{ Name = 'extensionTitle on white'; Foreground = $config.colors.extensionTitle; Background = $config.colors.white; Minimum = 7.0 },
+    @{ Name = 'formulaBlue on white'; Foreground = $config.colors.formulaBlue; Background = $config.colors.white; Minimum = 7.0 },
+    @{ Name = 'experimentGreen on white'; Foreground = $config.colors.experimentGreen; Background = $config.colors.white; Minimum = 6.0 },
+    @{ Name = 'formulaBlue on blueFill'; Foreground = $config.colors.formulaBlue; Background = $config.colors.blueFill; Minimum = 4.5 },
+    @{ Name = 'black on yellowFill'; Foreground = $config.colors.black; Background = $config.colors.yellowFill; Minimum = 4.5 },
+    @{ Name = 'emphasisRed on yellowFill'; Foreground = $config.colors.emphasisRed; Background = $config.colors.yellowFill; Minimum = 4.5 },
+    @{ Name = 'videoYellow on black'; Foreground = $config.colors.videoYellow; Background = $config.colors.black; Minimum = 4.5 },
+    @{ Name = 'videoBlue on black'; Foreground = $config.colors.videoBlue; Background = $config.colors.black; Minimum = 4.5 },
+    @{ Name = 'videoRed on black'; Foreground = $config.colors.videoRed; Background = $config.colors.black; Minimum = 4.5 },
+    @{ Name = 'videoGreen on black'; Foreground = $config.colors.videoGreen; Background = $config.colors.black; Minimum = 4.5 }
+)
+foreach ($contrastCheck in $contrastChecks) {
+    $ratio = Get-ContrastRatio -Foreground $contrastCheck.Foreground -Background $contrastCheck.Background
+    if ($ratio -lt [double]$contrastCheck.Minimum) {
+        throw "Color contrast is below the classroom threshold for $($contrastCheck.Name): $([Math]::Round($ratio, 2)):1 < $($contrastCheck.Minimum):1"
+    }
+}
+
 if ($null -eq $config.rules.formulaTextStyleDefault) {
     throw "Config rules.formulaTextStyleDefault is missing"
+}
+foreach ($safetyRule in @('doNotModifyTextContent', 'doNotMoveShapes', 'doNotResizeShapes', 'doNotModifyAnimations', 'doNotModifySlideTransitions', 'doNotCropImages', 'allowTextBoxWidthExpansion', 'disableAdvanceOnClick')) {
+    $safetyProp = $config.rules.PSObject.Properties[$safetyRule]
+    if ($null -eq $safetyProp -or $safetyProp.Value -isnot [bool]) {
+        throw "Config rules.$safetyRule must be a boolean"
+    }
+}
+if ($config.rules.disableAdvanceOnClick) { throw 'Config must preserve advance-on-click by default; use the explicit workflow switch for anti-misclick mode.' }
+if ($config.rules.allowTextBoxWidthExpansion) { throw 'Config must disable text-box width expansion by default.' }
+foreach ($requiredTrueRule in @('doNotModifyTextContent', 'doNotMoveShapes', 'doNotResizeShapes', 'doNotModifyAnimations', 'doNotModifySlideTransitions', 'doNotCropImages')) {
+    if (-not $config.rules.$requiredTrueRule) { throw "Config safety rule must default to true: $requiredTrueRule" }
+}
+
+$styleRules = @($config.styleRules)
+if ($styleRules.Count -lt 3) { throw 'Config styleRules must define the supported low-risk rules.' }
+$ruleIds = @{}
+foreach ($styleRule in $styleRules) {
+    foreach ($field in @('id', 'scope', 'riskLevel')) {
+        if ([string]::IsNullOrWhiteSpace([string]$styleRule.$field)) { throw "Config styleRules entry missing $field" }
+    }
+    if ($styleRule.id -notmatch '^[A-Z]+(\.[A-Z_]+)+$') { throw "Config styleRules id is invalid: $($styleRule.id)" }
+    if ($ruleIds.ContainsKey([string]$styleRule.id)) { throw "Config styleRules contains duplicate id: $($styleRule.id)" }
+    $ruleIds[[string]$styleRule.id] = $true
+    if ($styleRule.enabled -isnot [bool]) { throw "Config styleRules.$($styleRule.id).enabled must be boolean" }
+    if ($styleRule.riskLevel -notin @('R1', 'R2')) { throw "Config styleRules.$($styleRule.id).riskLevel must be R1 or R2" }
+    if (@($styleRule.allowedProperties).Count -eq 0) { throw "Config styleRules.$($styleRule.id).allowedProperties must not be empty" }
+}
+foreach ($requiredStyleRule in @('STYLE.TEXT.FONT', 'STYLE.FORMULA.TEXT', 'STYLE.HIGHLIGHT.TEXT_COLOR', 'STYLE.SECTION_TITLE.EMPHASIS', 'STYLE.DECORATIVE.EFFECTS', 'SLIDE.BACKGROUND', 'SLIDE.TRANSITION.ADVANCE_ON_CLICK')) {
+    if (-not $ruleIds.ContainsKey($requiredStyleRule)) { throw "Config styleRules is missing required rule: $requiredStyleRule" }
+}
+if (($config.styleRules | Where-Object { $_.id -eq 'SLIDE.BACKGROUND' }).enabled) {
+    throw 'Slide background normalization must remain disabled by default until a real visual baseline authorizes it.'
 }
 
 $formulaWhitelist = @($config.formulaWhitelist)
@@ -133,6 +227,20 @@ if ($null -eq $mathJaxDependency -or [string]::IsNullOrWhiteSpace([string]$mathJ
     throw "package.json dependencies.@mathjax/src is missing"
 }
 
+$visualSkillPath = Join-Path $root 'manual\physics-ppt-visual-review\SKILL.md'
+$visualSkill = Get-Content -LiteralPath $visualSkillPath -Raw -Encoding UTF8
+if ($visualSkill -notmatch '(?s)^---\s*\r?\nname:\s*physics-ppt-visual-review\s*\r?\ndescription:\s*.+?\r?\n---') {
+    throw 'physics-ppt-visual-review SKILL.md frontmatter is invalid.'
+}
+if ($visualSkill -match 'TODO|PLACEHOLDER') { throw 'physics-ppt-visual-review contains unfinished scaffold text.' }
+$visualReviewSchemaPath = Join-Path $root 'manual\physics-ppt-visual-review\references\review-result.schema.json'
+$visualReviewSchema = Get-Content -LiteralPath $visualReviewSchemaPath -Raw -Encoding UTF8 | ConvertFrom-Json
+if ($visualReviewSchema.title -ne 'Physics PPT visual review result') { throw 'Visual review result schema is invalid.' }
+foreach ($schemaFile in @('config\presentation-snapshot.schema.json', 'config\invariant-comparison.schema.json')) {
+    $schema = Get-Content -LiteralPath (Join-Path $root $schemaFile) -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ([int]$schema.properties.schemaVersion.const -ne 1) { throw "Schema version guard is invalid: $schemaFile" }
+}
+
 # --- 3. PowerShell syntax check ---
 $psFiles = @(
     Get-ChildItem -LiteralPath (Join-Path $root 'tools') -Filter '*.ps1' -Recurse -File
@@ -153,6 +261,15 @@ foreach ($file in $psFiles) {
     }
     if ($content -match '\}function\s+[A-Za-z_][A-Za-z0-9_-]*') {
         throw "PowerShell function declarations must be separated by whitespace: $($file.Name)"
+    }
+    if ($content -match '(?s)Export-Csv.{0,160}-Encoding\s+UTF8') {
+        throw "Excel-facing CSV must use Write-Utf8BomCsv for host-independent BOM output: $($file.Name)"
+    }
+    if ($content -match 'ExtractToDirectory\s*\(') {
+        throw "PPTX extraction must use Expand-PptxPackageSafely: $($file.Name)"
+    }
+    if ($file.Name -ne 'PhysicsPpt.Common.ps1' -and $content -match 'Marshal\]::ReleaseComObject') {
+        throw "COM cleanup must use Release-ComObjectSafe: $($file.Name)"
     }
 }
 
@@ -194,11 +311,12 @@ try {
     if ($null -ne $zip) { $zip.Dispose() }
 }
 
-Write-Host 'Toolkit self-check passed.'
-
 # --- 7. JSON <-> VBA constants sync check ---
 $vbaCommonPath = Join-Path $root 'vba\PhysicsPptCommon.bas'
 $vbaContent = Get-Content -LiteralPath $vbaCommonPath -Raw -Encoding UTF8
+if ($vbaContent -notmatch '(?m)^Public\s+Const\s+NORMALIZE_SLIDE_BACKGROUND\s+As\s+Boolean\s*=\s*False\s*$') {
+    throw 'VBA fallback must preserve slide backgrounds by default.'
+}
 
 # Mapping: VBA constant -> JSON path -> expected value
 $syncChecks = @(
@@ -235,4 +353,87 @@ foreach ($check in $syncChecks) {
     }
 }
 
-Write-Host 'JSON <-> VBA sync check passed.'
+# --- 8. Shared helper behavior check (Windows PowerShell 5.1 compatible) ---
+. (Join-Path $root 'tools\PhysicsPpt.Common.ps1')
+$tempBase = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
+$selfCheckRoot = Join-Path $tempBase ('physics-ppt-toolkit-selfcheck-' + [Guid]::NewGuid().ToString('N'))
+try {
+    $inputDir = Join-Path $selfCheckRoot 'input'
+    $excludedDir = Join-Path $inputDir 'custom-output'
+    $historicalDir = Join-Path $inputDir '_physics_ppt_output_20260101_010101'
+    New-Item -ItemType Directory -Path $excludedDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $historicalDir -Force | Out-Null
+    [System.IO.File]::WriteAllBytes((Join-Path $inputDir 'lesson.pptx'), [byte[]]@(1))
+    [System.IO.File]::WriteAllBytes((Join-Path $excludedDir 'generated.pptx'), [byte[]]@(1))
+    [System.IO.File]::WriteAllBytes((Join-Path $historicalDir 'historical.pptx'), [byte[]]@(1))
+    [System.IO.File]::WriteAllBytes((Join-Path $inputDir '~$lesson.pptx'), [byte[]]@(1))
+
+    $discovered = @(Get-PresentationFiles -Path $inputDir -Recurse -SupportedExtensions @('.pptx') -ExcludedRoots @($excludedDir))
+    if ($discovered.Count -ne 1 -or $discovered[0].Name -ne 'lesson.pptx') {
+        throw 'Get-PresentationFiles failed to exclude temporary or generated presentations.'
+    }
+
+    $csvPath = Join-Path $selfCheckRoot 'utf8-bom.csv'
+    $csvRows = New-Object System.Collections.Generic.List[object]
+    $csvRows.Add([pscustomobject]@{ Text = '中文' }) | Out-Null
+    Write-Utf8BomCsv -InputObject $csvRows -Path $csvPath
+    $csvBytes = [System.IO.File]::ReadAllBytes($csvPath)
+    if ($csvBytes.Length -lt 3 -or $csvBytes[0] -ne 0xEF -or $csvBytes[1] -ne 0xBB -or $csvBytes[2] -ne 0xBF) {
+        throw 'Write-Utf8BomCsv did not write a UTF-8 BOM.'
+    }
+    if (@(Import-Csv -LiteralPath $csvPath -Encoding UTF8).Count -ne 1) {
+        throw 'Write-Utf8BomCsv did not preserve the input row.'
+    }
+
+    $extractDir = Join-Path $selfCheckRoot 'package'
+    $roundTripPptx = Join-Path $selfCheckRoot 'roundtrip.pptx'
+    Expand-PptxPackageSafely -PptxPath $samplePptx -DestinationDir $extractDir
+    New-PptxPackageFromDirectory -SourceDir $extractDir -DestinationPath $roundTripPptx
+    $roundTripZip = $null
+    try {
+        $roundTripZip = [System.IO.Compression.ZipFile]::OpenRead($roundTripPptx)
+        $roundTripEntries = @($roundTripZip.Entries | ForEach-Object { $_.FullName })
+        foreach ($entry in $requiredEntries) {
+            if ($entry -notin $roundTripEntries) { throw "Round-trip PPTX missing required entry: $entry" }
+        }
+    } finally {
+        if ($null -ne $roundTripZip) { $roundTripZip.Dispose() }
+    }
+} finally {
+    $resolvedSelfCheckRoot = [System.IO.Path]::GetFullPath($selfCheckRoot)
+    if ((Test-Path -LiteralPath $resolvedSelfCheckRoot) -and
+        (Test-PathInsideDirectory -ChildPath $resolvedSelfCheckRoot -ParentPath $tempBase) -and
+        ([System.IO.Path]::GetFileName($resolvedSelfCheckRoot) -like 'physics-ppt-toolkit-selfcheck-*')) {
+        Remove-Item -LiteralPath $resolvedSelfCheckRoot -Recurse -Force
+    }
+}
+
+$normalizeContent = Get-Content -LiteralPath (Join-Path $root 'tools\Normalize-PhysicsPpt.ps1') -Raw -Encoding UTF8
+foreach ($requiredGuard in @('DoNotMoveShapes', 'DoNotResizeShapes', 'DoNotModifyAnimations', 'DoNotModifySlideTransitions', 'Test-ShapeUsesAutomaticSizing')) {
+    if ($normalizeContent -notmatch [regex]::Escape($requiredGuard)) { throw "Normalize safety guard is missing: $requiredGuard" }
+}
+foreach ($requiredRuleMarker in @('Test-StyleRuleEnabled', 'STYLE.FORMULA.TEXT', 'STYLE.DECORATIVE.EFFECTS', 'SLIDE.BACKGROUND', 'DisableAdvanceOnClick', 'AdvanceOnClickPreserved')) {
+    if ($normalizeContent -notmatch [regex]::Escape($requiredRuleMarker)) { throw "Normalize rule marker is missing: $requiredRuleMarker" }
+}
+if ($normalizeContent -match "Issue 'TextStyleSkippedAutoSize'") { throw 'AutoSize text must use font-only normalization with geometry restoration, not be skipped.' }
+foreach ($fontSafetyMarker in @('AutoSizeGeometryRestored', 'Set-AutoSizeTextFontSafely', 'TextStyleSkippedGeometryRisk', 'font and geometry were rolled back before save')) {
+    if ($normalizeContent -notmatch [regex]::Escape($fontSafetyMarker)) { throw "AutoSize font normalization safety marker is missing: $fontSafetyMarker" }
+}
+foreach ($preflightMarker in @('Get-MissingConfiguredFonts', 'Get-SlideAspectRatioCheck', 'CHECK.FONT.AVAILABILITY', 'CHECK.SLIDE.ASPECT_RATIO', 'ConfiguredFontCheckUnavailable', 'SlideAspectRatioCheckUnavailable')) {
+    if ($normalizeContent -notmatch [regex]::Escape($preflightMarker)) { throw "Preflight check marker is missing: $preflightMarker" }
+}
+
+$aiImportContent = Get-Content -LiteralPath (Join-Path $root 'tools\Import-PptxAiReviewResult.ps1') -Raw -Encoding UTF8
+if ($aiImportContent -match 'PowerPoint\.Application|Presentations\.Open|SaveAs|Normalize-PhysicsPpt') { throw 'AI review import must remain read-only and must not access PPTX automation.' }
+
+$workflowContent = Get-Content -LiteralPath (Join-Path $root 'tools\Invoke-PhysicsPptWorkflow.ps1') -Raw -Encoding UTF8
+foreach ($requiredWorkflowMarker in @('BlockedMissingNormalizedPptx', 'deliveryBlocked', 'deliveryStatus', 'invariantDeliveryBlocked')) {
+    if ($workflowContent -notmatch [regex]::Escape($requiredWorkflowMarker)) { throw "Workflow delivery gate marker is missing: $requiredWorkflowMarker" }
+}
+foreach ($summaryCheckMarker in @('configuredFontsMissingCount', 'slideAspectMismatchCount', '字体回退风险', '非 16:9')) {
+    if ($workflowContent -notmatch [regex]::Escape($summaryCheckMarker)) { throw "Summary preflight marker is missing: $summaryCheckMarker" }
+}
+
+& (Join-Path $root 'tools\Test-PhysicsPptPolicy.ps1')
+
+Write-Host 'Toolkit self-check passed.'

@@ -37,6 +37,13 @@
 .PARAMETER IncludeReviewArtifacts
   Also export page images, contact sheets, before/after sheets, and review indexes for detailed visual review.
 
+.PARAMETER PrepareAiVisualReview
+  Export original/normalized page pairs and a read-only request packet for host-AI visual review.
+
+.PARAMETER AiVisualReviewResult
+  A completed JSON result conforming to the prepared host-AI packet. Blocked results are
+  recorded in the manifest and surfaced in the summary; this parameter never writes a PPTX.
+
 .PARAMETER IncludeVisualAudit
   Also export rendered page images/PDF and run rule-based visual/layout checks on generated PPTX files.
 
@@ -51,6 +58,10 @@
 
 .PARAMETER SkipPreflightReport
   Skip the initial report-only pass for NormalizeAndPdf/SafeNormalize runs. The normalize pass still writes the final report.
+
+.PARAMETER DisableAdvanceOnClick
+  Explicitly disable mouse-click slide advance on every slide. The default preserves
+  the source presentation's click behavior.
 
 .PARAMETER FormulaOmmlMaxItems
   Maximum formula whitelist rows to convert per run.
@@ -72,11 +83,14 @@ param(
     [switch]$OpenOutput,
     [switch]$OpenGeneratedPptx,
     [switch]$IncludeReviewArtifacts,
+    [switch]$PrepareAiVisualReview,
+    [string]$AiVisualReviewResult,
     [switch]$IncludeVisualAudit,
     [switch]$ApplyVisualAuditFixes,
     [switch]$ApplyFormulaOmmlWhitelist,
     [switch]$FormulaOmmlVisualAudit,
     [switch]$SkipPreflightReport,
+    [switch]$DisableAdvanceOnClick,
 
     [ValidateRange(1, 1000)]
     [int]$FormulaOmmlMaxItems = 100
@@ -90,18 +104,11 @@ $ErrorActionPreference = 'Stop'
 if ($ApplyVisualAuditFixes -and -not $IncludeVisualAudit) {
     $IncludeVisualAudit = [System.Management.Automation.SwitchParameter]::Present
 }
-
-function Get-PptFiles {
-    param([string]$Path, [string]$Pattern, [switch]$Recurse)
-    if (-not (Test-Path -LiteralPath $Path)) { throw "InputPath not found: $Path" }
-    $item = Get-Item -LiteralPath $Path
-    if ($item.PSIsContainer) {
-        $opt = @{ LiteralPath = $item.FullName; Filter = $Pattern; File = $true }
-        if ($Recurse) { $opt.Recurse = $true }
-        return @(Get-ChildItem @opt | Where-Object { $_.Name -notlike '~$*' -and $_.Extension -in '.pptx', '.pptm' })
-    }
-    if ($item.Extension -notin '.pptx', '.pptm') { throw "Only .pptx/.pptm files are supported: $($item.FullName)" }
-    return @($item)
+if ($PrepareAiVisualReview -and -not $IncludeReviewArtifacts) {
+    $IncludeReviewArtifacts = [System.Management.Automation.SwitchParameter]::Present
+}
+if (-not [string]::IsNullOrWhiteSpace($AiVisualReviewResult) -and -not $IncludeReviewArtifacts) {
+    $IncludeReviewArtifacts = [System.Management.Automation.SwitchParameter]::Present
 }
 
 function Get-PowerPointAutomationBlockers {
@@ -509,7 +516,7 @@ function Export-SourcePageImages {
             } finally {
                 if ($null -ne $pres) {
                     try { $pres.Close() | Out-Null } catch { }
-                    [System.Runtime.InteropServices.Marshal]::ReleaseComObject($pres) | Out-Null
+                    Release-ComObjectSafe -ComObject $pres
                 }
             }
         }
@@ -518,7 +525,7 @@ function Export-SourcePageImages {
     } finally {
         if ($null -ne $pp) {
             try { $pp.Quit() | Out-Null } catch { }
-            [System.Runtime.InteropServices.Marshal]::ReleaseComObject($pp) | Out-Null
+            Release-ComObjectSafe -ComObject $pp
         }
         [System.GC]::Collect()
         [System.GC]::WaitForPendingFinalizers()
@@ -686,8 +693,8 @@ function New-ReviewIndexes {
         if ($reviewSlides.Count -eq 0) { continue }
         if (-not (Test-Path -LiteralPath $indexRoot)) { New-Item -ItemType Directory -Path $indexRoot -Force | Out-Null }
         $indexPath = Join-Path $indexRoot ("$($identity.safeStem).review-pages.csv")
-        $reviewSlides |
-            ForEach-Object {
+        $indexRows = @(
+            $reviewSlides | ForEach-Object {
                 [pscustomobject]@{
                     File = $identity.relativePath
                     Slide = $_.slide
@@ -699,8 +706,9 @@ function New-ReviewIndexes {
                     SourcePageImage = $_.sourcePageImage
                     Findings = (@($_.findings | ForEach-Object { "$($_.shape):$($_.issue)" }) -join ';')
                 }
-            } |
-            Export-Csv -LiteralPath $indexPath -NoTypeInformation -Encoding UTF8
+            }
+        )
+        Write-Utf8BomCsv -InputObject $indexRows -Path $indexPath
         $items[$file.FullName] = $indexPath
     }
     return $items
@@ -1266,6 +1274,17 @@ function Write-Summary {
     $formulaOmmlFiles = @(Get-FormulaOmmlFiles -FormulaOmmlArtifacts $formulaOmmlArtifacts)
     $successCount = @($manifestFiles | Where-Object { $_.status -eq 'success' -or $_.status -eq 'checked' }).Count
     $failedCount = @($manifestFiles | Where-Object { $_.status -eq 'failed' }).Count
+    $invariantGate = Get-ObjectPropertyValue -Object $Manifest -PropertyName 'invariantGate' -DefaultValue $null
+    $invariantBlockedCount = [int](Get-ObjectPropertyValue -Object $invariantGate -PropertyName 'blockedCount' -DefaultValue 0)
+    $aiVisualReview = Get-ObjectPropertyValue -Object $Manifest -PropertyName 'aiVisualReview' -DefaultValue $null
+    $aiVisualReviewStatus = [string](Get-ObjectPropertyValue -Object $aiVisualReview -PropertyName 'status' -DefaultValue 'NotPrepared')
+    $deliveryStatus = [string](Get-ObjectPropertyValue -Object $Manifest -PropertyName 'deliveryStatus' -DefaultValue 'Pending')
+    $configuredFontsAvailableCount = Get-IssueCount -Rows $Rows -Issue 'ConfiguredFontsAvailable'
+    $configuredFontsMissingCount = Get-IssueCount -Rows $Rows -Issue 'ConfiguredFontsMissing'
+    $configuredFontCheckUnavailableCount = Get-IssueCount -Rows $Rows -Issue 'ConfiguredFontCheckUnavailable'
+    $slideAspect16By9Count = Get-IssueCount -Rows $Rows -Issue 'SlideAspectRatio16By9'
+    $slideAspectMismatchCount = Get-IssueCount -Rows $Rows -Issue 'SlideAspectRatioMismatch'
+    $slideAspectCheckUnavailableCount = Get-IssueCount -Rows $Rows -Issue 'SlideAspectRatioCheckUnavailable'
     $pdfCount = @($manifestFiles | Where-Object { -not [string]::IsNullOrWhiteSpace($_.pdf) -and (Test-Path -LiteralPath $_.pdf) }).Count
     $visualAuditCount = @($visualAuditItems | Where-Object { (Get-ObjectPropertyValue -Object $_ -PropertyName 'visualAuditStatus' -DefaultValue '') -eq 'Completed' }).Count
     $visualAuditFailedCount = @($visualAuditItems | Where-Object { (Get-ObjectPropertyValue -Object $_ -PropertyName 'visualAuditStatus' -DefaultValue '') -eq 'Failed' }).Count
@@ -1342,6 +1361,11 @@ function Write-Summary {
     $lines.Add("- 文件数：$(@($Files).Count)")
     $lines.Add("- 成功/已检查：$successCount")
     $lines.Add("- 失败：$failedCount")
+    $lines.Add("- 不可变属性门禁阻断：$invariantBlockedCount")
+    $lines.Add("- 宿主 AI 视觉门禁：$aiVisualReviewStatus")
+    $lines.Add("- 交付状态：$deliveryStatus")
+    $lines.Add("- 配置字体可用/缺失/检查不可用：$configuredFontsAvailableCount / $configuredFontsMissingCount / $configuredFontCheckUnavailableCount（缺失或不可用意味着存在字体回退风险）")
+    $lines.Add("- 16:9 课件画布通过/非 16:9/检查不可用：$slideAspect16By9Count / $slideAspectMismatchCount / $slideAspectCheckUnavailableCount（非 16:9 仅报告，不自动缩放画布）")
     if ($exportsPdf) {
         $lines.Add("- 已导出 PDF：$pdfCount")
     } else {
@@ -1396,6 +1420,8 @@ function Write-Summary {
     $lines.Add("- 已设置答案劈裂动画：$((Get-IssueCount -Rows $Rows -Issue 'AnswerAnimationSet') + (Get-IssueCount -Rows $Rows -Issue 'AnswerAnimationAdded'))")
     $lines.Add("- 组合对象跳过：$(Get-IssueCount -Rows $Rows -Issue 'GroupShapeSkipped')")
     $lines.Add("- 空白页候选：$(Get-IssueCount -Rows $Rows -Issue 'EmptySlideCandidate')")
+    $lines.Add("- 页面背景候选/写回：$(Get-IssueCount -Rows $Rows -Issue 'SlideBackgroundCandidate') / $(Get-IssueCount -Rows $Rows -Issue 'SlideBackgroundNormalized')")
+    $lines.Add("- 装饰效果清理：$(Get-IssueCount -Rows $Rows -Issue 'DecorativeEffectsCleared')")
     $lines.Add("- 已禁用单击换片：$(Get-IssueCount -Rows $Rows -Issue 'AdvanceOnClickDisabled')")
     $lines.Add("- 视频页候选：$(Get-VideoCandidateCount -Rows $Rows)")
     if ($exportsPdf) {
@@ -1492,7 +1518,8 @@ function Write-Summary {
         $lines.Add("- 公式白名单建议清单：``$formulaWhitelistSuggestionCsv``")
     }
     if ($visualAuditItems.Count -gt 0) {
-        $lines.Add('- `11_视觉审查/`：对生成 PPTX 导出的 PNG/PDF、形状越界、视觉指标和自动确认门禁')
+        $lines.Add('- `11_视觉审查/_原始基线/`：原始 PPTX 的 PNG/PDF、形状越界与视觉指标审查，供识别既有问题')
+        $lines.Add('- `11_视觉审查/`：对生成 PPTX 导出的 PNG/PDF、形状越界、视觉指标和基线对比确认门禁')
         $lines.Add('- `12_视觉修复/`：仅包含规则可确定的低风险修复副本，不覆盖规范化 PPTX')
         $lines.Add('- `13_视觉修复审查/`：对视觉修复副本再次导出的审查报告和自动确认门禁')
     }
@@ -1628,9 +1655,10 @@ function Invoke-VisualAuditArtifacts {
     }
 
     $auditRoot = Join-Path $OutputRoot '11_视觉审查'
+    $baselineAuditRoot = Join-Path $auditRoot '_原始基线'
     $fixRoot = Join-Path $OutputRoot '12_视觉修复'
     $fixedAuditRoot = Join-Path $OutputRoot '13_视觉修复审查'
-    foreach ($dir in @($auditRoot, $(if ($ApplyFixes) { $fixRoot }), $(if ($ApplyFixes) { $fixedAuditRoot }))) {
+    foreach ($dir in @($baselineAuditRoot, $auditRoot, $(if ($ApplyFixes) { $fixRoot }), $(if ($ApplyFixes) { $fixedAuditRoot }))) {
         if (-not [string]::IsNullOrWhiteSpace($dir) -and -not (Test-Path -LiteralPath $dir)) {
             New-Item -ItemType Directory -Path $dir -Force | Out-Null
         }
@@ -1638,8 +1666,15 @@ function Invoke-VisualAuditArtifacts {
 
     foreach ($file in @($Manifest.files)) {
         $inputName = Split-Path $file.input -Leaf
+        $baselinePptx = [string]$file.input
         $sourcePptx = [string]$file.normalizedPptx
         $safeName = [string]$file.outputStem
+        $baselineAuditDir = Join-Path $baselineAuditRoot $safeName
+        $baselineAuditManifestPath = Join-Path $baselineAuditDir 'pptx-visual-audit-manifest.json'
+        $baselineAuditStatus = 'SkippedNoInputPptx'
+        $baselineAuditError = ''
+        [int]$baselineAuditErrorCount = 0
+        [int]$baselineAuditWarningCount = 0
         $auditDir = Join-Path $auditRoot $safeName
         $auditCsv = Join-Path $auditDir 'pptx-visual-audit.csv'
         $auditManifestPath = Join-Path $auditDir 'pptx-visual-audit-manifest.json'
@@ -1661,6 +1696,19 @@ function Invoke-VisualAuditArtifacts {
         [int]$fixedAuditWarningCount = 0
         $fixedVisualConfirmation = $null
 
+        if (-not [string]::IsNullOrWhiteSpace($baselinePptx) -and (Test-Path -LiteralPath $baselinePptx)) {
+            try {
+                & (Join-Path $PSScriptRoot 'Export-PptxVisualAudit.ps1') -InputPath $baselinePptx -OutputDir $baselineAuditDir -ContactSheet
+                $baselineAuditStatus = 'Completed'
+                $baselineAuditManifest = Read-JsonObject -Path $baselineAuditManifestPath
+                $baselineAuditErrorCount = [int](Get-ObjectPropertyValue -Object $baselineAuditManifest -PropertyName 'errorCount' -DefaultValue 0)
+                $baselineAuditWarningCount = [int](Get-ObjectPropertyValue -Object $baselineAuditManifest -PropertyName 'warningCount' -DefaultValue 0)
+            } catch {
+                $baselineAuditStatus = 'Failed'
+                $baselineAuditError = $_.Exception.Message
+            }
+        }
+
         if (-not [string]::IsNullOrWhiteSpace($sourcePptx) -and (Test-Path -LiteralPath $sourcePptx)) {
             try {
                 & (Join-Path $PSScriptRoot 'Export-PptxVisualAudit.ps1') -InputPath $sourcePptx -OutputDir $auditDir -ContactSheet
@@ -1668,7 +1716,7 @@ function Invoke-VisualAuditArtifacts {
                 $auditManifest = Read-JsonObject -Path $auditManifestPath
                 $auditErrorCount = [int](Get-ObjectPropertyValue -Object $auditManifest -PropertyName 'errorCount' -DefaultValue 0)
                 $auditWarningCount = [int](Get-ObjectPropertyValue -Object $auditManifest -PropertyName 'warningCount' -DefaultValue 0)
-                $visualConfirmation = Invoke-VisualConfirmationArtifact -VisualAuditDir $auditDir
+                $visualConfirmation = Invoke-VisualConfirmationArtifact -VisualAuditDir $auditDir -BaselineVisualAuditDir $(if ($baselineAuditStatus -eq 'Completed') { $baselineAuditDir } else { $null })
             } catch {
                 $auditStatus = 'Failed'
                 $auditError = $_.Exception.Message
@@ -1711,6 +1759,12 @@ function Invoke-VisualAuditArtifacts {
         $items.Add([pscustomobject]@{
             file = $file.input
             fileRelativePath = $file.inputRelativePath
+            baselinePptx = $baselinePptx
+            baselineVisualAuditDir = if (Test-Path -LiteralPath $baselineAuditDir) { $baselineAuditDir } else { $null }
+            baselineVisualAuditStatus = $baselineAuditStatus
+            baselineVisualAuditError = $baselineAuditError
+            baselineVisualAuditErrorCount = $baselineAuditErrorCount
+            baselineVisualAuditWarningCount = $baselineAuditWarningCount
             sourcePptx = $sourcePptx
             visualAuditDir = $auditDir
             visualAuditCsv = if (Test-Path -LiteralPath $auditCsv) { $auditCsv } else { $null }
@@ -2042,18 +2096,67 @@ function Invoke-FormulaOmmlArtifacts {
     return [pscustomobject]$result
 }
 
+function Invoke-InvariantGate {
+    param(
+        [System.IO.FileInfo[]]$Files,
+        [string]$OutputRoot,
+        [string]$NormalizedDir,
+        $IdentityMap,
+        [string]$Mode
+    )
+
+    $gateRoot = Join-Path $OutputRoot '16_不可变快照'
+    if (-not (Test-Path -LiteralPath $gateRoot)) { New-Item -ItemType Directory -Path $gateRoot -Force | Out-Null }
+    $snapshotScript = Join-Path $PSScriptRoot 'Export-PptxInvariantSnapshot.ps1'
+    $compareScript = Join-Path $PSScriptRoot 'Compare-PptxInvariantSnapshot.ps1'
+    $items = New-Object System.Collections.Generic.List[object]
+
+    if ($Mode -eq 'CheckOnly') {
+        return [pscustomobject]@{ enabled = $false; status = 'SkippedCheckOnly'; root = $gateRoot; files = @() }
+    }
+
+    foreach ($file in $Files) {
+        $identity = $IdentityMap[$file.FullName]
+        $safeStem = [string]$identity.safeStem
+        $normalized = Join-Path $NormalizedDir "$safeStem.normalized$($file.Extension)"
+        $beforeSnapshot = Join-Path $gateRoot "$safeStem.before.json"
+        $afterSnapshot = Join-Path $gateRoot "$safeStem.after.json"
+        $compareResult = Join-Path $gateRoot "$safeStem.compare.json"
+        $item = [ordered]@{ file = $file.FullName; normalized = $normalized; status = 'Pending'; passed = $false; before = $beforeSnapshot; after = $afterSnapshot; compare = $compareResult; error = '' }
+        try {
+            if (-not (Test-Path -LiteralPath $normalized)) {
+                $item.status = 'BlockedMissingNormalizedPptx'
+                $item.error = 'Expected normalized PPTX was not produced.'
+            } else {
+                & $snapshotScript -InputPath $file.FullName -OutputPath $beforeSnapshot | Out-Null
+                & $snapshotScript -InputPath $normalized -OutputPath $afterSnapshot | Out-Null
+                & $compareScript -BeforePath $beforeSnapshot -AfterPath $afterSnapshot -OutputPath $compareResult | Out-Null
+                $comparison = Get-Content -LiteralPath $compareResult -Raw -Encoding UTF8 | ConvertFrom-Json
+                $item.passed = [bool]$comparison.passed
+                $item.status = if ($item.passed) { 'Passed' } else { 'BlockedInvariantDifference' }
+            }
+        } catch {
+            $item.status = 'Failed'
+            $item.error = $_.Exception.Message
+        }
+        $items.Add([pscustomobject]$item) | Out-Null
+    }
+
+    $itemArray = @($items.ToArray())
+    $blocked = @($itemArray | Where-Object { $_.status -ne 'Passed' }).Count
+    return [pscustomobject]@{ enabled = $true; status = if ($blocked -eq 0) { 'Passed' } else { 'Blocked' }; root = $gateRoot; blockedCount = $blocked; files = $itemArray }
+}
+
 $root = Split-Path -Parent $PSScriptRoot
 $inputItem = Get-Item -LiteralPath $InputPath
 $inputFullPath = $inputItem.FullName
-if ($inputItem.PSIsContainer) {
-    $identityMap = Get-IdentityMap -InputRoot $inputFullPath -Files @(Get-PptFiles -Path $inputFullPath -Pattern $FilePattern -Recurse:$Recurse)
-} else {
-    $identityMap = @{}
-}
 if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
     $OutputRoot = Get-DefaultOutputRoot -InputItem $inputItem
 }
 $OutputRoot = [System.IO.Path]::GetFullPath($OutputRoot)
+$files = @(Get-PresentationFiles -Path $inputFullPath -Pattern $FilePattern -Recurse:$Recurse -SupportedExtensions @('.pptx', '.pptm') -ExcludedRoots @($OutputRoot))
+if ($files.Count -eq 0) { throw "No .pptx/.pptm files found in $inputFullPath" }
+$identityMap = Get-IdentityMap -InputRoot $inputFullPath -Files $files
 
 $reportDir = Join-Path $OutputRoot '00_检查报告'
 $normalizedDir = Join-Path $OutputRoot '01_规范化PPTX'
@@ -2072,7 +2175,8 @@ $visualFixAuditDir = Join-Path $OutputRoot '13_视觉修复审查'
 $formulaOmmlDir = Join-Path $OutputRoot '14_公式OMML副本'
 $formulaOmmlAuditDir = Join-Path $OutputRoot '15_公式OMML审查'
 $exportsPdf = $Mode -notin @('CheckOnly', 'SafeNormalize')
-$outputDirs = @($OutputRoot, $reportDir, $normalizedDir, $backupDir)
+$invariantDir = Join-Path $OutputRoot '16_不可变快照'
+$outputDirs = @($OutputRoot, $reportDir, $normalizedDir, $backupDir, $invariantDir)
 if ($exportsPdf) {
     $outputDirs += @($pdfDir)
 }
@@ -2092,19 +2196,15 @@ foreach ($dir in $outputDirs) {
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
 }
 
-$files = @(Get-PptFiles -Path $inputFullPath -Pattern $FilePattern -Recurse:$Recurse)
-if ($files.Count -eq 0) { throw "No .pptx/.pptm files found in $inputFullPath" }
-if ($identityMap.Count -eq 0) {
-    $identityMap = Get-IdentityMap -InputRoot $inputFullPath -Files $files
-}
-
 $stepCount = 5
 if ($IncludeVisualAudit) { $stepCount++ }
 if ($ApplyFormulaOmmlWhitelist) { $stepCount++ }
 
 Write-Host "Step 1/${stepCount}: self-check"
 & (Join-Path $PSScriptRoot 'Test-ToolkitFiles.ps1')
-& (Join-Path $PSScriptRoot 'Assert-Toolchain.ps1')
+$toolchainArgs = @{}
+if ($ApplyFormulaOmmlWhitelist) { $toolchainArgs.RequireFormulaValidator = $true }
+& (Join-Path $PSScriptRoot 'Assert-Toolchain.ps1') @toolchainArgs
 Assert-PowerPointAutomationReady
 
 $reportOnlyPath = Join-Path $reportDir 'physics-ppt-report-only.csv'
@@ -2141,6 +2241,7 @@ if ($Mode -eq 'CheckOnly') {
         OutputDir = $normalizedDir
         Recurse = [bool]$Recurse
         UpdateMaster = [bool]$UpdateMaster
+        DisableAdvanceOnClick = [bool]$DisableAdvanceOnClick
         NoPdf = ($Mode -eq 'SafeNormalize')
         Force = ($Mode -eq 'ForceRebuild')
         FilePattern = $FilePattern
@@ -2177,6 +2278,11 @@ $manifestPath = Join-Path $OutputRoot 'review-manifest.json'
 $summaryPath = Join-Path $OutputRoot 'summary.md'
 $manifest = New-Manifest -Files $files -InputFullPath $inputFullPath -OutputRoot $OutputRoot -ReportPath $finalReportPath -Mode $Mode -IncludeReviewArtifacts ([bool]$IncludeReviewArtifacts) -ReportRows $rows -ContactSheets $contactSheets -ReviewSheets $reviewSheets -SourceImageDirs $sourceImageDirs -BeforeAfterSheets $beforeAfterSheets -ReviewPagePackages $reviewPagePackages -ReviewIndexes $reviewIndexes -FormulaReviewIndex $formulaReviewIndex -IdentityMap $identityMap
 
+$invariantGate = Invoke-InvariantGate -Files $files -OutputRoot $OutputRoot -NormalizedDir $normalizedDir -IdentityMap $identityMap -Mode $Mode
+$manifest | Add-Member -NotePropertyName invariantGate -NotePropertyValue $invariantGate -Force
+$manifest | Add-Member -NotePropertyName deliveryBlocked -NotePropertyValue ([bool]($invariantGate.enabled -and $invariantGate.status -eq 'Blocked')) -Force
+$manifest | Add-Member -NotePropertyName deliveryStatus -NotePropertyValue $(if ($invariantGate.enabled -and $invariantGate.status -eq 'Blocked') { 'BlockedInvariantGate' } else { 'Pending' }) -Force
+
 $formulaWhitelistSuggestionArtifacts = Invoke-FormulaWhitelistSuggestionArtifacts -FormulaReviewIndex $formulaReviewIndex -OutputRoot $OutputRoot -MaxSuggestions 120
 $manifest | Add-Member -NotePropertyName formulaWhitelistSuggestionArtifacts -NotePropertyValue $formulaWhitelistSuggestionArtifacts -Force
 
@@ -2211,7 +2317,41 @@ if ($ApplyFormulaOmmlWhitelist) {
 
 Write-Host "Step ${stepCount}/${stepCount}: write summary and manifest"
 $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+if ($PrepareAiVisualReview) {
+    $aiReviewPacketPath = Join-Path $OutputRoot 'ai-visual-review-request.json'
+    & (Join-Path $PSScriptRoot 'Export-PptxAiReviewPacket.ps1') -ManifestPath $manifestPath -OutputPath $aiReviewPacketPath | Out-Null
+    $manifest | Add-Member -NotePropertyName aiVisualReviewPrepared -NotePropertyValue $true -Force
+    $manifest | Add-Member -NotePropertyName aiVisualReviewPacket -NotePropertyValue $aiReviewPacketPath -Force
+    $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+} else {
+    $manifest | Add-Member -NotePropertyName aiVisualReviewPrepared -NotePropertyValue $false -Force
+    $manifest | Add-Member -NotePropertyName aiVisualReviewPacket -NotePropertyValue $null -Force
+    $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+}
+if (-not [string]::IsNullOrWhiteSpace($AiVisualReviewResult)) {
+    $aiReviewPacketPath = Join-Path $OutputRoot 'ai-visual-review-request.json'
+    if (-not (Test-Path -LiteralPath $aiReviewPacketPath)) {
+        & (Join-Path $PSScriptRoot 'Export-PptxAiReviewPacket.ps1') -ManifestPath $manifestPath -OutputPath $aiReviewPacketPath | Out-Null
+        $manifest | Add-Member -NotePropertyName aiVisualReviewPrepared -NotePropertyValue $true -Force
+        $manifest | Add-Member -NotePropertyName aiVisualReviewPacket -NotePropertyValue $aiReviewPacketPath -Force
+        $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+    }
+    & (Join-Path $PSScriptRoot 'Import-PptxAiReviewResult.ps1') -ManifestPath $manifestPath -ResultPath $AiVisualReviewResult -PacketPath $aiReviewPacketPath | Out-Null
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+}
 Write-Summary -Path $summaryPath -Mode $Mode -InputFullPath $inputFullPath -OutputRoot $OutputRoot -ReportPath $finalReportPath -ManifestPath $manifestPath -Files $files -IncludeReviewArtifacts ([bool]$IncludeReviewArtifacts) -Rows $rows -Manifest $manifest
+
+$aiVisualReviewGate = Get-ObjectPropertyValue -Object $manifest -PropertyName 'aiVisualReview' -DefaultValue $null
+$invariantDeliveryBlocked = [bool]((Get-ObjectPropertyValue -Object $manifest -PropertyName 'invariantGate' -DefaultValue $null).status -eq 'Blocked')
+$aiDeliveryBlocked = [bool](Get-ObjectPropertyValue -Object $aiVisualReviewGate -PropertyName 'deliveryBlocked' -DefaultValue $false)
+if ($invariantDeliveryBlocked -or $aiDeliveryBlocked) {
+    $blockReason = if ($invariantDeliveryBlocked) { 'Invariant gate is Blocked.' } else { "Host-AI visual review is Blocked. Result: $($aiVisualReviewGate.result)" }
+    $manifest | Add-Member -NotePropertyName deliveryBlocked -NotePropertyValue $true -Force
+    $manifest | Add-Member -NotePropertyName deliveryStatus -NotePropertyValue $(if ($invariantDeliveryBlocked) { 'BlockedInvariantGate' } else { 'BlockedAiVisualReview' }) -Force
+    $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+    Write-Summary -Path $summaryPath -Mode $Mode -InputFullPath $inputFullPath -OutputRoot $OutputRoot -ReportPath $finalReportPath -ManifestPath $manifestPath -Files $files -IncludeReviewArtifacts ([bool]$IncludeReviewArtifacts) -Rows $rows -Manifest $manifest
+    throw "$blockReason Keep the generated files for investigation; do not deliver the normalized PPTX."
+}
 
 Write-Host "Done"
 Write-Host "Output: $OutputRoot"

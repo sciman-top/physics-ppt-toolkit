@@ -80,22 +80,13 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+. (Join-Path $PSScriptRoot 'PhysicsPpt.Common.ps1')
+
 if ([string]::IsNullOrWhiteSpace($RealesrganPath)) {
     $RealesrganPath = Join-Path $PSScriptRoot 'vendor\realesrgan-ncnn-vulkan-20220424\realesrgan-ncnn-vulkan.exe'
 }
 if ([string]::IsNullOrWhiteSpace($ToolRoot)) {
     $ToolRoot = Join-Path $PSScriptRoot 'vendor'
-}
-
-function Convert-ToSafePathSegment {
-    param([string]$Name)
-    $safe = $Name
-    foreach ($ch in [System.IO.Path]::GetInvalidFileNameChars()) {
-        $safe = $safe.Replace([string]$ch, '_')
-    }
-    $safe = $safe.Trim()
-    if ([string]::IsNullOrWhiteSpace($safe)) { return 'image' }
-    return $safe
 }
 
 function Resolve-Tool {
@@ -108,22 +99,6 @@ function Resolve-Tool {
         if ($null -ne $match) { return $match.FullName }
     }
     return ''
-}
-
-function Get-BasicImageInfo {
-    param([string]$Path)
-    Add-Type -AssemblyName System.Drawing
-    $image = $null
-    try {
-        $image = [System.Drawing.Image]::FromFile($Path)
-        return [pscustomobject]@{
-            Width = [int]$image.Width
-            Height = [int]$image.Height
-            Bytes = [int64](Get-Item -LiteralPath $Path).Length
-        }
-    } finally {
-        if ($null -ne $image) { $image.Dispose() }
-    }
 }
 
 function Save-ResizedJpeg {
@@ -372,7 +347,7 @@ $jsonPath = Join-Path $OutputDir 'pptx-image-enhancement-probe.json'
 $manifestPath = Join-Path $OutputDir 'pptx-image-enhancement-probe-manifest.json'
 $sheetPath = Join-Path $OutputDir 'pptx-image-enhancement-probe.contact-sheet.png'
 
-$probeRows | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
+Write-Utf8BomCsv -InputObject $probeRows.ToArray() -Path $csvPath
 $probeRows | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $jsonPath -Encoding UTF8
 $sheetCreated = New-ProbeContactSheet -Rows $probeRows.ToArray() -OutputPath $sheetPath
 

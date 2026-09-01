@@ -4,8 +4,8 @@
 
 .DESCRIPTION
   Keep this file limited to deterministic helpers with no top-level side
-  effects. The production scripts dot-source it to avoid duplicated ZIP and
-  Open XML relationship handling.
+  effects. Production scripts dot-source it to share encoding, file discovery,
+  COM cleanup, ZIP, and Open XML relationship handling.
 #>
 
 function Read-ZipEntryText {
@@ -25,6 +25,176 @@ function Read-ZipEntryText {
         if ($null -ne $reader) { $reader.Dispose() }
         if ($null -ne $stream) { $stream.Dispose() }
     }
+}
+
+function Write-Utf8BomCsv {
+    <#
+      Export-Csv's UTF8 behavior differs between Windows PowerShell and
+      PowerShell 7.  Writing through an explicit BOM keeps Chinese reports
+      stable for Excel and downstream tooling on both hosts.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [Alias('Rows')]
+        [AllowNull()]
+        [object]$InputObject,
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $parent = Split-Path -Parent ([System.IO.Path]::GetFullPath($Path))
+    if (-not [string]::IsNullOrWhiteSpace($parent) -and -not (Test-Path -LiteralPath $parent)) {
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    }
+    $utf8Bom = New-Object System.Text.UTF8Encoding($true)
+    $csvLines = @($InputObject | ConvertTo-Csv -NoTypeInformation)
+    [System.IO.File]::WriteAllLines([System.IO.Path]::GetFullPath($Path), $csvLines, $utf8Bom)
+}
+
+function Write-Utf8BomText {
+    param(
+        [AllowEmptyString()]
+        [string]$Text,
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $parent = Split-Path -Parent ([System.IO.Path]::GetFullPath($Path))
+    if (-not [string]::IsNullOrWhiteSpace($parent) -and -not (Test-Path -LiteralPath $parent)) {
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    }
+    $utf8Bom = New-Object System.Text.UTF8Encoding($true)
+    [System.IO.File]::WriteAllText([System.IO.Path]::GetFullPath($Path), $Text, $utf8Bom)
+}
+
+function Get-NormalizedFormulaText {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return '' }
+    return (($Text -replace '\s+', '') -replace '＝', '=').Trim()
+}
+
+function Get-FormulaDetailValue {
+    param([string]$Details, [string]$Key)
+    if ([string]::IsNullOrWhiteSpace($Details)) { return '' }
+    $pattern = '(?:^|;\s*)' + [regex]::Escape($Key) + '=(.*?)(?=;\s*\w+=|$)'
+    $match = [regex]::Match($Details, $pattern)
+    if (-not $match.Success) { return '' }
+    return $match.Groups[1].Value.Trim()
+}
+
+function Get-FormulaRuleValue {
+    param($Rule, [string]$Name, [string]$Default = '')
+    if ($null -eq $Rule) { return $Default }
+    $property = $Rule.PSObject.Properties[$Name]
+    if ($null -eq $property -or $null -eq $property.Value) { return $Default }
+    return [string]$property.Value
+}
+
+function Release-ComObjectSafe {
+    param($ComObject)
+    if ($null -eq $ComObject) { return }
+    try {
+        if ([System.Runtime.InteropServices.Marshal]::IsComObject($ComObject)) {
+            [System.Runtime.InteropServices.Marshal]::ReleaseComObject($ComObject) | Out-Null
+        }
+    } catch {
+        # Cleanup must not hide the processing error that led to this boundary.
+    }
+}
+
+function Convert-ToSafeFormulaPathSegment {
+    param([string]$Name)
+    $safe = [string]$Name
+    foreach ($character in [System.IO.Path]::GetInvalidFileNameChars()) {
+        $safe = $safe.Replace([string]$character, '_')
+    }
+    $safe = $safe -replace '\s+', '_'
+    $safe = $safe -replace '[^\p{L}\p{Nd}_-]+', '_'
+    $safe = $safe.Trim('_')
+    if ([string]::IsNullOrWhiteSpace($safe)) { return 'formula' }
+    return $safe
+}
+
+function Convert-ToSafeFileNameSegment {
+    param([string]$Name)
+    $safe = [string]$Name
+    foreach ($character in [System.IO.Path]::GetInvalidFileNameChars()) {
+        $safe = $safe.Replace([string]$character, '_')
+    }
+    $safe = $safe.Trim()
+    if ([string]::IsNullOrWhiteSpace($safe)) { return 'presentation' }
+    return $safe
+}
+
+function Get-BasicImageInfo {
+    param([string]$Path)
+    Add-Type -AssemblyName System.Drawing
+    $image = $null
+    try {
+        $image = [System.Drawing.Image]::FromFile($Path)
+        return [pscustomobject]@{
+            Width = [int]$image.Width
+            Height = [int]$image.Height
+            Bytes = [int64](Get-Item -LiteralPath $Path).Length
+        }
+    } finally {
+        if ($null -ne $image) { $image.Dispose() }
+    }
+}
+
+function Get-PresentationFiles {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [string]$Pattern = '*.ppt*',
+        [switch]$Recurse,
+        [string[]]$SupportedExtensions = @('.pptx'),
+        [string[]]$ExcludedRoots = @()
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) { throw "InputPath not found: $Path" }
+    $item = Get-Item -LiteralPath $Path
+    $extensions = @($SupportedExtensions | ForEach-Object { ([string]$_).ToLowerInvariant() })
+
+    if (-not $item.PSIsContainer) {
+        if ($item.Extension.ToLowerInvariant() -notin $extensions) {
+            throw "Unsupported presentation extension: $($item.FullName)"
+        }
+        return @($item)
+    }
+
+    $rootFull = [System.IO.Path]::GetFullPath($item.FullName)
+    $excludedFull = @(
+        $ExcludedRoots |
+            Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+            ForEach-Object { [System.IO.Path]::GetFullPath([string]$_) }
+    )
+    $options = @{ LiteralPath = $rootFull; Filter = $Pattern; File = $true }
+    if ($Recurse) { $options.Recurse = $true }
+
+    return @(
+        Get-ChildItem @options |
+            Where-Object {
+                $candidate = $_
+                if ($candidate.Name -like '~$*' -or $candidate.Extension.ToLowerInvariant() -notin $extensions) {
+                    return $false
+                }
+                foreach ($excludedRoot in $excludedFull) {
+                    if (Test-PathInsideDirectory -ChildPath $candidate.FullName -ParentPath $excludedRoot) {
+                        return $false
+                    }
+                }
+                $relative = $candidate.FullName.Substring($rootFull.Length).TrimStart(
+                    [System.IO.Path]::DirectorySeparatorChar,
+                    [System.IO.Path]::AltDirectorySeparatorChar
+                )
+                foreach ($segment in ($relative -split '[\\/]')) {
+                    if ($segment -match '^_physics_ppt_output_\d{8}_\d{6}$') { return $false }
+                }
+                return $true
+            } |
+            Sort-Object FullName
+    )
 }
 
 function Resolve-PackagePath {
@@ -101,6 +271,57 @@ function Resolve-ExtractedPackageFilePath {
     $candidate = Join-Path $ExtractionRoot $relativePath
     if (-not (Test-PathInsideDirectory -ChildPath $candidate -ParentPath $ExtractionRoot)) { return '' }
     return [System.IO.Path]::GetFullPath($candidate)
+}
+
+function Expand-PptxPackageSafely {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PptxPath,
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationDir
+    )
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $sourceFull = [System.IO.Path]::GetFullPath($PptxPath)
+    $destinationFull = [System.IO.Path]::GetFullPath($DestinationDir)
+    if (-not (Test-Path -LiteralPath $sourceFull -PathType Leaf)) { throw "PPTX package not found: $sourceFull" }
+    if (Test-Path -LiteralPath $destinationFull) {
+        if (@(Get-ChildItem -LiteralPath $destinationFull -Force).Count -gt 0) {
+            throw "Extraction directory must be empty: $destinationFull"
+        }
+    } else {
+        New-Item -ItemType Directory -Path $destinationFull -Force | Out-Null
+    }
+
+    $zip = $null
+    try {
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($sourceFull)
+        foreach ($entry in $zip.Entries) {
+            $target = Resolve-ExtractedPackageFilePath -ExtractionRoot $destinationFull -PackagePath $entry.FullName
+            if ([string]::IsNullOrWhiteSpace($target)) {
+                throw "Unsafe package entry path: $($entry.FullName)"
+            }
+            if ([string]::IsNullOrWhiteSpace($entry.Name)) {
+                if (-not (Test-Path -LiteralPath $target)) { New-Item -ItemType Directory -Path $target -Force | Out-Null }
+                continue
+            }
+
+            $parent = Split-Path -Parent $target
+            if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+            $inputStream = $null
+            $outputStream = $null
+            try {
+                $inputStream = $entry.Open()
+                $outputStream = New-Object System.IO.FileStream($target, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+                $inputStream.CopyTo($outputStream)
+            } finally {
+                if ($null -ne $outputStream) { $outputStream.Dispose() }
+                if ($null -ne $inputStream) { $inputStream.Dispose() }
+            }
+        }
+    } finally {
+        if ($null -ne $zip) { $zip.Dispose() }
+    }
 }
 
 function Convert-ToSafePathSegment {
@@ -225,18 +446,29 @@ function New-PptxPackageFromDirectory {
     )
 
     Add-Type -AssemblyName System.IO.Compression.FileSystem
-    if (Test-Path -LiteralPath $DestinationPath) { Remove-Item -LiteralPath $DestinationPath -Force }
-
     $basePath = [System.IO.Path]::GetFullPath($SourceDir).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
-    $archive = [System.IO.Compression.ZipFile]::Open($DestinationPath, [System.IO.Compression.ZipArchiveMode]::Create)
+    $destinationFull = [System.IO.Path]::GetFullPath($DestinationPath)
+    $destinationDir = Split-Path -Parent $destinationFull
+    if (-not (Test-Path -LiteralPath $destinationDir)) { New-Item -ItemType Directory -Path $destinationDir -Force | Out-Null }
+    $temporaryPath = Join-Path $destinationDir ('.' + [System.IO.Path]::GetFileName($destinationFull) + '.' + [Guid]::NewGuid().ToString('N') + '.tmp')
+    $archive = $null
     try {
+        $archive = [System.IO.Compression.ZipFile]::Open($temporaryPath, [System.IO.Compression.ZipArchiveMode]::Create)
         Get-ChildItem -LiteralPath $SourceDir -Recurse -File | ForEach-Object {
             $fullName = [System.IO.Path]::GetFullPath($_.FullName)
             $relative = $fullName.Substring($basePath.Length).TrimStart([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
             $entryName = $relative -replace '\\', '/'
             [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $fullName, $entryName, [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
         }
-    } finally {
         $archive.Dispose()
+        $archive = $null
+        if (Test-Path -LiteralPath $destinationFull) {
+            [System.IO.File]::Replace($temporaryPath, $destinationFull, $null)
+        } else {
+            [System.IO.File]::Move($temporaryPath, $destinationFull)
+        }
+    } finally {
+        if ($null -ne $archive) { $archive.Dispose() }
+        if (Test-Path -LiteralPath $temporaryPath) { Remove-Item -LiteralPath $temporaryPath -Force }
     }
 }

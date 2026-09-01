@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "physics-ppt-visual-review-result.schema.json",
+  "title": "Physics PPT visual review result",
+  "type": "object",
+  "required": ["protocolVersion", "reviewVersion", "model", "reviewedAt", "status", "files"],
+  "properties": {
+    "protocolVersion": { "const": 1 },
+    "reviewVersion": { "type": "string", "minLength": 1 },
+    "model": { "type": "string", "minLength": 1 },
+    "reviewedAt": { "type": "string", "minLength": 1 },
+    "status": { "enum": ["Passed", "Review", "Blocked", "ReviewUnavailable"] },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["input", "status", "pages"],
+        "properties": {
+          "input": { "type": "string" },
+          "status": { "enum": ["Passed", "Review", "Blocked", "ReviewUnavailable"] },
+          "pages": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["slide", "sourceImage", "normalizedImage", "status", "evidence", "issues"],
+              "properties": {
+                "slide": { "type": "integer", "minimum": 1 },
+                "sourceImage": { "type": "string" },
+                "normalizedImage": { "type": "string" },
+                "status": { "enum": ["Passed", "Review", "Blocked"] },
+                "evidence": { "type": "string", "minLength": 1 },
+                "issues": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["type", "severity", "evidence"],
+                    "properties": {
+                      "type": { "enum": ["NewWrap", "Clipping", "Overlap", "MissingContent", "NewBlank", "FontFallback", "FormulaDamage", "Readability", "StructureChange", "KnownSourceIssue", "Other"] },
+                      "severity": { "enum": ["Info", "Warning", "Error"] },
+                      "evidence": { "type": "string", "minLength": 1 }
+                    },
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

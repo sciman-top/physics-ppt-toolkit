@@ -73,9 +73,9 @@ def normalize_result(raw):
 def preprocess_image(input_path, output_path):
     from PIL import Image, ImageFilter, ImageOps
 
-    image = Image.open(input_path)
+    with Image.open(input_path) as source:
+        image = ImageOps.exif_transpose(source).convert("L")
     try:
-        image = ImageOps.exif_transpose(image).convert("L")
         max_side = max(image.size)
         if max_side > 1600:
             scale = 1600.0 / max_side
@@ -154,12 +154,15 @@ def write_contact_sheet(rows, output_path, max_items=80):
         y = grid_row * tile_h
         draw.rectangle([x + 6, y + 6, x + tile_w - 6, y + tile_h - 6], outline=(210, 210, 210), fill=(248, 248, 248))
         try:
-            image = Image.open(row["ImagePath"]).convert("RGB")
-            image.thumbnail((tile_w - 24, image_h), Image.Resampling.LANCZOS)
-            px = x + (tile_w - image.width) // 2
-            py = y + 14 + (image_h - image.height) // 2
-            sheet.paste(image, (px, py))
-            image.close()
+            with Image.open(row["ImagePath"]) as source:
+                image = source.convert("RGB")
+            try:
+                image.thumbnail((tile_w - 24, image_h), Image.Resampling.LANCZOS)
+                px = x + (tile_w - image.width) // 2
+                py = y + 14 + (image_h - image.height) // 2
+                sheet.paste(image, (px, py))
+            finally:
+                image.close()
         except OSError:
             pass
 

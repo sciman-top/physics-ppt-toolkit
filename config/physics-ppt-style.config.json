@@ -1,6 +1,8 @@
 ﻿{
+  "schemaVersion": 1,
   "fonts": {
     "chinese": "微软雅黑",
+    "compactChinese": "微软雅黑 UI",
     "latin": "Arial",
     "math": "Cambria Math"
   },
@@ -24,8 +26,10 @@
     "body": "#000000",
     "darkGray": "#222222",
     "emphasisRed": "#C00000",
-    "formulaBlue": "#0066CC",
-    "experimentGreen": "#008000",
+    "sectionTitle": "#1F4E79",
+    "extensionTitle": "#9C1C1C",
+    "formulaBlue": "#004C99",
+    "experimentGreen": "#006B3C",
     "yellowFill": "#FFF2CC",
     "yellowBorder": "#D6A300",
     "blueFill": "#D9EAF7",
@@ -35,6 +39,57 @@
     "videoRed": "#FF4D4D",
     "videoGreen": "#00B050"
   },
+  "styleRules": [
+    {
+      "id": "STYLE.TEXT.FONT",
+      "enabled": true,
+      "riskLevel": "R1",
+      "allowedProperties": ["FontName", "NameFarEast", "Size", "Bold", "Color"],
+      "scope": "TextRange"
+    },
+    {
+      "id": "STYLE.FORMULA.TEXT",
+      "enabled": true,
+      "riskLevel": "R1",
+      "allowedProperties": ["FontName", "NameFarEast", "Size", "Bold", "Color", "ParagraphAlignment"],
+      "scope": "FormulaText"
+    },
+    {
+      "id": "STYLE.HIGHLIGHT.TEXT_COLOR",
+      "enabled": true,
+      "riskLevel": "R1",
+      "allowedProperties": ["Color"],
+      "scope": "YellowHighlightText"
+    },
+    {
+      "id": "STYLE.SECTION_TITLE.EMPHASIS",
+      "enabled": true,
+      "riskLevel": "R1",
+      "allowedProperties": ["Bold", "Color"],
+      "scope": "SectionTitle"
+    },
+    {
+      "id": "STYLE.DECORATIVE.EFFECTS",
+      "enabled": true,
+      "riskLevel": "R1",
+      "allowedProperties": ["Shadow", "Glow", "SoftEdge", "FontShadow", "FontOutline"],
+      "scope": "ShapeDecoration"
+    },
+    {
+      "id": "SLIDE.BACKGROUND",
+      "enabled": false,
+      "riskLevel": "R2",
+      "allowedProperties": ["FollowMasterBackground", "Fill.Solid", "Fill.ForeColor.RGB"],
+      "scope": "Slide"
+    },
+    {
+      "id": "SLIDE.TRANSITION.ADVANCE_ON_CLICK",
+      "enabled": true,
+      "riskLevel": "R1",
+      "allowedProperties": ["AdvanceOnClick"],
+      "scope": "Slide"
+    }
+  ],
   "formulaWhitelist": [
     {
       "name": "功",
@@ -118,8 +173,10 @@
     "doNotModifyTextContent": true,
     "doNotMoveShapes": true,
     "doNotResizeShapes": true,
-    "allowTextBoxWidthExpansion": true,
+    "allowTextBoxWidthExpansion": false,
     "doNotModifyAnimations": true,
+    "doNotModifySlideTransitions": true,
+    "disableAdvanceOnClick": false,
     "doNotCropImages": true,
     "formulaTextStyleDefault": true,
     "formulaConversionDefault": false,

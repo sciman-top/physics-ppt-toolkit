@@ -37,6 +37,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+. (Join-Path $PSScriptRoot 'PhysicsPpt.Common.ps1')
+
 $script:MsoTrue = -1
 $script:MsoFalse = 0
 
@@ -59,13 +61,6 @@ function Add-FixRow {
         Status = $Status
         Details = $Details
     }) | Out-Null
-}
-
-function Write-Utf8BomCsv {
-    param([object[]]$Rows, [string]$Path)
-    $utf8Bom = New-Object System.Text.UTF8Encoding($true)
-    $csvLines = $Rows | ConvertTo-Csv -NoTypeInformation
-    [System.IO.File]::WriteAllLines($Path, $csvLines, $utf8Bom)
 }
 
 $InputPath = [System.IO.Path]::GetFullPath($InputPath)
@@ -165,11 +160,11 @@ try {
 } finally {
     if ($null -ne $pres) {
         try { $pres.Close() | Out-Null } catch { }
-        [System.Runtime.InteropServices.Marshal]::ReleaseComObject($pres) | Out-Null
+        Release-ComObjectSafe -ComObject $pres
     }
     if ($null -ne $pp) {
         try { $pp.Quit() | Out-Null } catch { }
-        [System.Runtime.InteropServices.Marshal]::ReleaseComObject($pp) | Out-Null
+        Release-ComObjectSafe -ComObject $pp
     }
     [System.GC]::Collect()
     [System.GC]::WaitForPendingFinalizers()

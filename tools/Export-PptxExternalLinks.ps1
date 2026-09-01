@@ -34,18 +34,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-function Get-PptxFiles {
-    param([string]$Path, [string]$Pattern, [switch]$Recurse)
-    if (-not (Test-Path -LiteralPath $Path)) { throw "InputPath not found: $Path" }
-    $item = Get-Item -LiteralPath $Path
-    if ($item.PSIsContainer) {
-        $opt = @{ LiteralPath = $item.FullName; Filter = $Pattern; File = $true }
-        if ($Recurse) { $opt.Recurse = $true }
-        return @(Get-ChildItem @opt | Where-Object { $_.Name -notlike '~$*' })
-    }
-    if ($item.Extension -ne '.pptx') { throw "Only .pptx files are supported: $($item.FullName)" }
-    return @($item)
-}
+. (Join-Path $PSScriptRoot 'PhysicsPpt.Common.ps1')
 
 function Get-RelationshipTypeName {
     param([string]$Type)
@@ -123,7 +112,7 @@ $OutputDir = [System.IO.Path]::GetFullPath($OutputDir)
 if (-not (Test-Path -LiteralPath $OutputDir)) { New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null }
 
 $rows = New-Object System.Collections.Generic.List[object]
-$files = @(Get-PptxFiles -Path $InputPath -Pattern $FilePattern -Recurse:$Recurse)
+$files = @(Get-PresentationFiles -Path $InputPath -Pattern $FilePattern -Recurse:$Recurse -SupportedExtensions @('.pptx') -ExcludedRoots @($OutputDir))
 if ($files.Count -eq 0) { throw "No .pptx files found in $InputPath" }
 
 foreach ($file in $files) {
@@ -160,7 +149,7 @@ foreach ($file in $files) {
 
 $csvPath = Join-Path $OutputDir 'pptx-external-links.csv'
 $jsonPath = Join-Path $OutputDir 'pptx-external-links.json'
-$rows | Sort-Object File, Slide, Entry, RelationshipId | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
+Write-Utf8BomCsv -InputObject @($rows | Sort-Object File, Slide, Entry, RelationshipId) -Path $csvPath
 
 $summary = [pscustomobject]@{
     generatedAt = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'

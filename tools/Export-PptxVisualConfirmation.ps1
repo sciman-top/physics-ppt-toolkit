@@ -41,18 +41,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-function Write-Utf8BomCsv {
-    param([object[]]$Rows, [string]$Path)
-    $utf8Bom = New-Object System.Text.UTF8Encoding($true)
-    $csvLines = $Rows | ConvertTo-Csv -NoTypeInformation
-    [System.IO.File]::WriteAllLines($Path, $csvLines, $utf8Bom)
-}
-
-function Write-Utf8BomText {
-    param([string]$Text, [string]$Path)
-    $utf8Bom = New-Object System.Text.UTF8Encoding($true)
-    [System.IO.File]::WriteAllText($Path, $Text, $utf8Bom)
-}
+. (Join-Path $PSScriptRoot 'PhysicsPpt.Common.ps1')
 
 function Import-CsvIfExists {
     param([string]$Path)
@@ -270,10 +259,10 @@ if ($hasBaseline) {
     $baselineSlideMetricsCsv = Join-Path $BaselineVisualAuditDir 'pptx-slide-visual-metrics.csv'
 }
 
-$auditRows = Import-CsvIfExists -Path $auditCsv
-$slideRows = Import-CsvIfExists -Path $slideMetricsCsv
-$baselineRows = Import-CsvIfExists -Path $baselineAuditCsv
-$baselineSlideRows = Import-CsvIfExists -Path $baselineSlideMetricsCsv
+$auditRows = @(Import-CsvIfExists -Path $auditCsv)
+$slideRows = @(Import-CsvIfExists -Path $slideMetricsCsv)
+$baselineRows = @(Import-CsvIfExists -Path $baselineAuditCsv)
+$baselineSlideRows = @(Import-CsvIfExists -Path $baselineSlideMetricsCsv)
 $baselineIssueMaps = Get-AuditIssueMaps -Rows $baselineRows
 $baselineSlideMap = @{}
 foreach ($row in $baselineSlideRows) {

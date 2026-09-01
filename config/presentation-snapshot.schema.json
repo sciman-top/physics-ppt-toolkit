@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "presentation-snapshot.schema.json",
+  "title": "Physics PPT invariant snapshot",
+  "type": "object",
+  "required": ["schemaVersion", "sourceSha256", "slideWidth", "slideHeight", "slideCount", "slides", "package"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "sourceSha256": { "type": "string", "pattern": "^[A-Fa-f0-9]{64}$" },
+    "slideWidth": { "type": "number" },
+    "slideHeight": { "type": "number" },
+    "slideCount": { "type": "integer", "minimum": 0 },
+    "slides": { "type": "array" },
+    "package": {
+      "type": "object",
+      "required": ["relationships", "media"],
+      "properties": {
+        "relationships": { "type": "array" },
+        "media": { "type": "array" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": true
+}

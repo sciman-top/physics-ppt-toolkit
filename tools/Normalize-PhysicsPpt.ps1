@@ -5,8 +5,10 @@
 .DESCRIPTION
   This script opens .pptx files in Microsoft PowerPoint, applies low-risk style normalization,
   and saves normalized copies to an output folder. It does not change text content,
-  animations, picture crops, or video links. It may expand eligible text boxes horizontally
-  to prevent forced wrapping after font normalization.
+  animations, picture crops, video links, object geometry, or slide transitions.
+  Text-box expansion and answer alignment/animation behaviors are disabled by default.
+  Click-to-advance is preserved by default; use -DisableAdvanceOnClick only for a
+  deliberate anti-misclick presentation mode.
 
 .PARAMETER InputPath
   Path to a .pptx/.pptm file or a directory containing PPT files.
@@ -28,6 +30,10 @@
 
 .PARAMETER UpdateMaster
   Also normalize the slide master text styles.
+
+.PARAMETER DisableAdvanceOnClick
+  Explicitly disable mouse-click slide advance on every slide. The default is to
+  preserve the source presentation's click behavior.
 
 .EXAMPLE
   .\Normalize-PhysicsPpt.ps1 -InputPath "D:\课件" -OutputDir "D:\输出" -Recurse
@@ -51,6 +57,7 @@ param(
     [switch]$NoBackup,
     [switch]$NoPdf,
     [switch]$UpdateMaster,
+    [switch]$DisableAdvanceOnClick,
     [switch]$Force,
     [string]$ImageOutputDir,
 
@@ -82,6 +89,7 @@ $script:MsoMedia  = 16
 $script:MsoTextEffect = 15
 $script:PpPlaceholderTitle = 1
 $script:PpPlaceholderCenterTitle = 3
+$script:PpPlaceholderSubtitle = 2
 $script:PpAlignLeft = 1
 $script:PpAlignCenter = 2
 $script:MsoAnimEffectSplit = 16
@@ -108,7 +116,12 @@ function Invoke-WithComRetry {
             return & $Action
         } catch {
             $lastError = $_
-            if ($attempt -lt $MaxRetries) { Start-Sleep -Milliseconds $DelayMs }
+            $category = Get-ComFailureCategory -ErrorRecord $_
+            $message = if ($null -ne $_.Exception) { $_.Exception.Message } else { '' }
+            if ($attempt -ge $MaxRetries -or -not (Test-IsRetryablePresentationFailure -Category $category -Message $message)) {
+                throw
+            }
+            Start-Sleep -Milliseconds $DelayMs
         }
     }
     throw $lastError
@@ -180,6 +193,41 @@ function Get-ConfigValue {
     return $Default
 }
 
+$script:StyleRuleEnabled = @{}
+if ($null -ne $script:ConfigJson -and $null -ne $script:ConfigJson.styleRules) {
+    foreach ($styleRule in @($script:ConfigJson.styleRules)) {
+        $ruleId = [string]$styleRule.id
+        if (-not [string]::IsNullOrWhiteSpace($ruleId)) {
+            $script:StyleRuleEnabled[$ruleId] = [bool]$styleRule.enabled
+        }
+    }
+}
+
+function Test-StyleRuleEnabled {
+    param([Parameter(Mandatory = $true)][string]$RuleId)
+    if ($script:StyleRuleEnabled.ContainsKey($RuleId)) {
+        return [bool]$script:StyleRuleEnabled[$RuleId]
+    }
+    return $true
+}
+
+function Add-RuleSkippedReport {
+    param(
+        [string]$FileName,
+        [int]$SlideNumber,
+        [string]$ShapeName,
+        [string]$RuleId,
+        [string]$Property,
+        [string]$Details,
+        [string]$RiskLevel = 'R1'
+    )
+    if ($FileName -ne '') {
+        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $ShapeName `
+            -Issue 'RuleDisabled' -Details $Details -RuleId $RuleId -Property $Property `
+            -RiskLevel $RiskLevel -Result 'Skipped'
+    }
+}
+
 $script:VideoSlideKeywords = @(Get-ConfigValue 'rules' 'videoSlideKeywords' @('视频', '播放', '观察视频'))
 if ($script:VideoSlideKeywords -is [string]) { $script:VideoSlideKeywords = @($script:VideoSlideKeywords) }
 $script:VideoSlideKeywords = @($script:VideoSlideKeywords | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
@@ -200,30 +248,45 @@ if ($null -ne $script:ConfigJson) {
 
 $script:Style = [pscustomobject]@{
     FontChinese           = Get-ConfigValue 'fonts' 'chinese'           '微软雅黑'
+    FontCompactChinese    = Get-ConfigValue 'fonts' 'compactChinese'    '微软雅黑 UI'
     FontLatin             = Get-ConfigValue 'fonts' 'latin'             'Arial'
     FontMath              = Get-ConfigValue 'fonts' 'math'              'Cambria Math'
     SizeTitle1            = Get-ConfigValue 'fontSizes' 'title1'        46
     SizeSectionTitle      = Get-ConfigValue 'fontSizes' 'sectionTitle'  56
+    SizeTitle2            = Get-ConfigValue 'fontSizes' 'title2'        38
     SizeBody              = Get-ConfigValue 'fontSizes' 'body'          32
+    SizeAuxiliary         = Get-ConfigValue 'fontSizes' 'auxiliary'     28
     SizeMinimum           = Get-ConfigValue 'fontSizes' 'minimum'       24
     SizeTableHeader       = Get-ConfigValue 'fontSizes' 'tableHeader'   30
     SizeTableBody         = Get-ConfigValue 'fontSizes' 'tableBody'     28
     SizeFormulaInline     = Get-ConfigValue 'fontSizes' 'formulaInline' 34
     SizeFormulaStandalone = Get-ConfigValue 'fontSizes' 'formulaStandalone' 38
     SizeFormulaCore       = Get-ConfigValue 'fontSizes' 'formulaCore'   42
+    SizeFooter            = Get-ConfigValue 'fontSizes' 'footer'        20
     ColorWhite            = Convert-HexToRgbInt (Get-ConfigValue 'colors' 'white'         '#FFFFFF')
     ColorBlack            = Convert-HexToRgbInt (Get-ConfigValue 'colors' 'black'         '#000000')
     ColorBody             = Convert-HexToRgbInt (Get-ConfigValue 'colors' 'body'          '#000000')
-    ColorSectionTitle     = Convert-HexToRgbInt (Get-ConfigValue 'colors' 'sectionTitle'  '#0000FF')
-    ColorExtensionTitle   = Convert-HexToRgbInt (Get-ConfigValue 'colors' 'extensionTitle' '#FF0000')
-    ColorFormulaBlue      = Convert-HexToRgbInt (Get-ConfigValue 'colors' 'formulaBlue'   '#0066CC')
+    ColorDarkGray         = Convert-HexToRgbInt (Get-ConfigValue 'colors' 'darkGray'      '#222222')
+    ColorSectionTitle     = Convert-HexToRgbInt (Get-ConfigValue 'colors' 'sectionTitle'  '#1F4E79')
+    ColorSectionTitleHex  = Get-ConfigValue 'colors' 'sectionTitle'  '#1F4E79'
+    ColorExtensionTitle   = Convert-HexToRgbInt (Get-ConfigValue 'colors' 'extensionTitle' '#9C1C1C')
+    ColorExtensionTitleHex = Get-ConfigValue 'colors' 'extensionTitle' '#9C1C1C'
+    ColorFormulaBlue      = Convert-HexToRgbInt (Get-ConfigValue 'colors' 'formulaBlue'   '#004C99')
+    ColorFormulaBlueHex   = Get-ConfigValue 'colors' 'formulaBlue'   '#004C99'
+    ColorExperimentGreen  = Convert-HexToRgbInt (Get-ConfigValue 'colors' 'experimentGreen' '#006B3C')
+    ColorExperimentGreenHex = Get-ConfigValue 'colors' 'experimentGreen' '#006B3C'
     ColorYellowFill       = Convert-HexToRgbInt (Get-ConfigValue 'colors' 'yellowFill'    '#FFF2CC')
     ColorYellowBorder     = Convert-HexToRgbInt (Get-ConfigValue 'colors' 'yellowBorder'  '#D6A300')
 }
 
-$script:AllowTextBoxWidthExpansion = [bool](Get-ConfigValue 'rules' 'allowTextBoxWidthExpansion' $true)
+$script:AllowTextBoxWidthExpansion = [bool](Get-ConfigValue 'rules' 'allowTextBoxWidthExpansion' $false)
 $script:FormulaTextStyleDefault = [bool](Get-ConfigValue 'rules' 'formulaTextStyleDefault' $true)
 $script:FormulaConversionDefault = [bool](Get-ConfigValue 'rules' 'formulaConversionDefault' $false)
+$script:DoNotMoveShapes = [bool](Get-ConfigValue 'rules' 'doNotMoveShapes' $true)
+$script:DoNotResizeShapes = [bool](Get-ConfigValue 'rules' 'doNotResizeShapes' $true)
+$script:DoNotModifyAnimations = [bool](Get-ConfigValue 'rules' 'doNotModifyAnimations' $true)
+$script:DoNotModifySlideTransitions = [bool](Get-ConfigValue 'rules' 'doNotModifySlideTransitions' $true)
+$script:DisableAdvanceOnClick = [bool](Get-ConfigValue 'rules' 'disableAdvanceOnClick' $false) -or [bool]$DisableAdvanceOnClick
 
 # --- Yellow-ish RGB range for highlight-box detection ---
 # Tolerance band: R > 200, G > 200, B < 180 (covers most yellow/cream fills)
@@ -246,7 +309,13 @@ function Add-ReportRow {
         [int]$SlideNumber,
         [string]$ShapeName,
         [string]$Issue,
-        [string]$Details
+        [string]$Details,
+        [string]$RuleId = '',
+        [string]$Property = '',
+        [string]$Before = '',
+        [string]$After = '',
+        [string]$RiskLevel = '',
+        [string]$Result = ''
     )
     if ([string]::IsNullOrWhiteSpace($FilePath)) {
         $FilePath = $script:CurrentFilePath
@@ -259,7 +328,22 @@ function Add-ReportRow {
         Shape = $ShapeName
         Issue = $Issue
         Details = $Details
+        RuleId = $RuleId
+        Property = $Property
+        Before = $Before
+        After = $After
+        RiskLevel = $RiskLevel
+        Result = $Result
     }) | Out-Null
+}
+
+function Test-ShapeUsesAutomaticSizing {
+    param($Shape)
+    try {
+        return ([int]$Shape.TextFrame2.AutoSize -ne 0)
+    } catch {
+        return $false
+    }
 }
 
 function Reset-ReportRowsToCount {
@@ -274,7 +358,7 @@ function Restart-PowerPointApplication {
 
     if ($null -ne $Current) {
         try { $Current.Quit() | Out-Null } catch { }
-        try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($Current) | Out-Null } catch { }
+        Release-ComObjectSafe -ComObject $Current
     }
 
     [System.GC]::Collect()
@@ -284,19 +368,6 @@ function Restart-PowerPointApplication {
     $next = New-Object -ComObject PowerPoint.Application
     $next.Visible = $script:MsoTrue
     return $next
-}
-
-function Get-PptFiles {
-    param([string]$Path, [string]$Pattern, [switch]$Recurse)
-    if (-not (Test-Path -LiteralPath $Path)) { throw "InputPath not found: $Path" }
-    $item = Get-Item -LiteralPath $Path
-    if ($item.PSIsContainer) {
-        $opt = @{ LiteralPath = $item.FullName; Filter = $Pattern; File = $true }
-        if ($Recurse) { $opt.Recurse = $true }
-        return Get-ChildItem @opt | Where-Object { $_.Name -notlike '~$*' -and $_.Extension -in '.pptx', '.pptm' }
-    }
-    if ($item.Extension -notin '.pptx', '.pptm') { throw "Only .pptx/.pptm files are supported: $($item.FullName)" }
-    return @($item)
 }
 
 function Get-ShapeText {
@@ -541,12 +612,6 @@ function Test-IsFormulaCandidateText {
     return $false
 }
 
-function Get-NormalizedFormulaText {
-    param([string]$Text)
-    if ([string]::IsNullOrWhiteSpace($Text)) { return '' }
-    return (($Text -replace '\s+', '') -replace '＝', '=').Trim()
-}
-
 function Get-FormulaCandidateProfile {
     param([string]$Text)
 
@@ -604,14 +669,6 @@ function Get-FormulaCandidateProfile {
         Length = $normalized.Length
         Reason = $reason
     }
-}
-
-function Get-FormulaRuleValue {
-    param($Rule, [string]$Name, [string]$Default = '')
-    if ($null -eq $Rule) { return $Default }
-    $prop = $Rule.PSObject.Properties[$Name]
-    if ($null -eq $prop -or $null -eq $prop.Value) { return $Default }
-    return [string]$prop.Value
 }
 
 function Get-FormulaWhitelistMatch {
@@ -701,11 +758,26 @@ function Set-FormulaTextStyle {
         [string]$FileName
     )
 
+    if (-not (Test-StyleRuleEnabled -RuleId 'STYLE.FORMULA.TEXT')) {
+        Add-RuleSkippedReport -FileName $FileName -SlideNumber $SlideNumber -ShapeName (Get-ShapeName $Shape) `
+            -RuleId 'STYLE.FORMULA.TEXT' -Property 'FontName/NameFarEast/Size/Color/ParagraphAlignment' `
+            -Details 'Formula text style rule is disabled by configuration.'
+        return
+    }
+
     try {
         $textRange = $Shape.TextFrame2.TextRange
         $font = $textRange.Font
+        $beforeName = [string]$font.Name
+        $beforeFarEast = [string]$font.NameFarEast
+        $beforeSize = Get-TextRangeFontSize $textRange
+        $beforeBold = [string]$font.Bold
+        $beforeColor = ''
+        try { $beforeColor = [string]$font.Fill.ForeColor.RGB } catch { }
         $targetSize = Resolve-FormulaTargetSize -Profile $Profile
         $safeSize = Resolve-SafeFontSize -TextRange $textRange -TargetSize $targetSize -FileName $FileName -SlideNumber $SlideNumber -ShapeName $Shape.Name
+        $beforeAlignment = ''
+        try { $beforeAlignment = [string]$textRange.ParagraphFormat.Alignment } catch { }
 
         $font.Name = $script:Style.FontMath
         $font.NameFarEast = $script:Style.FontChinese
@@ -716,9 +788,14 @@ function Set-FormulaTextStyle {
         $textRange.ParagraphFormat.Alignment = $script:PpAlignCenter
 
         Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $Shape.Name -Issue 'FormulaTextStyleNormalized' `
-            -Details ("kind={0}; size={1:N1} pt; font={2}; color=#0066CC; text preserved." -f $Profile.Kind, $safeSize, $script:Style.FontMath)
+            -Details ("kind={0}; size={1:N1} pt; font={2}; color={3}; text preserved." -f $Profile.Kind, $safeSize, $script:Style.FontMath, $script:Style.ColorFormulaBlueHex) `
+            -RuleId 'STYLE.FORMULA.TEXT' -Property 'FontName/NameFarEast/Size/Bold/Color/ParagraphAlignment' `
+            -Before ("{0}|{1}|{2}|{3}|{4}|{5}" -f $beforeName, $beforeFarEast, $beforeSize, $beforeBold, $beforeColor, $beforeAlignment) `
+            -After ("{0}|{1}|{2}|{3}|{4}|{5}" -f $script:Style.FontMath, $script:Style.FontChinese, $safeSize, $script:MsoFalse, $script:Style.ColorFormulaBlue, $script:PpAlignCenter) `
+            -RiskLevel 'R1' -Result 'Applied'
     } catch {
-        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName (Get-ShapeName $Shape) -Issue 'FormulaTextStyleFailed' -Details $_.Exception.Message
+        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName (Get-ShapeName $Shape) -Issue 'FormulaTextStyleFailed' -Details $_.Exception.Message `
+            -RuleId 'STYLE.FORMULA.TEXT' -Property 'FontName/NameFarEast/Size/Bold/Color/ParagraphAlignment' -RiskLevel 'R1' -Result 'Failed'
     }
 }
 
@@ -767,24 +844,341 @@ function Set-TextRangeStyle {
         [string]$FileName = '',
         [int]$SlideNumber = 0,
         [string]$ShapeName = '',
-        [switch]$ForceTargetSize
+        [switch]$ForceTargetSize,
+        [switch]$FontOnly
     )
+    if (-not (Test-StyleRuleEnabled -RuleId 'STYLE.TEXT.FONT')) {
+        Add-RuleSkippedReport -FileName $FileName -SlideNumber $SlideNumber -ShapeName $ShapeName `
+            -RuleId 'STYLE.TEXT.FONT' -Property $(if ($FontOnly) { 'FontName/NameFarEast' } else { 'FontName/NameFarEast/Size/Bold/Color' }) `
+            -Details 'Text style rule is disabled by configuration.'
+        return
+    }
     try {
         $font = $TextRange.Font
+        $beforeName = [string]$font.Name
+        $beforeFarEast = [string]$font.NameFarEast
+        $beforeSize = Get-TextRangeFontSize $TextRange
+        $beforeBold = [string]$font.Bold
+        $beforeColor = try { [string]$font.Fill.ForeColor.RGB } catch { '' }
         $safeSize = Resolve-SafeFontSize -TextRange $TextRange -TargetSize $Size -FileName $FileName -SlideNumber $SlideNumber -ShapeName $ShapeName -ForceTargetSize:$ForceTargetSize
         $font.Name = $script:Style.FontLatin
         $font.NameFarEast = $script:Style.FontChinese
-        $font.Size = $safeSize
+        if (-not $FontOnly) {
+            $font.Size = $safeSize
+            $font.Bold = $(if ($Bold) { $script:MsoTrue } else { $script:MsoFalse })
+            $font.Fill.Visible = $script:MsoTrue
+            $font.Fill.ForeColor.RGB = $Color
+        }
+        if ($FileName -ne '') {
+            Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $ShapeName -Issue 'TextStyleNormalized' `
+                -Details $(if ($FontOnly) { 'Font family normalized; size, emphasis, color, text content, and geometry preserved.' } else { 'Font family and safe font size normalized; text content preserved.' }) `
+                -RuleId 'STYLE.TEXT.FONT' -Property $(if ($FontOnly) { 'FontName/NameFarEast' } else { 'FontName/NameFarEast/Size/Bold/Color' }) `
+                -Before ("{0}|{1}|{2}|{3}|{4}" -f $beforeName, $beforeFarEast, $beforeSize, $beforeBold, $beforeColor) `
+                -After $(if ($FontOnly) { "{0}|{1}|{2}|{3}|{4}" -f $script:Style.FontLatin, $script:Style.FontChinese, $beforeSize, $beforeBold, $beforeColor } else { "{0}|{1}|{2}|{3}|{4}" -f $script:Style.FontLatin, $script:Style.FontChinese, $safeSize, $Bold, $Color }) `
+                -RiskLevel 'R1' -Result 'Applied'
+        }
     } catch {
         if ($FileName -ne '') {
             Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $ShapeName `
-                -Issue 'TextStyleFailed' -Details $_.Exception.Message
+                -Issue 'TextStyleFailed' -Details $_.Exception.Message -RuleId 'STYLE.TEXT.FONT' -RiskLevel 'R1' -Result 'Failed'
         }
+    }
+}
+
+function Test-IsSecondaryTitleShape {
+    param($Shape)
+    try {
+        if ($Shape.Type -eq $script:MsoPlaceholder) {
+            return ([int]$Shape.PlaceholderFormat.Type -eq $script:PpPlaceholderSubtitle)
+        }
+    } catch { }
+    $name = Get-ShapeName $Shape
+    return ($name -match '(?i)(subtitle|副标题|二级标题|标题\s*2)')
+}
+
+function Test-IsAuxiliaryTextShape {
+    param($Shape)
+    $name = Get-ShapeName $Shape
+    return ($name -match '(?i)(footer|source|页脚|来源|参考|备注|注释|辅助|说明|提示)')
+}
+
+function Get-InstalledFontFamilyNames {
+    try {
+        Add-Type -AssemblyName System.Drawing
+        $collection = New-Object System.Drawing.Text.InstalledFontCollection
+        try {
+            return @($collection.Families | ForEach-Object { [string]$_.Name })
+        } finally {
+            $collection.Dispose()
+        }
+    } catch {
+        throw "Installed font enumeration is unavailable: $($_.Exception.Message)"
+    }
+}
+
+function Get-MissingConfiguredFonts {
+    $configured = @($script:Style.FontChinese, $script:Style.FontCompactChinese, $script:Style.FontLatin, $script:Style.FontMath) |
+        Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+        Select-Object -Unique
+    try {
+        $installed = @(Get-InstalledFontFamilyNames)
+        if ($installed.Count -eq 0) {
+            return [pscustomobject]@{
+                Status = 'Unavailable'
+                Configured = @($configured)
+                InstalledCount = 0
+                Missing = @()
+                Error = 'No installed font families were returned by the host.'
+            }
+        }
+    } catch {
+        return [pscustomobject]@{
+            Status = 'Unavailable'
+            Configured = @($configured)
+            InstalledCount = 0
+            Missing = @()
+            Error = $_.Exception.Message
+        }
+    }
+    $aliases = @{
+        '微软雅黑' = @('微软雅黑', 'Microsoft YaHei')
+        '微软雅黑 UI' = @('微软雅黑 UI', 'Microsoft YaHei UI')
+    }
+    $missing = New-Object System.Collections.Generic.List[string]
+    foreach ($fontName in $configured) {
+        $candidates = if ($aliases.ContainsKey([string]$fontName)) { @($aliases[[string]$fontName]) } else { @([string]$fontName) }
+        $found = @($installed | Where-Object { $candidate = [string]$_; @($candidates | Where-Object { $candidate -ieq [string]$_ }).Count -gt 0 }).Count -gt 0
+        if (-not $found) { $missing.Add([string]$fontName) | Out-Null }
+    }
+    return [pscustomobject]@{
+        Status = if ($missing.Count -gt 0) { 'Missing' } else { 'Available' }
+        Configured = @($configured)
+        InstalledCount = $installed.Count
+        Missing = @($missing.ToArray())
+        Error = ''
+    }
+}
+
+function Get-SlideAspectRatioCheck {
+    param($Presentation)
+    try {
+        $width = [double]$Presentation.PageSetup.SlideWidth
+        $height = [double]$Presentation.PageSetup.SlideHeight
+        if ($width -le 0 -or $height -le 0) {
+            return [pscustomobject]@{
+                Status = 'Unavailable'
+                Width = $width
+                Height = $height
+                Ratio = $null
+                ExpectedRatio = (16.0 / 9.0)
+                Is16By9 = $false
+                Error = 'PowerPoint returned a non-positive slide dimension.'
+            }
+        }
+        $ratio = $width / $height
+        $expected = 16.0 / 9.0
+        return [pscustomobject]@{
+            Status = 'Checked'
+            Width = $width
+            Height = $height
+            Ratio = $ratio
+            ExpectedRatio = $expected
+            Is16By9 = ([math]::Abs($ratio - $expected) -le 0.015)
+            Error = ''
+        }
+    } catch {
+        return [pscustomobject]@{
+            Status = 'Unavailable'
+            Width = $null
+            Height = $null
+            Ratio = $null
+            ExpectedRatio = (16.0 / 9.0)
+            Is16By9 = $false
+            Error = $_.Exception.Message
+        }
+    }
+}
+
+function Add-PresentationPreflightReports {
+    param(
+        $Presentation,
+        [string]$FileName
+    )
+
+    $fontCheck = Get-MissingConfiguredFonts
+    $fontRule = 'CHECK.FONT.AVAILABILITY'
+    if ($fontCheck.Status -eq 'Available') {
+        Add-ReportRow -File $FileName -SlideNumber 0 -ShapeName '(presentation)' -Issue 'ConfiguredFontsAvailable' `
+            -Details ("All configured font families are available on this host ({0} configured; {1} installed families inspected)." -f $fontCheck.Configured.Count, $fontCheck.InstalledCount) `
+            -RuleId $fontRule -Property 'FontFamily' -Before (($fontCheck.Configured -join '|')) -After 'AvailableOnHost' `
+            -RiskLevel 'R1' -Result 'Passed'
+    } elseif ($fontCheck.Status -eq 'Missing') {
+        $missingText = $fontCheck.Missing -join '|'
+        Add-ReportRow -File $FileName -SlideNumber 0 -ShapeName '(presentation)' -Issue 'ConfiguredFontsMissing' `
+            -Details ("Configured font families are not installed on this host: {0}. PowerPoint may substitute fonts; inspect a real-host render before delivery." -f $missingText) `
+            -RuleId $fontRule -Property 'FontFamily' -Before $missingText -After 'HostFontSubstitutionPossible' `
+            -RiskLevel 'R1' -Result 'NeedsReview'
+    } else {
+        Add-ReportRow -File $FileName -SlideNumber 0 -ShapeName '(presentation)' -Issue 'ConfiguredFontCheckUnavailable' `
+            -Details ("Configured font availability could not be inspected: {0}" -f $fontCheck.Error) `
+            -RuleId $fontRule -Property 'FontFamily' -Before 'Unavailable' -After 'NoWriteBack' `
+            -RiskLevel 'R1' -Result 'NeedsReview'
+    }
+
+    $aspectCheck = Get-SlideAspectRatioCheck -Presentation $Presentation
+    $aspectRule = 'CHECK.SLIDE.ASPECT_RATIO'
+    if ($aspectCheck.Status -eq 'Checked') {
+        $dimensions = "{0:N1}x{1:N1} pt (ratio {2:N4})" -f $aspectCheck.Width, $aspectCheck.Height, $aspectCheck.Ratio
+        if ($aspectCheck.Is16By9) {
+            Add-ReportRow -File $FileName -SlideNumber 0 -ShapeName '(presentation)' -Issue 'SlideAspectRatio16By9' `
+                -Details ("Presentation canvas is 16:9: {0}." -f $dimensions) `
+                -RuleId $aspectRule -Property 'SlideWidth/SlideHeight' -Before $dimensions -After '16:9' `
+                -RiskLevel 'R1' -Result 'Passed'
+        } else {
+            Add-ReportRow -File $FileName -SlideNumber 0 -ShapeName '(presentation)' -Issue 'SlideAspectRatioMismatch' `
+                -Details ("Presentation canvas is not 16:9: {0}. No canvas resize was performed because geometry and content are protected." -f $dimensions) `
+                -RuleId $aspectRule -Property 'SlideWidth/SlideHeight' -Before $dimensions -After '16:9 expected; no write-back' `
+                -RiskLevel 'R1' -Result 'NeedsReview'
+        }
+    } else {
+        Add-ReportRow -File $FileName -SlideNumber 0 -ShapeName '(presentation)' -Issue 'SlideAspectRatioCheckUnavailable' `
+            -Details ("Slide aspect-ratio check could not be completed: {0}" -f $aspectCheck.Error) `
+            -RuleId $aspectRule -Property 'SlideWidth/SlideHeight' -Before 'Unavailable' -After 'NoWriteBack' `
+            -RiskLevel 'R1' -Result 'NeedsReview'
+    }
+
+    return [pscustomobject]@{
+        Font = $fontCheck
+        AspectRatio = $aspectCheck
+    }
+}
+
+function Set-AutoSizeTextFontSafely {
+    param(
+        $Shape,
+        [int]$SlideNumber,
+        [string]$FileName,
+        [switch]$SpecialSlide
+    )
+
+    $shapeName = Get-ShapeName $Shape
+    if (-not (Test-StyleRuleEnabled -RuleId 'STYLE.TEXT.FONT')) {
+        Add-RuleSkippedReport -FileName $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
+            -RuleId 'STYLE.TEXT.FONT' -Property 'FontName/NameFarEast' `
+            -Details 'Text style rule is disabled by configuration.'
+        return
+    }
+    $left = [double]$Shape.Left
+    $top = [double]$Shape.Top
+    $width = [double]$Shape.Width
+    $height = [double]$Shape.Height
+    $autoSize = [int]$Shape.TextFrame2.AutoSize
+    $font = $Shape.TextFrame2.TextRange.Font
+    $beforeName = [string]$font.Name
+    $beforeFarEast = [string]$font.NameFarEast
+
+    if ([string]::IsNullOrWhiteSpace($beforeName) -or [string]::IsNullOrWhiteSpace($beforeFarEast)) {
+        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
+            -Issue 'TextStyleSkippedMixedFont' -Details 'Mixed or unresolved font runs were preserved because a lossless rollback cannot be guaranteed.' `
+            -RuleId 'STYLE.TEXT.FONT' -Property 'FontName/NameFarEast' -Before "$beforeName|$beforeFarEast" -After "$beforeName|$beforeFarEast" `
+            -RiskLevel 'R0' -Result 'Skipped'
+        return
+    }
+
+    try {
+        $font.Name = $script:Style.FontLatin
+        $font.NameFarEast = $script:Style.FontChinese
+
+        $geometryDrift = (
+            [Math]::Abs(([double]$Shape.Left) - $left) -gt 0.05 -or
+            [Math]::Abs(([double]$Shape.Top) - $top) -gt 0.05 -or
+            [Math]::Abs(([double]$Shape.Width) - $width) -gt 0.05 -or
+            [Math]::Abs(([double]$Shape.Height) - $height) -gt 0.05
+        )
+
+        if ($geometryDrift) {
+            $font.Name = $beforeName
+            $font.NameFarEast = $beforeFarEast
+            $Shape.Left = [single]$left
+            $Shape.Top = [single]$top
+            $Shape.Width = [single]$width
+            $Shape.Height = [single]$height
+            if (-not $SpecialSlide) {
+                $compactChineseFont = $script:Style.FontCompactChinese
+                $font.Name = $script:Style.FontLatin
+                $font.NameFarEast = $compactChineseFont
+                $fallbackGeometryDrift = (
+                    [Math]::Abs(([double]$Shape.Left) - $left) -gt 0.05 -or
+                    [Math]::Abs(([double]$Shape.Top) - $top) -gt 0.05 -or
+                    [Math]::Abs(([double]$Shape.Width) - $width) -gt 0.05 -or
+                    [Math]::Abs(([double]$Shape.Height) - $height) -gt 0.05
+                )
+                if (-not $fallbackGeometryDrift) {
+                    Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
+                        -Issue 'TextStyleNormalizedCompactFallback' `
+                        -Details 'Microsoft YaHei changed AutoSize geometry; Microsoft YaHei UI preserved geometry and was used as the compatible fallback.' `
+                        -RuleId 'STYLE.TEXT.FONT' -Property 'FontName/NameFarEast' -Before "$beforeName|$beforeFarEast" `
+                        -After "$($script:Style.FontLatin)|$compactChineseFont" -RiskLevel 'R1' -Result 'Applied'
+                    Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
+                        -Issue 'AutoSizeGeometryRestored' -Details 'Compatible font fallback completed without changing AutoSize or object geometry.' `
+                        -RuleId 'SAFETY.GEOMETRY.AUTOSIZE' -Property 'Left/Top/Width/Height/AutoSize' `
+                        -Before ("{0}|{1}|{2}|{3}|{4}" -f $left, $top, $width, $height, $autoSize) `
+                        -After ("{0}|{1}|{2}|{3}|{4}" -f $Shape.Left, $Shape.Top, $Shape.Width, $Shape.Height, $Shape.TextFrame2.AutoSize) `
+                        -RiskLevel 'R1' -Result 'Applied'
+                    return
+                }
+                $font.Name = $beforeName
+                $font.NameFarEast = $beforeFarEast
+                $Shape.Left = [single]$left
+                $Shape.Top = [single]$top
+                $Shape.Width = [single]$width
+                $Shape.Height = [single]$height
+            }
+            Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
+                -Issue 'TextStyleSkippedGeometryRisk' -Details 'Target font changed AutoSize geometry; font and geometry were rolled back before save.' `
+                -RuleId 'STYLE.TEXT.FONT' -Property 'FontName/NameFarEast' -Before "$beforeName|$beforeFarEast" -After "$beforeName|$beforeFarEast" `
+                -RiskLevel 'R0' -Result 'Skipped'
+            return
+        }
+
+        $Shape.Left = [single]$left
+        $Shape.Top = [single]$top
+        $Shape.Width = [single]$width
+        $Shape.Height = [single]$height
+        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
+            -Issue 'TextStyleNormalized' `
+            -Details $(if ($SpecialSlide) { 'Special slide font family normalized; original size, emphasis, color, AutoSize, and geometry were preserved.' } else { 'Font family normalized; original size, emphasis, color, AutoSize, and geometry were preserved.' }) `
+            -RuleId 'STYLE.TEXT.FONT' -Property 'FontName/NameFarEast' -Before "$beforeName|$beforeFarEast" `
+            -After "$($script:Style.FontLatin)|$($script:Style.FontChinese)" -RiskLevel 'R1' -Result 'Applied'
+        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
+            -Issue $(if ($SpecialSlide) { 'SpecialSlideFontNormalized' } else { 'AutoSizeGeometryRestored' }) `
+            -Details 'Font-only normalization completed without changing AutoSize or object geometry.' `
+            -RuleId 'SAFETY.GEOMETRY.AUTOSIZE' -Property 'Left/Top/Width/Height/AutoSize' `
+            -Before ("{0}|{1}|{2}|{3}|{4}" -f $left, $top, $width, $height, $autoSize) `
+            -After ("{0}|{1}|{2}|{3}|{4}" -f $Shape.Left, $Shape.Top, $Shape.Width, $Shape.Height, $Shape.TextFrame2.AutoSize) `
+            -RiskLevel 'R1' -Result 'Applied'
+    } catch {
+        try {
+            $font.Name = $beforeName
+            $font.NameFarEast = $beforeFarEast
+            $Shape.Left = [single]$left
+            $Shape.Top = [single]$top
+            $Shape.Width = [single]$width
+            $Shape.Height = [single]$height
+        } catch { }
+        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
+            -Issue 'TextStyleFailed' -Details $_.Exception.Message -RuleId 'STYLE.TEXT.FONT' -RiskLevel 'R1' -Result 'Failed'
     }
 }
 
 function Set-SectionTitleTextStyle {
     param($Shape, [int]$SlideNumber, [string]$FileName)
+    if (-not (Test-StyleRuleEnabled -RuleId 'STYLE.SECTION_TITLE.EMPHASIS')) {
+        Add-RuleSkippedReport -FileName $FileName -SlideNumber $SlideNumber -ShapeName (Get-ShapeName $Shape) `
+            -RuleId 'STYLE.SECTION_TITLE.EMPHASIS' -Property 'Bold/Color' `
+            -Details 'Section-title emphasis rule is disabled by configuration.'
+        return
+    }
     try {
         $text = Get-ShapeText $Shape
         $isExtensionSection = Test-IsExtensionSectionText -Text $text
@@ -796,12 +1190,16 @@ function Set-SectionTitleTextStyle {
             'Section title color and bold style normalized.'
         }
         $font = $Shape.TextFrame2.TextRange.Font
+        $beforeBold = [string]$font.Bold
+        $beforeColor = [string]$font.Fill.ForeColor.RGB
         $font.Bold = $script:MsoTrue
         $font.Fill.Visible = $script:MsoTrue
         $font.Fill.ForeColor.RGB = $targetColor
-        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $Shape.Name -Issue $issue -Details $details
+        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $Shape.Name -Issue $issue -Details $details `
+            -RuleId 'STYLE.SECTION_TITLE.EMPHASIS' -Property 'Bold/Color' -Before ("$beforeBold|$beforeColor") -After ("$($script:MsoTrue)|$targetColor") -RiskLevel 'R1' -Result 'Applied'
     } catch {
-        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName (Get-ShapeName $Shape) -Issue 'SectionTitleStyleFailed' -Details $_.Exception.Message
+        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName (Get-ShapeName $Shape) -Issue 'SectionTitleStyleFailed' -Details $_.Exception.Message `
+            -RuleId 'STYLE.SECTION_TITLE.EMPHASIS' -Property 'Bold/Color' -RiskLevel 'R1' -Result 'Failed'
     }
 }
 
@@ -887,6 +1285,9 @@ function Expand-TextBoxWidthIfNeeded {
         }
 
         $step = 'apply-position'
+        if ($script:DoNotResizeShapes) {
+            return $false
+        }
         $Shape.Left = [single]$newLeft
         $Shape.Width = [single]$targetWidth
         $step = 'word-wrap'
@@ -902,8 +1303,19 @@ function Expand-TextBoxWidthIfNeeded {
 }
 
 function Normalize-TextShape {
-    param($Shape, [string]$Text, [int]$SlideNumber, [string]$FileName, [bool]$IsVideoSlide, [bool]$IsSectionTitleSlide, [double]$SlideWidth)
+    param($Shape, [string]$Text, [int]$SlideNumber, [string]$FileName, [bool]$IsVideoSlide, [bool]$IsSectionTitleSlide, [double]$SlideWidth, [switch]$FontOnly)
     if ([string]::IsNullOrWhiteSpace($Text)) { return }
+
+    if (Test-ShapeUsesAutomaticSizing -Shape $Shape) {
+        Set-AutoSizeTextFontSafely -Shape $Shape -SlideNumber $SlideNumber -FileName $FileName -SpecialSlide:$FontOnly
+        return
+    }
+
+    if ($FontOnly) {
+        Set-TextRangeStyle -TextRange $Shape.TextFrame2.TextRange -Size 0 -Color 0 -Bold:$false `
+            -FileName $FileName -SlideNumber $SlideNumber -ShapeName (Get-ShapeName $Shape) -FontOnly
+        return
+    }
 
     if (Test-IsFormulaCandidateText $Text) {
         $profile = Add-FormulaCandidateReport -FileName $FileName -SlideNumber $SlideNumber -ShapeName $Shape.Name -Text $Text
@@ -920,9 +1332,24 @@ function Normalize-TextShape {
 
     try {
         $isTitle = Test-IsTitleShape $Shape
-        $size = if ($IsSectionTitleSlide) { $script:Style.SizeSectionTitle } elseif ($isTitle) { $script:Style.SizeTitle1 } else { $script:Style.SizeBody }
-        $bold = [bool]$isTitle
-        $color = if ($IsVideoSlide) { $script:Style.ColorWhite } else { $script:Style.ColorBody }
+        $isSecondaryTitle = (-not $isTitle -and (Test-IsSecondaryTitleShape $Shape))
+        $isAuxiliary = (-not $isTitle -and -not $isSecondaryTitle -and (Test-IsAuxiliaryTextShape $Shape))
+        $isFooter = ($isAuxiliary -and (Get-ShapeName $Shape) -match '(?i)(footer|页脚|来源|source)')
+        $size = if ($IsSectionTitleSlide) {
+            $script:Style.SizeSectionTitle
+        } elseif ($isTitle) {
+            $script:Style.SizeTitle1
+        } elseif ($isSecondaryTitle) {
+            $script:Style.SizeTitle2
+        } elseif ($isFooter) {
+            $script:Style.SizeFooter
+        } elseif ($isAuxiliary) {
+            $script:Style.SizeAuxiliary
+        } else {
+            $script:Style.SizeBody
+        }
+        $bold = [bool]($isTitle -or $isSecondaryTitle)
+        $color = if ($IsVideoSlide) { $script:Style.ColorWhite } elseif ($isAuxiliary) { $script:Style.ColorDarkGray } else { $script:Style.ColorBody }
         Set-TextRangeStyle -TextRange $Shape.TextFrame2.TextRange -Size $size -Color $color -Bold $bold `
             -FileName $FileName -SlideNumber $SlideNumber -ShapeName $Shape.Name -ForceTargetSize:$IsSectionTitleSlide
         if ($IsSectionTitleSlide) {
@@ -989,6 +1416,11 @@ function Get-TextShapeInfos {
 function Set-AnswerSplitAnimation {
     param($Slide, $Shape, [int]$SlideNumber, [string]$FileName)
 
+    if ($script:DoNotModifyAnimations) {
+        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName (Get-ShapeName $Shape) -Issue 'AnswerAnimationSkipped' -Details 'Animation modification is disabled by safety policy.'
+        return
+    }
+
     try {
         $shapeId = [int]$Shape.Id
         $sequence = $Slide.TimeLine.MainSequence
@@ -1017,6 +1449,11 @@ function Set-AnswerSplitAnimation {
 
 function Align-AnswerTextBoxes {
     param($Slide, [int]$SlideNumber, [string]$FileName)
+
+    if ($script:DoNotMoveShapes) {
+        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName '(slide)' -Issue 'AnswerTextAlignmentSkipped' -Details 'Object movement is disabled by safety policy.'
+        return
+    }
 
     $items = @(Get-TextShapeInfos -Slide $Slide)
     if ($items.Count -lt 2) { return }
@@ -1066,14 +1503,22 @@ function Normalize-TableShape {
 
 function Normalize-HighlightBox {
     param($Shape, [int]$SlideNumber = 0, [string]$FileName = '')
+    if (-not (Test-StyleRuleEnabled -RuleId 'STYLE.HIGHLIGHT.TEXT_COLOR')) {
+        Add-RuleSkippedReport -FileName $FileName -SlideNumber $SlideNumber -ShapeName (Get-ShapeName $Shape) `
+            -RuleId 'STYLE.HIGHLIGHT.TEXT_COLOR' -Property 'Color' `
+            -Details 'Highlight text-color rule is disabled by configuration.'
+        return
+    }
     try {
         if ($Shape.Fill.Visible -eq $script:MsoTrue) {
             $rgb = $Shape.Fill.ForeColor.RGB
             if (Test-IsYellowishFill $rgb) {
                 if ($Shape.TextFrame2.HasText -eq $script:MsoTrue) {
+                    $beforeColor = [string]$Shape.TextFrame2.TextRange.Font.Fill.ForeColor.RGB
                     $Shape.TextFrame2.TextRange.Font.Fill.ForeColor.RGB = $script:Style.ColorBody
                     if ($FileName -ne '') {
-                        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $Shape.Name -Issue 'HighlightTextColorFixed' -Details 'Yellow highlight text color was set to body color for readability.'
+                        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $Shape.Name -Issue 'HighlightTextColorFixed' -Details 'Yellow highlight text color was set to body color for readability.' `
+                            -RuleId 'STYLE.HIGHLIGHT.TEXT_COLOR' -Property 'Color' -Before $beforeColor -After ([string]$script:Style.ColorBody) -RiskLevel 'R1' -Result 'Applied'
                     }
                 } else {
                     if ($FileName -ne '') {
@@ -1086,39 +1531,126 @@ function Normalize-HighlightBox {
 }
 
 function Clear-DecorativeEffects {
-    param($Shape)
-    try { $Shape.Shadow.Visible = $script:MsoFalse } catch { }
-    try { $Shape.Shadow.Transparency = 1 } catch { }
-    try { $Shape.Shadow.Blur = 0 } catch { }
-    try { $Shape.Shadow.OffsetX = 0 } catch { }
-    try { $Shape.Shadow.OffsetY = 0 } catch { }
-    try { $Shape.Glow.Radius = 0 } catch { }
-    try { $Shape.SoftEdge.Radius = 0 } catch { }
+    param($Shape, [int]$SlideNumber = 0, [string]$FileName = '')
+    $ruleId = 'STYLE.DECORATIVE.EFFECTS'
+    $shapeName = Get-ShapeName $Shape
+    if (-not (Test-StyleRuleEnabled -RuleId $ruleId)) {
+        Add-RuleSkippedReport -FileName $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
+            -RuleId $ruleId -Property 'Shadow/Glow/SoftEdge/FontShadow/FontOutline' `
+            -Details 'Decorative-effect cleanup rule is disabled by configuration.'
+        return
+    }
+
+    $before = [ordered]@{}
+    $after = [ordered]@{}
+    $changed = $false
+    try { $before.ShadowVisible = [string]$Shape.Shadow.Visible } catch { }
+    try { $before.ShadowTransparency = [string]$Shape.Shadow.Transparency } catch { }
+    try { $before.ShadowBlur = [string]$Shape.Shadow.Blur } catch { }
+    try { $before.ShadowOffsetX = [string]$Shape.Shadow.OffsetX } catch { }
+    try { $before.ShadowOffsetY = [string]$Shape.Shadow.OffsetY } catch { }
+    try { $before.GlowRadius = [string]$Shape.Glow.Radius } catch { }
+    try { $before.SoftEdgeRadius = [string]$Shape.SoftEdge.Radius } catch { }
+    try {
+        if ($Shape.Shadow.Visible -ne $script:MsoFalse) { $Shape.Shadow.Visible = $script:MsoFalse; $changed = $true }
+        if ([double]$Shape.Shadow.Transparency -ne 1) { $Shape.Shadow.Transparency = 1; $changed = $true }
+        if ([double]$Shape.Shadow.Blur -ne 0) { $Shape.Shadow.Blur = 0; $changed = $true }
+        if ([double]$Shape.Shadow.OffsetX -ne 0) { $Shape.Shadow.OffsetX = 0; $changed = $true }
+        if ([double]$Shape.Shadow.OffsetY -ne 0) { $Shape.Shadow.OffsetY = 0; $changed = $true }
+    } catch { }
+    try { if ([double]$Shape.Glow.Radius -ne 0) { $Shape.Glow.Radius = 0; $changed = $true } } catch { }
+    try { if ([double]$Shape.SoftEdge.Radius -ne 0) { $Shape.SoftEdge.Radius = 0; $changed = $true } } catch { }
     try {
         if ($Shape.TextFrame2.HasText -eq $script:MsoTrue) {
-            $Shape.TextFrame2.TextRange.Font.Shadow.Visible = $script:MsoFalse
-            $Shape.TextFrame2.TextRange.Font.Shadow.Transparency = 1
-            $Shape.TextFrame2.TextRange.Font.Line.Visible = $script:MsoFalse
+            $font = $Shape.TextFrame2.TextRange.Font
+            try { $before.FontShadowVisible = [string]$font.Shadow.Visible } catch { }
+            try { $before.FontShadowTransparency = [string]$font.Shadow.Transparency } catch { }
+            try { $before.FontOutlineVisible = [string]$font.Line.Visible } catch { }
+            if ($font.Shadow.Visible -ne $script:MsoFalse) { $font.Shadow.Visible = $script:MsoFalse; $changed = $true }
+            if ([double]$font.Shadow.Transparency -ne 1) { $font.Shadow.Transparency = 1; $changed = $true }
+            if ($font.Line.Visible -ne $script:MsoFalse) { $font.Line.Visible = $script:MsoFalse; $changed = $true }
         }
     } catch { }
+    try { $after.ShadowVisible = [string]$Shape.Shadow.Visible } catch { }
+    try { $after.ShadowTransparency = [string]$Shape.Shadow.Transparency } catch { }
+    try { $after.ShadowBlur = [string]$Shape.Shadow.Blur } catch { }
+    try { $after.ShadowOffsetX = [string]$Shape.Shadow.OffsetX } catch { }
+    try { $after.ShadowOffsetY = [string]$Shape.Shadow.OffsetY } catch { }
+    try { $after.GlowRadius = [string]$Shape.Glow.Radius } catch { }
+    try { $after.SoftEdgeRadius = [string]$Shape.SoftEdge.Radius } catch { }
+    if ($FileName -ne '' -and $changed) {
+        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName -Issue 'DecorativeEffectsCleared' `
+            -Details 'Shadow, glow, soft-edge, and text-outline effects were cleared.' `
+            -RuleId $ruleId -Property 'Shadow/Glow/SoftEdge/FontShadow/FontOutline' `
+            -Before (($before | ConvertTo-Json -Compress)) -After (($after | ConvertTo-Json -Compress)) `
+            -RiskLevel 'R1' -Result 'Applied'
+    }
 }
 
 function Set-SlideBackground {
-    param($Slide, [bool]$IsVideoSlide)
+    param($Slide, [bool]$IsVideoSlide, [int]$SlideNumber = 0, [string]$FileName = '')
+    $ruleId = 'SLIDE.BACKGROUND'
+    if (-not (Test-StyleRuleEnabled -RuleId $ruleId)) {
+        Add-RuleSkippedReport -FileName $FileName -SlideNumber $SlideNumber -ShapeName '(slide)' `
+            -RuleId $ruleId -Property 'FollowMasterBackground/Fill.ForeColor.RGB' `
+            -Details 'Slide background normalization is disabled by configuration; original background preserved.' -RiskLevel 'R2'
+        return
+    }
+    $beforeFollow = ''
+    $beforeColor = ''
     try {
+        $beforeFollow = [string]$Slide.FollowMasterBackground
+        $beforeColor = [string]$Slide.Background.Fill.ForeColor.RGB
         $Slide.FollowMasterBackground = $script:MsoFalse
         $Slide.Background.Fill.Solid() | Out-Null
         $Slide.Background.Fill.ForeColor.RGB = $(if ($IsVideoSlide) { $script:Style.ColorBlack } else { $script:Style.ColorWhite })
-    } catch { }
+        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName '(slide)' -Issue 'SlideBackgroundNormalized' `
+            -Details $(if ($IsVideoSlide) { 'Video/media candidate background normalized to black.' } else { 'Normal slide background normalized to white.' }) `
+            -RuleId $ruleId -Property 'FollowMasterBackground/Fill.ForeColor.RGB' `
+            -Before "$beforeFollow|$beforeColor" -After ("$($script:MsoFalse)|" + [string]$(if ($IsVideoSlide) { $script:Style.ColorBlack } else { $script:Style.ColorWhite })) `
+            -RiskLevel 'R2' -Result 'Applied'
+    } catch {
+        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName '(slide)' -Issue 'SlideBackgroundNormalizeFailed' `
+            -Details (Format-ComFailureDetails $_) -RuleId $ruleId -Property 'FollowMasterBackground/Fill.ForeColor.RGB' -RiskLevel 'R2' -Result 'Failed'
+    }
+}
+
+function Report-SlideBackgroundCandidate {
+    param($Slide, [bool]$IsVideoSlide, [int]$SlideNumber = 0, [string]$FileName = '')
+    $beforeFollow = ''
+    $beforeColor = ''
+    try { $beforeFollow = [string]$Slide.FollowMasterBackground } catch { }
+    try { $beforeColor = [string]$Slide.Background.Fill.ForeColor.RGB } catch { }
+    $targetColor = if ($IsVideoSlide) { $script:Style.ColorBlack } else { $script:Style.ColorWhite }
+    $reason = if (Test-StyleRuleEnabled -RuleId 'SLIDE.BACKGROUND') {
+        'Background candidate reported only; enable SLIDE.BACKGROUND explicitly after visual review to write it.'
+    } else {
+        'Background normalization is disabled by configuration; original background preserved.'
+    }
+    Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName '(slide)' -Issue 'SlideBackgroundCandidate' `
+        -Details $reason -RuleId 'SLIDE.BACKGROUND' -Property 'FollowMasterBackground/Fill.ForeColor.RGB' `
+        -Before "$beforeFollow|$beforeColor" -After ("$($script:MsoFalse)|$targetColor") -RiskLevel 'R2' -Result 'Skipped'
 }
 
 function Disable-SlideAdvanceOnClick {
     param($Slide, [int]$SlideNumber, [string]$FileName)
+
+    if (-not (Test-StyleRuleEnabled -RuleId 'SLIDE.TRANSITION.ADVANCE_ON_CLICK')) {
+        Add-RuleSkippedReport -FileName $FileName -SlideNumber $SlideNumber -ShapeName '(slide)' `
+            -RuleId 'SLIDE.TRANSITION.ADVANCE_ON_CLICK' -Property 'AdvanceOnClick' `
+            -Details 'Click-to-advance rule is disabled by configuration.'
+        return
+    }
+    if (-not $script:DisableAdvanceOnClick) {
+        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName '(slide)' -Issue 'AdvanceOnClickPreserved' -Details 'Click-to-advance behavior preserved by default; use -DisableAdvanceOnClick for anti-misclick mode.' -RuleId 'SLIDE.TRANSITION.ADVANCE_ON_CLICK' -Property 'AdvanceOnClick' -RiskLevel 'R1' -Result 'Skipped'
+        return
+    }
     try {
+        $before = [string]$Slide.SlideShowTransition.AdvanceOnClick
         $Slide.SlideShowTransition.AdvanceOnClick = $script:MsoFalse
-        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName '(slide)' -Issue 'AdvanceOnClickDisabled' -Details 'Slide transition no longer advances on mouse click.'
+        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName '(slide)' -Issue 'AdvanceOnClickDisabled' -Details 'Advance on click disabled; other transition properties are preserved.' -RuleId 'SLIDE.TRANSITION.ADVANCE_ON_CLICK' -Property 'AdvanceOnClick' -Before $before -After ([string]$script:MsoFalse) -RiskLevel 'R1' -Result 'Applied'
     } catch {
-        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName '(slide)' -Issue 'AdvanceOnClickDisableFailed' -Details (Format-ComFailureDetails $_)
+        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName '(slide)' -Issue 'AdvanceOnClickDisableFailed' -Details (Format-ComFailureDetails $_) -RuleId 'SLIDE.TRANSITION.ADVANCE_ON_CLICK' -Property 'AdvanceOnClick' -RiskLevel 'R1' -Result 'Failed'
     }
 }
 
@@ -1221,6 +1753,7 @@ function Normalize-Presentation {
             $PowerPoint.Presentations.Open($File.FullName, $script:MsoFalse, $script:MsoFalse, $script:MsoFalse)
         }
 
+        Add-PresentationPreflightReports -Presentation $pres -FileName $File.Name | Out-Null
         if ($UpdateMaster -and -not $ReportOnly) { Update-SlideMasterStyle -Presentation $pres -FileName $File.Name }
         $slideWidth = [double]$pres.PageSetup.SlideWidth
 
@@ -1242,7 +1775,10 @@ function Normalize-Presentation {
             if (Test-IsEmptySlideCandidate -Slide $slide) {
                 Add-ReportRow -File $File.Name -SlideNumber $i -ShapeName '(slide)' -Issue 'EmptySlideCandidate' -Details 'No visible text, picture, media, group, or non-placeholder shape detected.'
             }
-            if (-not $ReportOnly) {
+            if ($ReportOnly) {
+                Report-SlideBackgroundCandidate -Slide $slide -IsVideoSlide $isVideo -SlideNumber $i -FileName $File.Name
+            } else {
+                Set-SlideBackground -Slide $slide -IsVideoSlide $isVideo -SlideNumber $i -FileName $File.Name
                 Disable-SlideAdvanceOnClick -Slide $slide -SlideNumber $i -FileName $File.Name
             }
 
@@ -1255,7 +1791,7 @@ function Normalize-Presentation {
                     }
 
                     if (-not $ReportOnly) {
-                        Clear-DecorativeEffects -Shape $shape
+                        Clear-DecorativeEffects -Shape $shape -SlideNumber $i -FileName $File.Name
                     }
 
                     if ($shape.Type -eq $script:MsoTextEffect) {
@@ -1284,11 +1820,12 @@ function Normalize-Presentation {
                                 }
                             } catch { }
                         } else {
-                            if (-not $preserveSlideStyle) {
+                            if ($preserveSlideStyle) {
+                                Normalize-TextShape -Shape $shape -Text $text -SlideNumber $i -FileName $File.Name -IsVideoSlide $isVideo -IsSectionTitleSlide:$false -SlideWidth $slideWidth -FontOnly
+                            } else {
                                 Normalize-TextShape -Shape $shape -Text $text -SlideNumber $i -FileName $File.Name -IsVideoSlide $isVideo -IsSectionTitleSlide $isSectionTitle -SlideWidth $slideWidth
                                 Normalize-HighlightBox -Shape $shape -SlideNumber $i -FileName $File.Name
                             }
-                            Clear-DecorativeEffects -Shape $shape
                         }
                     }
                 } catch {
@@ -1319,7 +1856,7 @@ function Normalize-Presentation {
         $script:CurrentFilePath = ''
         if ($null -ne $pres) {
             try { $pres.Close() | Out-Null } catch { }
-            [System.Runtime.InteropServices.Marshal]::ReleaseComObject($pres) | Out-Null
+            Release-ComObjectSafe -ComObject $pres
         }
         [System.GC]::Collect()
         [System.GC]::WaitForPendingFinalizers()
@@ -1330,7 +1867,7 @@ function Normalize-Presentation {
 $InputPath  = [System.IO.Path]::GetFullPath($InputPath)
 $OutputDir  = [System.IO.Path]::GetFullPath($OutputDir)
 
-$files = @(Get-PptFiles -Path $InputPath -Pattern $FilePattern -Recurse:$Recurse)
+$files = @(Get-PresentationFiles -Path $InputPath -Pattern $FilePattern -Recurse:$Recurse -SupportedExtensions @('.pptx', '.pptm') -ExcludedRoots @($OutputDir, $ImageOutputDir))
 if ($files.Count -eq 0) { throw "No .pptx/.pptm files found in $InputPath" }
 if (-not (Test-Path -LiteralPath $OutputDir)) { New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null }
 
@@ -1372,6 +1909,7 @@ if ($DegreeOfParallelism -gt 1 -and $files.Count -gt 1) {
         if ($NoBackup)      { $childArgs += '-NoBackup' }
         if ($NoPdf)         { $childArgs += '-NoPdf' }
         if ($UpdateMaster)  { $childArgs += '-UpdateMaster' }
+        if ($DisableAdvanceOnClick) { $childArgs += '-DisableAdvanceOnClick' }
         if ($Force)         { $childArgs += '-Force' }
         if (-not [string]::IsNullOrWhiteSpace($ImageOutputDir)) {
             $childArgs += @('-ImageOutputDir', $ImageOutputDir)
@@ -1402,7 +1940,14 @@ if ($DegreeOfParallelism -gt 1 -and $files.Count -gt 1) {
         if (Test-Path -LiteralPath $childReport) {
             try {
                 foreach ($row in @(Import-Csv -LiteralPath $childReport -Encoding UTF8)) {
-                    Add-ReportRow -File ([string]$row.File) -FilePath ([string]$row.FilePath) -SlideNumber ([int]$row.Slide) -ShapeName ([string]$row.Shape) -Issue ([string]$row.Issue) -Details ([string]$row.Details)
+                    $ruleId = if ($null -ne $row.PSObject.Properties['RuleId']) { [string]$row.RuleId } else { '' }
+                    $property = if ($null -ne $row.PSObject.Properties['Property']) { [string]$row.Property } else { '' }
+                    $before = if ($null -ne $row.PSObject.Properties['Before']) { [string]$row.Before } else { '' }
+                    $after = if ($null -ne $row.PSObject.Properties['After']) { [string]$row.After } else { '' }
+                    $riskLevel = if ($null -ne $row.PSObject.Properties['RiskLevel']) { [string]$row.RiskLevel } else { '' }
+                    $result = if ($null -ne $row.PSObject.Properties['Result']) { [string]$row.Result } else { '' }
+                    Add-ReportRow -File ([string]$row.File) -FilePath ([string]$row.FilePath) -SlideNumber ([int]$row.Slide) -ShapeName ([string]$row.Shape) -Issue ([string]$row.Issue) -Details ([string]$row.Details) `
+                        -RuleId $ruleId -Property $property -Before $before -After $after -RiskLevel $riskLevel -Result $result
                 }
             } catch {
                 Add-ReportRow -File $FileItem.Name -FilePath $FileItem.FullName -SlideNumber 0 -ShapeName '(presentation)' -Issue 'ChildReportMergeFailed' -Details $_.Exception.Message
@@ -1523,7 +2068,7 @@ if ($DegreeOfParallelism -gt 1 -and $files.Count -gt 1) {
     } finally {
         if ($null -ne $pp) {
             try { $pp.Quit() | Out-Null } catch { }
-            [System.Runtime.InteropServices.Marshal]::ReleaseComObject($pp) | Out-Null
+            Release-ComObjectSafe -ComObject $pp
         }
         [System.GC]::Collect()
         [System.GC]::WaitForPendingFinalizers()

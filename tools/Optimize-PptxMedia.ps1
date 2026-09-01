@@ -92,30 +92,6 @@ if ([string]::IsNullOrWhiteSpace($ToolRoot)) {
     $ToolRoot = Join-Path $PSScriptRoot 'vendor'
 }
 
-function Get-PptxFiles {
-    param([string]$Path, [string]$Pattern, [switch]$Recurse)
-    if (-not (Test-Path -LiteralPath $Path)) { throw "InputPath not found: $Path" }
-    $item = Get-Item -LiteralPath $Path
-    if ($item.PSIsContainer) {
-        $opt = @{ LiteralPath = $item.FullName; Filter = $Pattern; File = $true }
-        if ($Recurse) { $opt.Recurse = $true }
-        return @(Get-ChildItem @opt | Where-Object { $_.Name -notlike '~$*' -and $_.Name -notlike '*.media-optimized.pptx' })
-    }
-    if ($item.Extension -ne '.pptx') { throw "Only .pptx files are supported: $($item.FullName)" }
-    return @($item)
-}
-
-function Convert-ToSafePathSegment {
-    param([string]$Name)
-    $safe = $Name
-    foreach ($ch in [System.IO.Path]::GetInvalidFileNameChars()) {
-        $safe = $safe.Replace([string]$ch, '_')
-    }
-    $safe = $safe.Trim()
-    if ([string]::IsNullOrWhiteSpace($safe)) { return 'presentation' }
-    return $safe
-}
-
 function Get-ImageInfo {
     param([string]$Path)
     $image = $null
@@ -437,7 +413,7 @@ function Optimize-PresentationMedia {
 
     try {
         New-Item -ItemType Directory -Path $workRoot -Force | Out-Null
-        [System.IO.Compression.ZipFile]::ExtractToDirectory($File.FullName, $workRoot)
+        Expand-PptxPackageSafely -PptxPath $File.FullName -DestinationDir $workRoot
 
         $mediaRoot = Join-Path $workRoot 'ppt\media'
         $mediaFiles = @()
@@ -537,7 +513,7 @@ function Optimize-PresentationMedia {
         }
     }
 
-    $rows | Export-Csv -LiteralPath $reportPath -NoTypeInformation -Encoding UTF8
+    Write-Utf8BomCsv -InputObject $rows.ToArray() -Path $reportPath
 
     $originalBytesTotal = [int64]$File.Length
     $optimizedBytesTotal = if (Test-Path -LiteralPath $outPptx) { [int64](Get-Item -LiteralPath $outPptx).Length } else { 0 }
@@ -588,7 +564,7 @@ if ($UseSharp -and -not $sharpAvailable) {
 }
 $sharpWorkerPath = Join-Path $PSScriptRoot 'Optimize-PptxMedia.worker.js'
 $tools = Get-ExternalToolMap -ResolvedNodePath $resolvedNodePath -ModulePath $resolvedNodeModulesPath -SharpAvailable $sharpAvailable -ToolRoot $ToolRoot
-$files = @(Get-PptxFiles -Path $InputPath -Pattern $FilePattern -Recurse:$Recurse)
+$files = @(Get-PresentationFiles -Path $InputPath -Pattern $FilePattern -Recurse:$Recurse -SupportedExtensions @('.pptx') -ExcludedRoots @($OutputDir))
 if ($files.Count -eq 0) { throw "No .pptx files found in $InputPath" }
 
 foreach ($file in $files) {

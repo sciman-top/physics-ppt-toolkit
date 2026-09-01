@@ -60,12 +60,6 @@ $script:NsP = 'http://schemas.openxmlformats.org/presentationml/2006/main'
 $script:NsMc = 'http://schemas.openxmlformats.org/markup-compatibility/2006'
 $script:NsA14 = 'http://schemas.microsoft.com/office/drawing/2010/main'
 
-function Get-NormalizedFormulaText {
-    param([string]$Text)
-    if ([string]::IsNullOrWhiteSpace($Text)) { return '' }
-    return (($Text -replace '\s+', '') -replace '＝', '=').Trim()
-}
-
 function Get-FormulaKey {
     param([object]$Row)
     $file = if ($null -ne $Row.PSObject.Properties['FilePath'] -and -not [string]::IsNullOrWhiteSpace([string]$Row.FilePath)) { [string]$Row.FilePath } else { [string]$Row.File }
