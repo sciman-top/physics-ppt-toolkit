@@ -20,6 +20,10 @@ $ErrorActionPreference = 'Stop'
 
 $root = Split-Path -Parent $PSScriptRoot
 
+if (-not ($PSVersionTable.PSEdition -eq 'Core' -and $PSVersionTable.PSVersion.Major -ge 7)) {
+    Write-Warning 'Toolkit self-check is running under Windows PowerShell 5.1; use pwsh for the primary workflow. The legacy host remains supported as a fallback.'
+}
+
 # --- 1. Required files existence check ---
 $required = @(
     'AGENTS.md',
@@ -355,6 +359,16 @@ foreach ($check in $syncChecks) {
 
 # --- 8. Shared helper behavior check (Windows PowerShell 5.1 compatible) ---
 . (Join-Path $root 'tools\PhysicsPpt.Common.ps1')
+$powerShellHostInfo = Get-PowerShellHostInfo
+if ($null -eq $powerShellHostInfo -or [string]::IsNullOrWhiteSpace([string]$powerShellHostInfo.Path)) {
+    throw 'No PowerShell host is available for child workflow processes.'
+}
+if (-not $powerShellHostInfo.IsPrimary) {
+    Write-Warning 'PowerShell host resolver selected the Windows PowerShell 5.1 compatibility fallback; install/use pwsh for the primary path.'
+}
+if ([string]::IsNullOrWhiteSpace((Resolve-PowerShellHost))) {
+    throw 'Resolve-PowerShellHost returned an empty executable path.'
+}
 $tempBase = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
 $selfCheckRoot = Join-Path $tempBase ('physics-ppt-toolkit-selfcheck-' + [Guid]::NewGuid().ToString('N'))
 try {
@@ -410,8 +424,21 @@ try {
 
 $normalizeContent = Get-Content -LiteralPath (Join-Path $root 'tools\Normalize-PhysicsPpt.ps1') -Raw -Encoding UTF8
 $commonContent = Get-Content -LiteralPath (Join-Path $root 'tools\PhysicsPpt.Common.ps1') -Raw -Encoding UTF8
+foreach ($powerShellHostMarker in @('Get-PowerShellHostInfo', 'Resolve-PowerShellHost', 'pwsh.exe', 'powershell.exe')) {
+    if ($commonContent -notmatch [regex]::Escape($powerShellHostMarker)) { throw "PowerShell host resolver marker is missing: $powerShellHostMarker" }
+}
 foreach ($silentAutomationMarker in @('New-PowerPointApplication', 'DisplayAlerts = 1', '$application.Visible')) {
     if ($commonContent -notmatch [regex]::Escape($silentAutomationMarker)) { throw "Silent PowerPoint automation marker is missing: $silentAutomationMarker" }
+}
+if ($normalizeContent -match '&\s+powershell\.exe') { throw 'Parallel PowerShell workers must resolve the PS7-first host instead of hard-coding powershell.exe.' }
+if ($normalizeContent -notmatch 'Resolve-PowerShellHost') { throw 'Normalize script must use Resolve-PowerShellHost for child workers.' }
+
+foreach ($launcher in @('一键规范化并导出PDF.cmd', '一键检查PPT.cmd', '一键规范化导出并转换可编辑公式.cmd')) {
+    $launcherPath = Join-Path $root $launcher
+    $launcherContent = Get-Content -LiteralPath $launcherPath -Raw -Encoding UTF8
+    if ($launcherContent -notmatch '(?im)where\s+pwsh\.exe') { throw "Launcher must probe pwsh first: $launcher" }
+    if ($launcherContent -notmatch '(?im)set\s+"PS_HOST=pwsh\.exe"') { throw "Launcher must default to pwsh.exe: $launcher" }
+    if ($launcherContent -notmatch '(?im)powershell\.exe') { throw "Launcher must retain the explicit Windows PowerShell fallback: $launcher" }
 }
 foreach ($automationScript in @(
     'tools\Normalize-PhysicsPpt.ps1',

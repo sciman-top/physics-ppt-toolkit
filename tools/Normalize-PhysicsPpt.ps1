@@ -1886,6 +1886,7 @@ $activity = if ($ReportOnly) { 'Inspecting PPT style' } else { 'Normalizing PPT 
 if ($DegreeOfParallelism -gt 1 -and $files.Count -gt 1) {
     Write-Verbose "Parallel mode: $DegreeOfParallelism worker(s) for $($files.Count) file(s)"
     $scriptPath = $PSCommandPath
+    $workerPowerShell = Resolve-PowerShellHost
     $parallelTempRoot = Join-Path $OutputDir '_parallel_workers'
     if (-not (Test-Path -LiteralPath $parallelTempRoot)) { New-Item -ItemType Directory -Path $parallelTempRoot -Force | Out-Null }
     $runningJobs = New-Object System.Collections.Generic.List[object]
@@ -1914,11 +1915,15 @@ if ($DegreeOfParallelism -gt 1 -and $files.Count -gt 1) {
             $childArgs += @('-ImageOutputDir', $ImageOutputDir)
         }
         $job = Start-Job -ScriptBlock {
-            & powershell.exe @args
+            param(
+                [string]$hostPath,
+                [object[]]$workerArguments
+            )
+            & $hostPath @workerArguments
             if ($LASTEXITCODE -ne 0) {
                 throw "Child PowerShell exited with code $LASTEXITCODE."
             }
-        } -ArgumentList $childArgs -Name "PPT_$($FileItem.Name)"
+        } -ArgumentList @($workerPowerShell, (,$childArgs)) -Name "PPT_$($FileItem.Name)"
 
         return [pscustomobject]@{
             Job = $job

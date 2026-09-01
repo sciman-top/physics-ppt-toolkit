@@ -63,10 +63,12 @@ physics-ppt-toolkit/
 
 ## 快速开始
 
-在 PowerShell 中运行：
+默认使用 PowerShell 7（`pwsh`）运行；Windows PowerShell 5.1 仅作为旧环境兼容回退。命令行中运行：
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+
+pwsh -NoLogo -NoProfile
 
 cd .\physics-ppt-toolkit
 
@@ -127,7 +129,7 @@ _physics_ppt_output_yyyyMMdd_HHmmss/
 
 依赖按功能启用：默认规范化/检查只需要 PowerPoint；启用 `-ApplyFormulaOmmlWhitelist` 时才强制要求 .NET 验证器；MathJax SVG 与 sharp 媒体优化仅在对应功能使用时需要。可用 `tools\Assert-Toolchain.ps1 -Deep` 检查推荐组件，使用 `-RequireFormulaValidator`、`-RequireFormulaSvg` 或 `-RequireMediaOptimization` 将指定功能提升为必需门禁。
 
-批量递归输入会自动排除临时 `~$` 文件、工作流输出目录和历史 `_physics_ppt_output_yyyyMMdd_HHmmss` 目录，避免重复处理生成文件。所有 CSV 报告统一写入 UTF-8 BOM，兼容 Windows PowerShell 5.1、PowerShell 7 和 Excel。
+批量递归输入会自动排除临时 `~$` 文件、工作流输出目录和历史 `_physics_ppt_output_yyyyMMdd_HHmmss` 目录，避免重复处理生成文件。所有 CSV 报告统一写入 UTF-8 BOM，主路径使用 PowerShell 7，仍兼容 Windows PowerShell 5.1 和 Excel。
 
 ---
 
@@ -149,6 +151,7 @@ VBA 宏是独立的离线方案，不读取 JSON 配置。如需调整，请手�
 - 脚本不会裁剪图片。
 - 脚本不会修改动画顺序。
 - PowerPoint COM 默认以隐藏窗口和无提示模式运行，避免批处理期间反复弹出空白 PowerPoint 窗口；需要人工检查时再打开生成的副本。
+- 根目录 `.cmd` 入口先探测 `pwsh.exe`，只有找不到 PowerShell 7 时才回退到 `powershell.exe`；并行 worker 也沿用同一解析策略。
 - 默认保留“单击鼠标时移至下一页幻灯片”的讲授行为；仅使用 `-DisableAdvanceOnClick` 时才逐页关闭，且不改变其他切换和计时属性。
 - 每次规范化都会比较前后页面、文本、对象几何、动画、切换、关系和媒体摘要；除显式启用的 `AdvanceOnClick: true -> false` 外的差异均为阻断项。
 - `-PrepareAiVisualReview` 只导出配对页面图与请求包。AI 结果仅能更新报告门禁，不能访问或写回 PPTX。
@@ -163,6 +166,10 @@ VBA 宏是独立的离线方案，不读取 JSON 配置。如需调整，请手�
 - 批量设置普通页白底、视频页黑底。
 - 批量检查小字号、疑似公式、非规范字体、配置字体回退风险和非 16:9 画布。
 - 对既有 PPT 进行低风险视觉规范化。
+
+## 放映与投影边界
+
+工作流会生成可直接用于课堂的规范化 PPTX，并可用 `-OpenGeneratedPptx` 打开生成副本供人工复核。投影仪、扩展屏和 PowerPoint 放映模式属于宿主设备行为，工具不会在后台擅自切换显示器或自动开始放映；连接投影后，在已打开的生成副本中按 `F5`（从头放映）或 `Shift+F5`（从当前页放映）即可。这样既保留静默批处理，也避免把错误副本直接送上投影。
 
 ---
 

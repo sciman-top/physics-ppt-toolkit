@@ -28,7 +28,7 @@
 - `PPTX/` 是真实样本资产；新增、替换或删除大样本必须说明用途，普通代码回滚不得触碰无关样本变更。
 
 ## C. 最低门禁
-- minimum gate：`powershell -NoProfile -ExecutionPolicy Bypass -File tools/Test-ToolkitFiles.ps1`。
+- minimum gate：`pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools/Test-ToolkitFiles.ps1`；无 `pwsh` 时才使用 Windows PowerShell 5.1 兼容回退。
 - 依赖/工具链变更追加 `tools/Assert-Toolchain.ps1 -Deep`；只有需要证明 PowerPoint 可启动时才加 `-LaunchPowerPoint`。
 - OfficeMath/OMML 变更必须构建并运行 `tools/FormulaOfficeMathValidator`；输出 PPTX 变更至少用一个真实样本生成 `summary.md` 与 `review-manifest.json`。
 - High DPI、PowerPoint 实际导出和视觉质量属于人工/真实宿主验收，静态测试不能替代。

@@ -262,9 +262,31 @@ function Test-VendoredExecutable {
     }
 }
 
-# Required local runtime checks.
-$psVersion = $PSVersionTable.PSVersion.ToString()
-Add-ToolchainCheck -Name 'Windows PowerShell' -Tier 'Required' -Status 'OK' -Version $psVersion -Path $PSHOME
+# Required local runtime checks.  PowerShell 7 is the primary host; Windows
+# PowerShell 5.1 remains a compatibility fallback for legacy callers.
+$currentPsVersion = $PSVersionTable.PSVersion.ToString()
+$currentPsIsSeven = ($PSVersionTable.PSEdition -eq 'Core' -and $PSVersionTable.PSVersion.Major -ge 7)
+$currentPsStatus = if ($currentPsIsSeven) { 'OK' } else { 'WARN' }
+$currentPsDetails = if ($currentPsIsSeven) { '' } else { 'Run the default entrypoints with pwsh; this invocation is using the legacy host.' }
+Add-ToolchainCheck -Name 'Current PowerShell runtime' -Tier 'Recommended' -Status $currentPsStatus -Version $currentPsVersion -Path $PSHOME -Details $currentPsDetails
+
+$primaryPowerShellPath = Resolve-CommandPath 'pwsh'
+if ([string]::IsNullOrWhiteSpace($primaryPowerShellPath)) {
+    Add-ToolchainCheck -Name 'PowerShell 7 (primary host)' -Tier 'Required' -Status 'MISSING' -Details 'The default entrypoints require pwsh. Windows PowerShell 5.1 is supported only as a compatibility fallback.'
+} else {
+    $primaryVersion = Invoke-VersionProbe -FilePath $primaryPowerShellPath -Arguments @('-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.ToString()')
+    $primaryStatus = if ($primaryVersion.ExitCode -eq 0) { 'OK' } else { 'FAIL' }
+    Add-ToolchainCheck -Name 'PowerShell 7 (primary host)' -Tier 'Required' -Status $primaryStatus -Version $primaryVersion.Text -Path $primaryPowerShellPath
+}
+
+$legacyPowerShellPath = Resolve-CommandPath 'powershell.exe'
+if ([string]::IsNullOrWhiteSpace($legacyPowerShellPath)) {
+    Add-ToolchainCheck -Name 'Windows PowerShell 5.1 (compatibility fallback)' -Tier 'Optional' -Status 'MISSING' -Details 'Not required when PowerShell 7 is available.'
+} else {
+    $legacyVersion = Invoke-VersionProbe -FilePath $legacyPowerShellPath -Arguments @('-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.ToString()')
+    $legacyStatus = if ($legacyVersion.ExitCode -eq 0) { 'OK' } else { 'WARN' }
+    Add-ToolchainCheck -Name 'Windows PowerShell 5.1 (compatibility fallback)' -Tier 'Optional' -Status $legacyStatus -Version $legacyVersion.Text -Path $legacyPowerShellPath
+}
 
 Test-PowerPointCom
 
@@ -334,7 +356,7 @@ if ([string]::IsNullOrWhiteSpace($pythonPath) -or -not (Test-Path -LiteralPath $
     }
 }
 
-foreach ($tool in @('magick', 'tesseract', 'ffmpeg', 'pngquant', 'cjpeg', 'jpegtran', 'pwsh')) {
+foreach ($tool in @('magick', 'tesseract', 'ffmpeg', 'pngquant', 'cjpeg', 'jpegtran')) {
     $path = Resolve-CommandPath $tool
     if ([string]::IsNullOrWhiteSpace($path)) {
         Add-ToolchainCheck -Name "optional command $tool" -Tier 'Optional' -Status 'MISSING'

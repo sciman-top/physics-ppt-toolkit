@@ -108,8 +108,8 @@ npm install
 运行门禁：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\Test-ToolkitFiles.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\Assert-Toolchain.ps1 -Deep
+pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\Test-ToolkitFiles.ps1
+pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\Assert-Toolchain.ps1 -Deep
 ```
 
 确认通过后提交并推送：
@@ -160,8 +160,8 @@ git lfs pull
 验证：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\Test-ToolkitFiles.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\Assert-Toolchain.ps1 -Deep -LaunchPowerPoint
+pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\Test-ToolkitFiles.ps1
+pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\Assert-Toolchain.ps1 -Deep -LaunchPowerPoint
 ```
 
 最后用一个真实课件样本跑完整流程，确认生成 `summary.md` 和 `review-manifest.json`。

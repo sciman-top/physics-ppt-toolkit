@@ -102,6 +102,69 @@ function Release-ComObjectSafe {
     }
 }
 
+function Get-PowerShellHostInfo {
+    <#
+      Resolve the host used for child PowerShell processes.  PowerShell 7 is
+      the primary runtime; Windows PowerShell 5.1 is retained only as an
+      explicit compatibility fallback for older managed desktops.
+    #>
+    $pwshCommand = Get-Command -Name 'pwsh.exe' -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($null -eq $pwshCommand) {
+        $pwshCommand = Get-Command -Name 'pwsh' -CommandType Application -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+    }
+    if ($null -ne $pwshCommand) {
+        $path = [string]$pwshCommand.Source
+        if ($pwshCommand.PSObject.Properties['Path'] -and -not [string]::IsNullOrWhiteSpace([string]$pwshCommand.Path)) {
+            $path = [string]$pwshCommand.Path
+        }
+        if (-not [string]::IsNullOrWhiteSpace($path)) {
+            return [pscustomobject]@{
+                Path = $path
+                Name = 'PowerShell 7'
+                IsPrimary = $true
+            }
+        }
+    }
+
+    $legacyCommand = Get-Command -Name 'powershell.exe' -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($null -ne $legacyCommand) {
+        $path = [string]$legacyCommand.Source
+        if ($legacyCommand.PSObject.Properties['Path'] -and -not [string]::IsNullOrWhiteSpace([string]$legacyCommand.Path)) {
+            $path = [string]$legacyCommand.Path
+        }
+        if (-not [string]::IsNullOrWhiteSpace($path)) {
+            return [pscustomobject]@{
+                Path = $path
+                Name = 'Windows PowerShell 5.1 (fallback)'
+                IsPrimary = $false
+            }
+        }
+    }
+
+    return $null
+}
+
+function Resolve-PowerShellHost {
+    <#
+      Return an executable path for a child PowerShell process.  The fallback
+      is deliberately kept here, at one boundary, so all callers use the same
+      PS7-first policy and no worker silently regresses to powershell.exe.
+    #>
+    param([switch]$RequirePowerShell7)
+
+    $hostInfo = Get-PowerShellHostInfo
+    if ($null -eq $hostInfo) {
+        throw "No PowerShell host was found. Install PowerShell 7 (pwsh) or enable the Windows PowerShell 5.1 compatibility host."
+    }
+    if ($RequirePowerShell7 -and -not $hostInfo.IsPrimary) {
+        throw "PowerShell 7 (pwsh) is required for this operation, but only the Windows PowerShell 5.1 fallback was found."
+    }
+    return [string]$hostInfo.Path
+}
+
 function New-PowerPointApplication {
     <#
       Start PowerPoint for automation without showing an interactive window.
