@@ -409,6 +409,24 @@ try {
 }
 
 $normalizeContent = Get-Content -LiteralPath (Join-Path $root 'tools\Normalize-PhysicsPpt.ps1') -Raw -Encoding UTF8
+$commonContent = Get-Content -LiteralPath (Join-Path $root 'tools\PhysicsPpt.Common.ps1') -Raw -Encoding UTF8
+foreach ($silentAutomationMarker in @('New-PowerPointApplication', 'DisplayAlerts = 1', '$application.Visible')) {
+    if ($commonContent -notmatch [regex]::Escape($silentAutomationMarker)) { throw "Silent PowerPoint automation marker is missing: $silentAutomationMarker" }
+}
+foreach ($automationScript in @(
+    'tools\Normalize-PhysicsPpt.ps1',
+    'tools\Invoke-PhysicsPptWorkflow.ps1',
+    'tools\Export-PptxInvariantSnapshot.ps1',
+    'tools\Export-PptxVisualAudit.ps1',
+    'tools\Apply-FormulaSvgWhitelist.ps1',
+    'tools\Apply-PptxVisualAuditFixes.ps1',
+    'tools\Assert-Toolchain.ps1'
+)) {
+    $automationContent = Get-Content -LiteralPath (Join-Path $root $automationScript) -Raw -Encoding UTF8
+    if ($automationContent -match 'New-Object\s+-ComObject\s+PowerPoint\.Application') {
+        throw "PowerPoint automation script must use New-PowerPointApplication: $automationScript"
+    }
+}
 foreach ($requiredGuard in @('DoNotMoveShapes', 'DoNotResizeShapes', 'DoNotModifyAnimations', 'DoNotModifySlideTransitions', 'Test-ShapeUsesAutomaticSizing')) {
     if ($normalizeContent -notmatch [regex]::Escape($requiredGuard)) { throw "Normalize safety guard is missing: $requiredGuard" }
 }

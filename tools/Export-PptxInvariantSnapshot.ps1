@@ -165,7 +165,7 @@ $outputFullPath = [System.IO.Path]::GetFullPath($OutputPath)
 $powerPoint = $null
 $presentation = $null
 try {
-    $powerPoint = New-Object -ComObject PowerPoint.Application
+    $powerPoint = New-PowerPointApplication
     $presentation = $powerPoint.Presentations.Open($inputFullPath, -1, -1, 0)
     $slides = @()
     for ($i = 1; $i -le $presentation.Slides.Count; $i++) {

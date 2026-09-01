@@ -102,6 +102,29 @@ function Release-ComObjectSafe {
     }
 }
 
+function New-PowerPointApplication {
+    <#
+      Start PowerPoint for automation without showing an interactive window.
+      Callers can still explicitly open the generated result after the workflow
+      completes when a human review is wanted.  DisplayAlerts=1 is the
+      PowerPoint ppAlertsNone value; the guarded assignment keeps compatibility
+      with installations that expose a reduced COM surface.
+    #>
+    param([switch]$Visible)
+
+    $application = New-Object -ComObject PowerPoint.Application
+    try {
+        $application.Visible = $(if ($Visible) { -1 } else { 0 })
+    } catch {
+        # A COM host may not expose Visible until its first call; keep going and
+        # let the caller report any later automation failure.
+    }
+    if (-not $Visible) {
+        try { $application.DisplayAlerts = 1 } catch { }
+    }
+    return $application
+}
+
 function Convert-ToSafeFormulaPathSegment {
     param([string]$Name)
     $safe = [string]$Name

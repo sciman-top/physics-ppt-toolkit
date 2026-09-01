@@ -365,8 +365,7 @@ function Restart-PowerPointApplication {
     [System.GC]::WaitForPendingFinalizers()
     if ($FileRetryDelayMs -gt 0) { Start-Sleep -Milliseconds $FileRetryDelayMs }
 
-    $next = New-Object -ComObject PowerPoint.Application
-    $next.Visible = $script:MsoTrue
+    $next = New-PowerPointApplication
     return $next
 }
 
@@ -2017,8 +2016,7 @@ if ($DegreeOfParallelism -gt 1 -and $files.Count -gt 1) {
     $pp = $null
     $current = 0
     try {
-        $pp = New-Object -ComObject PowerPoint.Application
-        $pp.Visible = $script:MsoTrue
+        $pp = New-PowerPointApplication
         foreach ($file in $files) {
             $current++
             $pct = [int](($current / $total) * 100)

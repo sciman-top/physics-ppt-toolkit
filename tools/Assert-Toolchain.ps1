@@ -217,7 +217,7 @@ function Test-PowerPointCom {
     $existing = @(Get-Process -Name POWERPNT -ErrorAction SilentlyContinue)
     $pp = $null
     try {
-        $pp = New-Object -ComObject PowerPoint.Application
+        $pp = New-PowerPointApplication
         $version = [string]$pp.Version
         Add-ToolchainCheck -Name 'PowerPoint COM live activation' -Tier 'Recommended' -Status 'OK' -Version $version
     } catch {

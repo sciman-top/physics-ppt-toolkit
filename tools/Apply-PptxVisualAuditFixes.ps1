@@ -87,8 +87,7 @@ Copy-Item -LiteralPath $InputPath -Destination $OutputPath -Force
 $pp = $null
 $pres = $null
 try {
-    $pp = New-Object -ComObject PowerPoint.Application
-    $pp.Visible = $script:MsoTrue
+    $pp = New-PowerPointApplication
     $pres = $pp.Presentations.Open($OutputPath, $script:MsoFalse, $script:MsoFalse, $script:MsoFalse)
     $slideWidth = [double]$pres.PageSetup.SlideWidth
     $slideHeight = [double]$pres.PageSetup.SlideHeight

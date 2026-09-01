@@ -499,7 +499,7 @@ function Export-SourcePageImages {
     $items = @{}
     $pp = $null
     try {
-        $pp = New-Object -ComObject PowerPoint.Application
+        $pp = New-PowerPointApplication
         foreach ($file in $Files) {
             $identity = $IdentityMap[$file.FullName]
             $imageDir = Join-Path $sourceImageRoot $identity.safeStem
