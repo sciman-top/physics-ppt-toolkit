@@ -2339,17 +2339,26 @@ if (-not [string]::IsNullOrWhiteSpace($AiVisualReviewResult)) {
     & (Join-Path $PSScriptRoot 'Import-PptxAiReviewResult.ps1') -ManifestPath $manifestPath -ResultPath $AiVisualReviewResult -PacketPath $aiReviewPacketPath | Out-Null
     $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
 }
-Write-Summary -Path $summaryPath -Mode $Mode -InputFullPath $inputFullPath -OutputRoot $OutputRoot -ReportPath $finalReportPath -ManifestPath $manifestPath -Files $files -IncludeReviewArtifacts ([bool]$IncludeReviewArtifacts) -Rows $rows -Manifest $manifest
-
 $aiVisualReviewGate = Get-ObjectPropertyValue -Object $manifest -PropertyName 'aiVisualReview' -DefaultValue $null
 $invariantDeliveryBlocked = [bool]((Get-ObjectPropertyValue -Object $manifest -PropertyName 'invariantGate' -DefaultValue $null).status -eq 'Blocked')
 $aiDeliveryBlocked = [bool](Get-ObjectPropertyValue -Object $aiVisualReviewGate -PropertyName 'deliveryBlocked' -DefaultValue $false)
+$aiVisualReviewStatus = [string](Get-ObjectPropertyValue -Object $aiVisualReviewGate -PropertyName 'status' -DefaultValue 'NotPrepared')
+$deliveryStatus = if ($invariantDeliveryBlocked) {
+    'BlockedInvariantGate'
+} elseif ($aiDeliveryBlocked) {
+    'BlockedAiVisualReview'
+} elseif ($aiVisualReviewStatus -eq 'Passed') {
+    'Ready'
+} else {
+    'Pending'
+}
+$manifest | Add-Member -NotePropertyName deliveryBlocked -NotePropertyValue ([bool]($invariantDeliveryBlocked -or $aiDeliveryBlocked)) -Force
+$manifest | Add-Member -NotePropertyName deliveryStatus -NotePropertyValue $deliveryStatus -Force
+$manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+Write-Summary -Path $summaryPath -Mode $Mode -InputFullPath $inputFullPath -OutputRoot $OutputRoot -ReportPath $finalReportPath -ManifestPath $manifestPath -Files $files -IncludeReviewArtifacts ([bool]$IncludeReviewArtifacts) -Rows $rows -Manifest $manifest
+
 if ($invariantDeliveryBlocked -or $aiDeliveryBlocked) {
     $blockReason = if ($invariantDeliveryBlocked) { 'Invariant gate is Blocked.' } else { "Host-AI visual review is Blocked. Result: $($aiVisualReviewGate.result)" }
-    $manifest | Add-Member -NotePropertyName deliveryBlocked -NotePropertyValue $true -Force
-    $manifest | Add-Member -NotePropertyName deliveryStatus -NotePropertyValue $(if ($invariantDeliveryBlocked) { 'BlockedInvariantGate' } else { 'BlockedAiVisualReview' }) -Force
-    $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
-    Write-Summary -Path $summaryPath -Mode $Mode -InputFullPath $inputFullPath -OutputRoot $OutputRoot -ReportPath $finalReportPath -ManifestPath $manifestPath -Files $files -IncludeReviewArtifacts ([bool]$IncludeReviewArtifacts) -Rows $rows -Manifest $manifest
     throw "$blockReason Keep the generated files for investigation; do not deliver the normalized PPTX."
 }
 

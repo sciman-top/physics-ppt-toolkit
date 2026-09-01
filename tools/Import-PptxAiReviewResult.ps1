@@ -128,11 +128,18 @@ $gate = [pscustomobject]@{
 
 if (-not $ValidateOnly) {
     $manifest | Add-Member -NotePropertyName aiVisualReview -NotePropertyValue $gate -Force
+    $invariantGate = Get-PropertyValue $manifest 'invariantGate' $null
+    $invariantBlocked = ([string](Get-PropertyValue $invariantGate 'status' '') -eq 'Blocked')
+    $deliveryBlocked = [bool]($invariantBlocked -or $gate.deliveryBlocked)
+    $deliveryStatus = if ($invariantBlocked) { 'BlockedInvariantGate' } elseif ($gate.deliveryBlocked) { 'BlockedAiVisualReview' } elseif ($resultStatus -eq 'Passed') { 'Ready' } else { 'Pending' }
+    $manifest | Add-Member -NotePropertyName deliveryBlocked -NotePropertyValue $deliveryBlocked -Force
+    $manifest | Add-Member -NotePropertyName deliveryStatus -NotePropertyValue $deliveryStatus -Force
     $manifest | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath $manifestFullPath -Encoding UTF8
     $summaryPath = Join-Path (Split-Path -Parent $manifestFullPath) 'summary.md'
     if (Test-Path -LiteralPath $summaryPath) {
         $summary = Get-Content -LiteralPath $summaryPath -Raw -Encoding UTF8
         $summary = [regex]::Replace($summary, '(?m)^- 宿主 AI 视觉门禁：.*$', "- 宿主 AI 视觉门禁：$resultStatus")
+        $summary = [regex]::Replace($summary, '(?m)^- 交付状态：.*$', "- 交付状态：$deliveryStatus")
         [System.IO.File]::WriteAllText($summaryPath, $summary, (New-Object System.Text.UTF8Encoding -ArgumentList $false))
     }
 }

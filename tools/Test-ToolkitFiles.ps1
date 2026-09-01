@@ -472,8 +472,11 @@ $aiImportContent = Get-Content -LiteralPath (Join-Path $root 'tools\Import-PptxA
 if ($aiImportContent -match 'PowerPoint\.Application|Presentations\.Open|SaveAs|Normalize-PhysicsPpt') { throw 'AI review import must remain read-only and must not access PPTX automation.' }
 
 $workflowContent = Get-Content -LiteralPath (Join-Path $root 'tools\Invoke-PhysicsPptWorkflow.ps1') -Raw -Encoding UTF8
-foreach ($requiredWorkflowMarker in @('BlockedMissingNormalizedPptx', 'deliveryBlocked', 'deliveryStatus', 'invariantDeliveryBlocked')) {
+foreach ($requiredWorkflowMarker in @('BlockedMissingNormalizedPptx', 'deliveryBlocked', 'deliveryStatus', 'invariantDeliveryBlocked', "'Ready'", "'BlockedAiVisualReview'")) {
     if ($workflowContent -notmatch [regex]::Escape($requiredWorkflowMarker)) { throw "Workflow delivery gate marker is missing: $requiredWorkflowMarker" }
+}
+foreach ($requiredAiDeliveryMarker in @('deliveryStatus', "'Ready'", '交付状态')) {
+    if ($aiImportContent -notmatch [regex]::Escape($requiredAiDeliveryMarker)) { throw "AI import delivery marker is missing: $requiredAiDeliveryMarker" }
 }
 foreach ($summaryCheckMarker in @('configuredFontsMissingCount', 'slideAspectMismatchCount', '字体回退风险', '非 16:9')) {
     if ($workflowContent -notmatch [regex]::Escape($summaryCheckMarker)) { throw "Summary preflight marker is missing: $summaryCheckMarker" }
