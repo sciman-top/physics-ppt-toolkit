@@ -15,6 +15,12 @@
 - 视觉审查可作为交付门禁，但 AI/OCR 结果不能直接写回 PPTX；必须先形成受验证的结构化结果，再走同一副本与视觉复核链。
 - `tools/*.ps1`、`examples/*.ps1` 保持 UTF-8 with BOM 以兼容 Windows PowerShell 5.1；Excel CSV 必须写 UTF-8 BOM。
 
+## A.1 AI 编排固定规则
+- 固定 5 个执行槽位；每次只能激活一套 preset：`Sol-only`、`Terra-only`、`Luna-only` 三选一。
+- 每套 preset 只提供本模型族的 3 个档位；5 个槽位必须从当前 preset 的 3 个档位映射，允许重复。
+- `Sol-only` 仅允许 `high / medium / low`；`Terra-only` 仅允许 `max / xhigh / high`；`Luna-only` 仅允许 `max / xhigh / high`。
+- 槽位解析必须先绑定当前 preset 的模型族，再校验档位；同一 preset 内禁止任何槽位解析为其他模型族，禁止跨族回退或混用。
+
 ## B. 执行边界
 - `config/` 管样式、schema 与安全开关；`tools/` 管 PowerShell/Node/Python/.NET 自动化；`vba/` 是不读取 JSON 的离线备用实现。
 - 新工具必须纳入 `tools/Test-ToolkitFiles.ps1`；`reports/` 是可再生成产物，默认不新增跟踪文件。
