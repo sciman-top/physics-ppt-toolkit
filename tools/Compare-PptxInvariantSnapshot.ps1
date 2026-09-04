@@ -12,12 +12,32 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# PowerPoint exposes geometry as Single.  A no-geometry-change SaveAs can
+# round-trip a value by a few ten-thousandths of a point, which is below any
+# meaningful layout movement but used to become a false invariant blocker.
+# Keep this far below one screen pixel and below the smallest allowed manual
+# adjustment, so real position, size, and rotation changes still block.
+$geometryTolerance = 0.01
+
 function Read-Snapshot { param([string]$Path) return (Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json) }
 function Add-Difference { param($Rows, [string]$Path, [string]$Before, [string]$After, [string]$Kind)
     $Rows.Add([pscustomobject]@{ path = $Path; before = $Before; after = $After; kind = $Kind }) | Out-Null
 }
 function Compare-Value { param($Rows, [string]$Path, $Before, $After, [string]$Kind = 'Invariant')
     if ("$Before" -ne "$After") { Add-Difference $Rows $Path "$Before" "$After" $Kind }
+}
+function Compare-GeometryValue { param($Rows, [string]$Path, $Before, $After, [string]$Kind = 'Invariant')
+    if ($null -eq $Before -or $null -eq $After) {
+        Compare-Value $Rows $Path $Before $After $Kind
+        return
+    }
+    try {
+        if ([Math]::Abs(([double]$Before) - ([double]$After)) -le $geometryTolerance) { return }
+    } catch {
+        Compare-Value $Rows $Path $Before $After $Kind
+        return
+    }
+    Add-Difference $Rows $Path "$Before" "$After" $Kind
 }
 
 $before = Read-Snapshot $BeforePath
@@ -50,8 +70,11 @@ for ($i = 0; $i -lt $slideCount; $i++) {
         if (-not $shapeMapBefore.ContainsKey($id)) { Add-Difference $rows "$prefix.shapes[$id]" '' 'present' 'Blocker'; continue }
         if (-not $shapeMapAfter.ContainsKey($id)) { Add-Difference $rows "$prefix.shapes[$id]" 'present' '' 'Blocker'; continue }
         $b = $shapeMapBefore[$id]; $a = $shapeMapAfter[$id]
-        foreach ($property in @('name','type','left','top','width','height','rotation','zOrder','autoSize','wordWrap','text')) {
+        foreach ($property in @('name','type','zOrder','autoSize','wordWrap','text')) {
             Compare-Value $rows "$prefix.shapes[$id].$property" $b.$property $a.$property 'Blocker'
+        }
+        foreach ($property in @('left','top','width','height','rotation')) {
+            Compare-GeometryValue $rows "$prefix.shapes[$id].$property" $b.$property $a.$property 'Blocker'
         }
     }
 }

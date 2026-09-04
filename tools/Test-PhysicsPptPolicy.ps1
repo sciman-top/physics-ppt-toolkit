@@ -44,6 +44,13 @@ try {
     $comparison = Get-Content -LiteralPath $comparePath -Raw -Encoding UTF8 | ConvertFrom-Json
     if (-not $comparison.passed -or $comparison.blockerCount -ne 0 -or $comparison.allowedChangeCount -ne 1) { throw 'Invariant comparison did not allow only AdvanceOnClick true -> false.' }
 
+    $roundTripObject = $afterObject | ConvertTo-Json -Depth 12 | ConvertFrom-Json
+    $roundTripObject.slides[0].shapes[0].top = 20.0001
+    [System.IO.File]::WriteAllText($blockedPath, ($roundTripObject | ConvertTo-Json -Depth 12), (New-Object System.Text.UTF8Encoding -ArgumentList $false))
+    $roundTripResult = & (Join-Path $toolRoot 'Compare-PptxInvariantSnapshot.ps1') -BeforePath $beforePath -AfterPath $blockedPath
+    $roundTripComparison = $roundTripResult | ConvertFrom-Json
+    if (-not $roundTripComparison.passed -or $roundTripComparison.blockerCount -ne 0 -or $roundTripComparison.allowedChangeCount -ne 1) { throw 'Invariant comparison did not tolerate PowerPoint geometry round-trip noise.' }
+
     $blockedObject = $afterObject | ConvertTo-Json -Depth 12 | ConvertFrom-Json
     $blockedObject.slides[0].shapes[0].left = 11
     [System.IO.File]::WriteAllText($blockedPath, ($blockedObject | ConvertTo-Json -Depth 12), (New-Object System.Text.UTF8Encoding -ArgumentList $false))
