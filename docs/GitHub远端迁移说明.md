@@ -42,7 +42,6 @@
 应排除或单独分发：
 
 - `reports/`
-- `_physics_ppt_output_*/`
 - `node_modules/`
 - 大体积 `PPTX/` 样本
 - 超过 GitHub 普通文件限制的大型便携工具，例如 `pandoc.exe`

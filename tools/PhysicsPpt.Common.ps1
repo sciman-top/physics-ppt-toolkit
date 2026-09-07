@@ -274,8 +274,11 @@ function Get-PresentationFiles {
                     [System.IO.Path]::DirectorySeparatorChar,
                     [System.IO.Path]::AltDirectorySeparatorChar
                 )
-                foreach ($segment in ($relative -split '[\\/]')) {
+                $segments = $relative -split '[\\/]'
+                for ($i = 0; $i -lt $segments.Count; $i++) {
+                    $segment = $segments[$i]
                     if ($segment -match '^_physics_ppt_output_\d{8}_\d{6}$') { return $false }
+                    if ($i -eq 0 -and $segment -eq 'reports') { return $false }
                 }
                 return $true
             } |
@@ -417,8 +420,8 @@ function Convert-ToSafePathSegment {
     foreach ($ch in [System.IO.Path]::GetInvalidFileNameChars()) {
         $safe = $safe.Replace([string]$ch, '_')
     }
-    $safe = $safe -replace '\.', '_'
-    $safe = $safe.Trim()
+    # Dots are legal in Windows file names (e.g. "13.2内能"); only trailing dots break Win32 naming.
+    $safe = $safe.Trim().TrimEnd('.')
     if ([string]::IsNullOrWhiteSpace($safe)) { return 'presentation' }
     return $safe
 }

@@ -108,11 +108,13 @@ foreach ($field in $requiredFontFields) {
     if ([string]::IsNullOrWhiteSpace($config.fonts.$field)) { throw "Config fonts.$field is missing or empty" }
 }
 
-$requiredSizeFields = @('title1', 'sectionTitle', 'title2', 'body', 'auxiliary', 'minimum', 'tableHeader', 'tableBody', 'formulaInline', 'formulaStandalone', 'formulaCore', 'footer')
+$requiredSizeFields = @('title1', 'sectionTitle', 'title2', 'body', 'bodyMax', 'displayTitleMin', 'auxiliary', 'minimum', 'tableHeader', 'tableBody', 'formulaInline', 'formulaStandalone', 'formulaCore', 'footer')
 foreach ($field in $requiredSizeFields) {
     if ($null -eq $config.fontSizes.$field -or $config.fontSizes.$field -isnot [ValueType] -or [double]$config.fontSizes.$field -ne [math]::Floor([double]$config.fontSizes.$field) -or $config.fontSizes.$field -lt 8 -or $config.fontSizes.$field -gt 96) { throw "Config fontSizes.$field must be an integer between 8 and 96" }
 }
 if ($config.fontSizes.minimum -gt $config.fontSizes.body) { throw 'Config fontSizes.minimum must not exceed body.' }
+if ($config.fontSizes.bodyMax -lt $config.fontSizes.body) { throw 'Config fontSizes.bodyMax must not be smaller than body.' }
+if ($config.fontSizes.displayTitleMin -lt $config.fontSizes.bodyMax) { throw 'Config fontSizes.displayTitleMin must not be smaller than bodyMax.' }
 
 # Validate color values are hex strings
 $requiredColorFields = @('white', 'black', 'body', 'darkGray', 'emphasisRed', 'sectionTitle', 'extensionTitle', 'formulaBlue', 'experimentGreen', 'yellowFill', 'yellowBorder', 'blueFill', 'grayFill', 'videoYellow', 'videoBlue', 'videoRed', 'videoGreen')
@@ -457,9 +459,10 @@ foreach ($automationScript in @(
 foreach ($requiredGuard in @('DoNotMoveShapes', 'DoNotResizeShapes', 'DoNotModifyAnimations', 'DoNotModifySlideTransitions', 'Test-ShapeUsesAutomaticSizing')) {
     if ($normalizeContent -notmatch [regex]::Escape($requiredGuard)) { throw "Normalize safety guard is missing: $requiredGuard" }
 }
-foreach ($requiredRuleMarker in @('Test-StyleRuleEnabled', 'STYLE.FORMULA.TEXT', 'STYLE.DECORATIVE.EFFECTS', 'SLIDE.BACKGROUND', 'DisableAdvanceOnClick', 'AdvanceOnClickPreserved')) {
+foreach ($requiredRuleMarker in @('Test-StyleRuleEnabled', 'STYLE.FORMULA.TEXT', 'STYLE.DECORATIVE.EFFECTS', 'SLIDE.BACKGROUND', 'DisableAdvanceOnClick', 'AdvanceOnClickPreserved', 'SizeBodyMax', 'BodyFontSizeCapped', 'SizeDisplayTitleMin', 'TextStyleNormalizedGeometryRestored')) {
     if ($normalizeContent -notmatch [regex]::Escape($requiredRuleMarker)) { throw "Normalize rule marker is missing: $requiredRuleMarker" }
 }
+if ($normalizeContent -match 'Normalize-TextShape[^\r\n]*-FontOnly') { throw 'Special slides must stay report-only; preserve slides must not receive font-only normalization.' }
 if ($normalizeContent -match "Issue 'TextStyleSkippedAutoSize'") { throw 'AutoSize text must use font-only normalization with geometry restoration, not be skipped.' }
 foreach ($fontSafetyMarker in @('AutoSizeGeometryRestored', 'Set-AutoSizeTextFontSafely', 'TextStyleSkippedGeometryRisk', 'font and geometry were rolled back before save')) {
     if ($normalizeContent -notmatch [regex]::Escape($fontSafetyMarker)) { throw "AutoSize font normalization safety marker is missing: $fontSafetyMarker" }
@@ -472,7 +475,7 @@ $aiImportContent = Get-Content -LiteralPath (Join-Path $root 'tools\Import-PptxA
 if ($aiImportContent -match 'PowerPoint\.Application|Presentations\.Open|SaveAs|Normalize-PhysicsPpt') { throw 'AI review import must remain read-only and must not access PPTX automation.' }
 
 $workflowContent = Get-Content -LiteralPath (Join-Path $root 'tools\Invoke-PhysicsPptWorkflow.ps1') -Raw -Encoding UTF8
-foreach ($requiredWorkflowMarker in @('BlockedMissingNormalizedPptx', 'deliveryBlocked', 'deliveryStatus', 'invariantDeliveryBlocked', "'Ready'", "'BlockedAiVisualReview'")) {
+foreach ($requiredWorkflowMarker in @('BlockedMissingNormalizedPptx', 'deliveryBlocked', 'deliveryStatus', 'invariantDeliveryBlocked', "'Ready'", "'BlockedAiVisualReview'", 'Get-VersionedDeliveryRoot', 'VersionedDelivery')) {
     if ($workflowContent -notmatch [regex]::Escape($requiredWorkflowMarker)) { throw "Workflow delivery gate marker is missing: $requiredWorkflowMarker" }
 }
 foreach ($requiredAiDeliveryMarker in @('deliveryStatus', "'Ready'", '交付状态')) {

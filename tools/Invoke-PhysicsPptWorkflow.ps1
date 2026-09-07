@@ -14,7 +14,13 @@
   Path to a .pptx/.pptm file or a directory containing PPT files.
 
 .PARAMETER OutputRoot
-  Optional output root. Defaults to a timestamped folder next to InputPath.
+  Optional output root. Defaults to reports/<source PPTX stem>/ under the toolkit root.
+
+.PARAMETER VersionedDelivery
+  Resolve the output root to the next unused reports/<source>_v<N> folder so each
+  delivered generation keeps its own directory; the highest _vN is the newest.
+  An unversioned delivery folder counts as generation 1, so the first versioned
+  delivery becomes _v2. Cannot be combined with -OutputRoot.
 
 .PARAMETER Mode
   CheckOnly: only generate report.
@@ -78,6 +84,8 @@ param(
 
     [string]$FilePattern = '*.ppt*',
 
+    [switch]$VersionedDelivery,
+
     [switch]$Recurse,
     [switch]$UpdateMaster,
     [switch]$OpenOutput,
@@ -137,10 +145,32 @@ function Assert-PowerPointAutomationReady {
 }
 
 function Get-DefaultOutputRoot {
+    # Per-source standardized layout: reports/<source PPTX stem>/ keeps every
+    # artifact of one source file in a single named directory.
     param([System.IO.FileSystemInfo]$InputItem)
-    $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-    $baseDir = if ($InputItem.PSIsContainer) { $InputItem.FullName } else { $InputItem.DirectoryName }
-    return Join-Path $baseDir ("_physics_ppt_output_$stamp")
+    $invalidChars = [System.IO.Path]::GetInvalidFileNameChars()
+    $sourceName = if ($InputItem.PSIsContainer) { $InputItem.Name } else { [System.IO.Path]::GetFileNameWithoutExtension($InputItem.Name) }
+    $safeSource = (($sourceName.ToCharArray() | ForEach-Object { if ($invalidChars -contains $_) { '_' } else { $_ } }) -join '')
+    $reportsRoot = Join-Path (Split-Path -Parent $PSScriptRoot) 'reports'
+    return Join-Path $reportsRoot $safeSource
+}
+
+function Get-VersionedDeliveryRoot {
+    # Versioned delivery layout: reports/<source>_v<N>/ keeps every delivered
+    # generation in its own directory; the highest _vN is the newest. An
+    # unversioned delivery folder counts as generation 1, so the first
+    # versioned delivery becomes _v2.
+    param([System.IO.FileSystemInfo]$InputItem)
+    $baseDir = Get-DefaultOutputRoot -InputItem $InputItem
+    $parent = Split-Path -Parent $baseDir
+    $stem = Split-Path -Leaf $baseDir
+    $maxVersion = if (Test-Path -LiteralPath $baseDir) { 1 } else { 0 }
+    foreach ($dir in @(Get-ChildItem -LiteralPath $parent -Directory -ErrorAction SilentlyContinue)) {
+        if ($dir.Name -match ('^' + [regex]::Escape($stem) + '_v(\d+)$')) {
+            $maxVersion = [Math]::Max($maxVersion, [int]$Matches[1])
+        }
+    }
+    return Join-Path $parent ('{0}_v{1}' -f $stem, ($maxVersion + 1))
 }
 
 function Convert-ReportCsv {
@@ -1179,8 +1209,8 @@ function New-Manifest {
     $items = foreach ($file in $Files) {
         $identity = $IdentityMap[$file.FullName]
         $safeName = $identity.safeStem
-        $pptxPath = Join-Path $OutputRoot "01_规范化PPTX\$safeName.normalized$($file.Extension)"
-        $pdfPath = Join-Path $OutputRoot "02_导出PDF\$safeName.normalized.pdf"
+        $pptxPath = Join-Path $OutputRoot "01_交付物\$safeName.normalized$($file.Extension)"
+        $pdfPath = Join-Path $OutputRoot "01_交付物\$safeName.normalized.pdf"
         $imageDir = Join-Path $OutputRoot ('04_页面图片\' + $safeName)
         $fileRows = @($ReportRows | Where-Object { (Get-ReportRowFileKey -Row $_) -eq $file.FullName })
         $failed = @($fileRows | Where-Object { Test-IsFinalFailureIssue -Issue $_.Issue }).Count -gt 0
@@ -1497,9 +1527,9 @@ function Write-Summary {
     $lines.Add('## 输出结构')
     $lines.Add('')
     $lines.Add('- `00_检查报告/`：检查报告与规范化报告')
-    $lines.Add('- `01_规范化PPTX/`：处理后的 PPTX/PPTM')
-    if ($exportsPdf) {
-        $lines.Add('- `02_导出PDF/`：处理后导出的同名 PDF')
+    $lines.Add('- `01_交付物/`：处理后的 PPTX/PPTM 与同名导出 PDF 存放在同一目录')
+    if (-not $exportsPdf) {
+        $lines.Add('  （当前模式不导出 PDF，目录内仅包含 PPTX/PPTM）')
     }
     $lines.Add('- `03_原始备份/`：原始文件备份')
     if ($IncludeReviewArtifacts) {
@@ -2151,7 +2181,9 @@ $root = Split-Path -Parent $PSScriptRoot
 $inputItem = Get-Item -LiteralPath $InputPath
 $inputFullPath = $inputItem.FullName
 if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
-    $OutputRoot = Get-DefaultOutputRoot -InputItem $inputItem
+    $OutputRoot = if ($VersionedDelivery) { Get-VersionedDeliveryRoot -InputItem $inputItem } else { Get-DefaultOutputRoot -InputItem $inputItem }
+} elseif ($VersionedDelivery) {
+    throw 'Specify either -OutputRoot or -VersionedDelivery, not both.'
 }
 $OutputRoot = [System.IO.Path]::GetFullPath($OutputRoot)
 $files = @(Get-PresentationFiles -Path $inputFullPath -Pattern $FilePattern -Recurse:$Recurse -SupportedExtensions @('.pptx', '.pptm') -ExcludedRoots @($OutputRoot))
@@ -2159,8 +2191,7 @@ if ($files.Count -eq 0) { throw "No .pptx/.pptm files found in $inputFullPath" }
 $identityMap = Get-IdentityMap -InputRoot $inputFullPath -Files $files
 
 $reportDir = Join-Path $OutputRoot '00_检查报告'
-$normalizedDir = Join-Path $OutputRoot '01_规范化PPTX'
-$pdfDir = Join-Path $OutputRoot '02_导出PDF'
+$normalizedDir = Join-Path $OutputRoot '01_交付物'
 $backupDir = Join-Path $OutputRoot '03_原始备份'
 $imageDir = Join-Path $OutputRoot '04_页面图片'
 $contactSheetDir = Join-Path $OutputRoot '05_页面总览'
@@ -2177,9 +2208,6 @@ $formulaOmmlAuditDir = Join-Path $OutputRoot '15_公式OMML审查'
 $exportsPdf = $Mode -notin @('CheckOnly', 'SafeNormalize')
 $invariantDir = Join-Path $OutputRoot '16_不可变快照'
 $outputDirs = @($OutputRoot, $reportDir, $normalizedDir, $backupDir, $invariantDir)
-if ($exportsPdf) {
-    $outputDirs += @($pdfDir)
-}
 if ($IncludeReviewArtifacts) {
     $outputDirs += @($imageDir, $contactSheetDir, $reviewSheetDir, $sourceImageDir, $beforeAfterDir, $reviewPagePackageDir, $reviewIndexDir)
 }
@@ -2254,9 +2282,6 @@ if ($Mode -eq 'CheckOnly') {
     if (Test-Path -LiteralPath $normalizeReportPath) {
         Copy-Item -LiteralPath $normalizeReportPath -Destination $finalReportPath -Force
     }
-
-    Get-ChildItem -LiteralPath $normalizedDir -Filter '*.normalized.pdf' -File -ErrorAction SilentlyContinue |
-        Move-Item -Destination $pdfDir -Force
 
     $sourceBackupDir = Join-Path $normalizedDir '_backup_originals'
     if (Test-Path -LiteralPath $sourceBackupDir) {

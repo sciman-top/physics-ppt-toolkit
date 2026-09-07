@@ -255,6 +255,8 @@ $script:Style = [pscustomobject]@{
     SizeSectionTitle      = Get-ConfigValue 'fontSizes' 'sectionTitle'  56
     SizeTitle2            = Get-ConfigValue 'fontSizes' 'title2'        38
     SizeBody              = Get-ConfigValue 'fontSizes' 'body'          32
+    SizeBodyMax           = Get-ConfigValue 'fontSizes' 'bodyMax'       36
+    SizeDisplayTitleMin   = Get-ConfigValue 'fontSizes' 'displayTitleMin' 56
     SizeAuxiliary         = Get-ConfigValue 'fontSizes' 'auxiliary'     28
     SizeMinimum           = Get-ConfigValue 'fontSizes' 'minimum'       24
     SizeTableHeader       = Get-ConfigValue 'fontSizes' 'tableHeader'   30
@@ -397,19 +399,21 @@ function Test-ShapeHasTable {
     return $false
 }
 
-function Test-IsTitleShape {
+function Test-IsPlaceholderTitleShape {
     param($Shape)
-    # Primary: PowerPoint placeholder type (most reliable)
     try {
         if ($Shape.Type -eq $script:MsoPlaceholder) {
             $phType = $Shape.PlaceholderFormat.Type
-            if ($phType -eq $script:PpPlaceholderTitle -or $phType -eq $script:PpPlaceholderCenterTitle) {
-                return $true
-            }
-            # Subtitle or body placeholder → not a title
-            return $false
+            return ($phType -eq $script:PpPlaceholderTitle -or $phType -eq $script:PpPlaceholderCenterTitle)
         }
     } catch { }
+    return $false
+}
+
+function Test-IsTitleShape {
+    param($Shape)
+    # Primary: PowerPoint placeholder type (most reliable)
+    if (Test-IsPlaceholderTitleShape $Shape) { return $true }
     # Fallback heuristic: short text near the top of the slide
     $text = Get-ShapeText $Shape
     if ($text.Length -le 24 -and $Shape.Top -lt 90) { return $true }
@@ -572,10 +576,10 @@ function Get-SpecialSlidePreserveIssue {
 function Get-SpecialSlidePreserveDetails {
     param([string]$SlideKind)
     switch ($SlideKind) {
-        'Cover'        { return 'Cover slide detected; original typography and layout are preserved.' }
-        'Ending'       { return 'Ending slide detected; original typography and layout are preserved.' }
-        'Resource'     { return 'Resource/download slide detected; original typography and layout are preserved.' }
-        'AppendixText' { return 'Appendix explanation slide detected; original text style is preserved.' }
+        'Cover'        { return 'Cover slide detected; fonts, sizes, emphasis, colors, and layout are preserved. Only decorative shape effects are cleared.' }
+        'Ending'       { return 'Ending slide detected; fonts, sizes, emphasis, colors, and layout are preserved. Only decorative shape effects are cleared.' }
+        'Resource'     { return 'Resource/download slide detected; fonts, sizes, emphasis, colors, and layout are preserved. Only decorative shape effects are cleared.' }
+        'AppendixText' { return 'Appendix explanation slide detected; original text style is preserved. Only decorative shape effects are cleared.' }
         default        { return '' }
     }
 }
@@ -814,24 +818,31 @@ function Resolve-SafeFontSize {
         [string]$FileName = '',
         [int]$SlideNumber = 0,
         [string]$ShapeName = '',
-        [switch]$ForceTargetSize
+        [switch]$ForceTargetSize,
+        [double]$MaxSize = 0
     )
 
     $currentSize = Get-TextRangeFontSize $TextRange
-    if ($ForceTargetSize) {
-        return $TargetSize
-    }
-    if ($null -ne $currentSize -and $currentSize -lt $TargetSize) {
-        if ($FileName -ne '' -and $currentSize -lt $script:Style.SizeMinimum) {
-            Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $ShapeName `
-                -Issue 'SmallTextPreserved' -Details "$currentSize pt; not increased to avoid layout overflow."
+    $chosenSize = $TargetSize
+    if (-not $ForceTargetSize) {
+        if ($null -ne $currentSize -and $currentSize -lt $TargetSize) {
+            if ($FileName -ne '' -and $currentSize -lt $script:Style.SizeMinimum) {
+                Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $ShapeName `
+                    -Issue 'SmallTextPreserved' -Details "$currentSize pt; not increased to avoid layout overflow."
+            }
+            $chosenSize = $currentSize
+        } elseif ($null -ne $currentSize -and $currentSize -le 72) {
+            $chosenSize = $currentSize
         }
-        return $currentSize
     }
-    if ($null -ne $currentSize -and $currentSize -le 72) {
-        return $currentSize
+    if ($MaxSize -gt 0 -and $chosenSize -gt $MaxSize) {
+        if ($FileName -ne '') {
+            Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $ShapeName `
+                -Issue 'BodyFontSizeCapped' -Details "$chosenSize pt exceeded the configured body ceiling; capped to $MaxSize pt (smaller sizes reduce overflow risk)."
+        }
+        return $MaxSize
     }
-    return $TargetSize
+    return $chosenSize
 }
 
 function Set-TextRangeStyle {
@@ -844,6 +855,7 @@ function Set-TextRangeStyle {
         [int]$SlideNumber = 0,
         [string]$ShapeName = '',
         [switch]$ForceTargetSize,
+        [double]$MaxSize = 0,
         [switch]$FontOnly
     )
     if (-not (Test-StyleRuleEnabled -RuleId 'STYLE.TEXT.FONT')) {
@@ -859,7 +871,7 @@ function Set-TextRangeStyle {
         $beforeSize = Get-TextRangeFontSize $TextRange
         $beforeBold = [string]$font.Bold
         $beforeColor = try { [string]$font.Fill.ForeColor.RGB } catch { '' }
-        $safeSize = Resolve-SafeFontSize -TextRange $TextRange -TargetSize $Size -FileName $FileName -SlideNumber $SlideNumber -ShapeName $ShapeName -ForceTargetSize:$ForceTargetSize
+        $safeSize = Resolve-SafeFontSize -TextRange $TextRange -TargetSize $Size -FileName $FileName -SlideNumber $SlideNumber -ShapeName $ShapeName -ForceTargetSize:$ForceTargetSize -MaxSize $MaxSize
         $font.Name = $script:Style.FontLatin
         $font.NameFarEast = $script:Style.FontChinese
         if (-not $FontOnly) {
@@ -1052,6 +1064,64 @@ function Add-PresentationPreflightReports {
     }
 }
 
+function Set-AutoSizeFontSizeCapSafely {
+    param(
+        $Shape,
+        [double]$MaxSize,
+        [double]$Left,
+        [double]$Top,
+        [double]$Width,
+        [double]$Height,
+        [string]$FileName,
+        [int]$SlideNumber,
+        [string]$ShapeName
+    )
+    if ($MaxSize -le 0) { return }
+    if (-not (Test-StyleRuleEnabled -RuleId 'STYLE.TEXT.FONT')) { return }
+    $textRange = $Shape.TextFrame2.TextRange
+    $beforeSize = Get-TextRangeFontSize $textRange
+    if ($null -eq $beforeSize -or $beforeSize -le $MaxSize) { return }
+    try {
+        $textRange.Font.Size = $MaxSize
+        $Shape.Left = [single]$Left
+        $Shape.Top = [single]$Top
+        $Shape.Width = [single]$Width
+        $Shape.Height = [single]$Height
+        $geometryDrift = (
+            [Math]::Abs(([double]$Shape.Left) - $Left) -gt 0.05 -or
+            [Math]::Abs(([double]$Shape.Top) - $Top) -gt 0.05 -or
+            [Math]::Abs(([double]$Shape.Width) - $Width) -gt 0.05 -or
+            [Math]::Abs(([double]$Shape.Height) - $Height) -gt 0.05
+        )
+        if ($geometryDrift) {
+            $textRange.Font.Size = $beforeSize
+            $Shape.Left = [single]$Left
+            $Shape.Top = [single]$Top
+            $Shape.Width = [single]$Width
+            $Shape.Height = [single]$Height
+            Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $ShapeName `
+                -Issue 'BodyFontSizeCapRolledBack' -Details "AutoSize geometry could not be restored after capping to $MaxSize pt; font size rolled back to $beforeSize pt." `
+                -RuleId 'STYLE.TEXT.FONT' -Property 'Size' -Before "$beforeSize" -After "$beforeSize" -RiskLevel 'R0' -Result 'Skipped'
+            return
+        }
+        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $ShapeName `
+            -Issue 'BodyFontSizeCapped' -Details "$beforeSize pt exceeded the configured body ceiling; capped to $MaxSize pt with AutoSize geometry restored to the original bounds." `
+            -RuleId 'STYLE.TEXT.FONT' -Property 'Size' -Before "$beforeSize" -After "$MaxSize" -RiskLevel 'R1' -Result 'Applied'
+    } catch {
+        try { $textRange.Font.Size = $beforeSize } catch { }
+        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $ShapeName `
+            -Issue 'BodyFontSizeCapFailed' -Details $_.Exception.Message `
+            -RuleId 'STYLE.TEXT.FONT' -Property 'Size' -RiskLevel 'R1' -Result 'Failed'
+    }
+}
+
+function Get-AutoSizeGeometryDrift {
+    param($Shape, [double]$Left, [double]$Top, [double]$Width, [double]$Height)
+    return [Math]::Max(
+        [Math]::Max([Math]::Abs(([double]$Shape.Left) - $Left), [Math]::Abs(([double]$Shape.Top) - $Top)),
+        [Math]::Max([Math]::Abs(([double]$Shape.Width) - $Width), [Math]::Abs(([double]$Shape.Height) - $Height)))
+}
+
 function Set-AutoSizeTextFontSafely {
     param(
         $Shape,
@@ -1088,31 +1158,55 @@ function Set-AutoSizeTextFontSafely {
         $font.Name = $script:Style.FontLatin
         $font.NameFarEast = $script:Style.FontChinese
 
-        $geometryDrift = (
-            [Math]::Abs(([double]$Shape.Left) - $left) -gt 0.05 -or
-            [Math]::Abs(([double]$Shape.Top) - $top) -gt 0.05 -or
-            [Math]::Abs(([double]$Shape.Width) - $width) -gt 0.05 -or
-            [Math]::Abs(([double]$Shape.Height) - $height) -gt 0.05
-        )
+        $drift = Get-AutoSizeGeometryDrift -Shape $Shape -Left $left -Top $top -Width $width -Height $height
 
-        if ($geometryDrift) {
-            $font.Name = $beforeName
-            $font.NameFarEast = $beforeFarEast
+        if ($drift -gt 0.05) {
+            # AutoSize reflowed after the font change. Restore the original bounds first;
+            # keeping the normalized font is safe when the reflow was negligible.
             $Shape.Left = [single]$left
             $Shape.Top = [single]$top
             $Shape.Width = [single]$width
             $Shape.Height = [single]$height
+            $driftTolerance = [Math]::Max(2.0, 0.1 * [Math]::Min($width, $height))
+            if ($drift -le $driftTolerance) {
+                Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
+                    -Issue 'TextStyleNormalizedGeometryRestored' `
+                    -Details ("Microsoft YaHei reflowed the AutoSize shape by {0:N2} pt; the normalized font was kept and the original geometry was restored." -f $drift) `
+                    -RuleId 'STYLE.TEXT.FONT' -Property 'FontName/NameFarEast' -Before "$beforeName|$beforeFarEast" `
+                    -After "$($script:Style.FontLatin)|$($script:Style.FontChinese)" -RiskLevel 'R1' -Result 'Applied'
+                Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
+                    -Issue 'AutoSizeGeometryRestored' -Details 'Font normalization completed with AutoSize geometry restored to the original bounds.' `
+                    -RuleId 'SAFETY.GEOMETRY.AUTOSIZE' -Property 'Left/Top/Width/Height/AutoSize' `
+                    -Before ("{0}|{1}|{2}|{3}|{4}" -f $left, $top, $width, $height, $autoSize) `
+                    -After ("{0}|{1}|{2}|{3}|{4}" -f $Shape.Left, $Shape.Top, $Shape.Width, $Shape.Height, $Shape.TextFrame2.AutoSize) `
+                    -RiskLevel 'R1' -Result 'Applied'
+                return
+            }
             if (-not $SpecialSlide) {
                 $compactChineseFont = $script:Style.FontCompactChinese
                 $font.Name = $script:Style.FontLatin
                 $font.NameFarEast = $compactChineseFont
-                $fallbackGeometryDrift = (
-                    [Math]::Abs(([double]$Shape.Left) - $left) -gt 0.05 -or
-                    [Math]::Abs(([double]$Shape.Top) - $top) -gt 0.05 -or
-                    [Math]::Abs(([double]$Shape.Width) - $width) -gt 0.05 -or
-                    [Math]::Abs(([double]$Shape.Height) - $height) -gt 0.05
-                )
-                if (-not $fallbackGeometryDrift) {
+                $fallbackDrift = Get-AutoSizeGeometryDrift -Shape $Shape -Left $left -Top $top -Width $width -Height $height
+                if ($fallbackDrift -gt 0.05) {
+                    $Shape.Left = [single]$left
+                    $Shape.Top = [single]$top
+                    $Shape.Width = [single]$width
+                    $Shape.Height = [single]$height
+                    if ($fallbackDrift -le $driftTolerance) {
+                        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
+                            -Issue 'TextStyleNormalizedCompactFallbackGeometryRestored' `
+                            -Details ("Microsoft YaHei UI reflowed the AutoSize shape by {0:N2} pt; the compatible fallback font was kept and the original geometry was restored." -f $fallbackDrift) `
+                            -RuleId 'STYLE.TEXT.FONT' -Property 'FontName/NameFarEast' -Before "$beforeName|$beforeFarEast" `
+                            -After "$($script:Style.FontLatin)|$compactChineseFont" -RiskLevel 'R1' -Result 'Applied'
+                        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
+                            -Issue 'AutoSizeGeometryRestored' -Details 'Compatible font fallback completed with AutoSize geometry restored to the original bounds.' `
+                            -RuleId 'SAFETY.GEOMETRY.AUTOSIZE' -Property 'Left/Top/Width/Height/AutoSize' `
+                            -Before ("{0}|{1}|{2}|{3}|{4}" -f $left, $top, $width, $height, $autoSize) `
+                            -After ("{0}|{1}|{2}|{3}|{4}" -f $Shape.Left, $Shape.Top, $Shape.Width, $Shape.Height, $Shape.TextFrame2.AutoSize) `
+                            -RiskLevel 'R1' -Result 'Applied'
+                        return
+                    }
+                } else {
                     Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
                         -Issue 'TextStyleNormalizedCompactFallback' `
                         -Details 'Microsoft YaHei changed AutoSize geometry; Microsoft YaHei UI preserved geometry and was used as the compatible fallback.' `
@@ -1134,7 +1228,7 @@ function Set-AutoSizeTextFontSafely {
                 $Shape.Height = [single]$height
             }
             Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
-                -Issue 'TextStyleSkippedGeometryRisk' -Details 'Target font changed AutoSize geometry; font and geometry were rolled back before save.' `
+                -Issue 'TextStyleSkippedGeometryRisk' -Details 'Target font reflowed AutoSize geometry beyond the accepted tolerance; font and geometry were rolled back before save.' `
                 -RuleId 'STYLE.TEXT.FONT' -Property 'FontName/NameFarEast' -Before "$beforeName|$beforeFarEast" -After "$beforeName|$beforeFarEast" `
                 -RiskLevel 'R0' -Result 'Skipped'
             return
@@ -1305,8 +1399,26 @@ function Normalize-TextShape {
     param($Shape, [string]$Text, [int]$SlideNumber, [string]$FileName, [bool]$IsVideoSlide, [bool]$IsSectionTitleSlide, [double]$SlideWidth, [switch]$FontOnly)
     if ([string]::IsNullOrWhiteSpace($Text)) { return }
 
+    $isTitle = Test-IsTitleShape $Shape
+    $isSecondaryTitle = (-not $isTitle -and (Test-IsSecondaryTitleShape $Shape))
+    $isAuxiliary = (-not $isTitle -and -not $isSecondaryTitle -and (Test-IsAuxiliaryTextShape $Shape))
+    $isFooter = ($isAuxiliary -and (Get-ShapeName $Shape) -match '(?i)(footer|页脚|来源|source)')
+    $maxSize = 0
+    if (-not $IsSectionTitleSlide -and -not $isSecondaryTitle) {
+        $currentSize = Get-TextRangeFontSize $Shape.TextFrame2.TextRange
+        $isDisplayTitle = (Test-IsPlaceholderTitleShape $Shape) -or `
+            ($null -ne $currentSize -and $currentSize -ge $script:Style.SizeDisplayTitleMin)
+        if (-not $isDisplayTitle) { $maxSize = [double]$script:Style.SizeBodyMax }
+    }
+
     if (Test-ShapeUsesAutomaticSizing -Shape $Shape) {
+        $capLeft = [double]$Shape.Left
+        $capTop = [double]$Shape.Top
+        $capWidth = [double]$Shape.Width
+        $capHeight = [double]$Shape.Height
         Set-AutoSizeTextFontSafely -Shape $Shape -SlideNumber $SlideNumber -FileName $FileName -SpecialSlide:$FontOnly
+        Set-AutoSizeFontSizeCapSafely -Shape $Shape -MaxSize $maxSize -Left $capLeft -Top $capTop -Width $capWidth -Height $capHeight `
+            -FileName $FileName -SlideNumber $SlideNumber -ShapeName (Get-ShapeName $Shape)
         return
     }
 
@@ -1330,10 +1442,6 @@ function Normalize-TextShape {
     }
 
     try {
-        $isTitle = Test-IsTitleShape $Shape
-        $isSecondaryTitle = (-not $isTitle -and (Test-IsSecondaryTitleShape $Shape))
-        $isAuxiliary = (-not $isTitle -and -not $isSecondaryTitle -and (Test-IsAuxiliaryTextShape $Shape))
-        $isFooter = ($isAuxiliary -and (Get-ShapeName $Shape) -match '(?i)(footer|页脚|来源|source)')
         $size = if ($IsSectionTitleSlide) {
             $script:Style.SizeSectionTitle
         } elseif ($isTitle) {
@@ -1350,7 +1458,7 @@ function Normalize-TextShape {
         $bold = [bool]($isTitle -or $isSecondaryTitle)
         $color = if ($IsVideoSlide) { $script:Style.ColorWhite } elseif ($isAuxiliary) { $script:Style.ColorDarkGray } else { $script:Style.ColorBody }
         Set-TextRangeStyle -TextRange $Shape.TextFrame2.TextRange -Size $size -Color $color -Bold $bold `
-            -FileName $FileName -SlideNumber $SlideNumber -ShapeName $Shape.Name -ForceTargetSize:$IsSectionTitleSlide
+            -FileName $FileName -SlideNumber $SlideNumber -ShapeName $Shape.Name -MaxSize $maxSize -ForceTargetSize:$IsSectionTitleSlide
         if ($IsSectionTitleSlide) {
             Set-SectionTitleTextStyle -Shape $Shape -SlideNumber $SlideNumber -FileName $FileName
         }
@@ -1808,7 +1916,7 @@ function Normalize-Presentation {
 
                     $text = Get-ShapeText $shape
                     if (-not [string]::IsNullOrWhiteSpace($text)) {
-                        if ($ReportOnly) {
+                        if ($ReportOnly -or $preserveSlideStyle) {
                             if (Test-IsFormulaCandidateText $text) {
                                 Add-FormulaCandidateReport -FileName $File.Name -SlideNumber $i -ShapeName $shapeName -Text $text | Out-Null
                             }
@@ -1819,12 +1927,8 @@ function Normalize-Presentation {
                                 }
                             } catch { }
                         } else {
-                            if ($preserveSlideStyle) {
-                                Normalize-TextShape -Shape $shape -Text $text -SlideNumber $i -FileName $File.Name -IsVideoSlide $isVideo -IsSectionTitleSlide:$false -SlideWidth $slideWidth -FontOnly
-                            } else {
-                                Normalize-TextShape -Shape $shape -Text $text -SlideNumber $i -FileName $File.Name -IsVideoSlide $isVideo -IsSectionTitleSlide $isSectionTitle -SlideWidth $slideWidth
-                                Normalize-HighlightBox -Shape $shape -SlideNumber $i -FileName $File.Name
-                            }
+                            Normalize-TextShape -Shape $shape -Text $text -SlideNumber $i -FileName $File.Name -IsVideoSlide $isVideo -IsSectionTitleSlide $isSectionTitle -SlideWidth $slideWidth
+                            Normalize-HighlightBox -Shape $shape -SlideNumber $i -FileName $File.Name
                         }
                     }
                 } catch {

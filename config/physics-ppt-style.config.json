@@ -11,6 +11,8 @@
     "sectionTitle": 56,
     "title2": 38,
     "body": 32,
+    "bodyMax": 36,
+    "displayTitleMin": 56,
     "auxiliary": 28,
     "minimum": 24,
     "tableHeader": 30,

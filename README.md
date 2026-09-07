@@ -80,13 +80,12 @@ cd .\physics-ppt-toolkit
   -OpenGeneratedPptx
 ```
 
-输出目录会自动创建，结构如下：
+默认输出到 `reports/<源PPTX文件名>/`（每个源 PPT 一个同名目录，最终交付物在其 `01_交付物/` 中一眼可见），结构如下：
 
 ```text
-_physics_ppt_output_yyyyMMdd_HHmmss/
+reports/13.2内能（王耀强）/
 ├─ 00_检查报告/
-├─ 01_规范化PPTX/
-├─ 02_导出PDF/
+├─ 01_交付物/   （规范化 PPTX 与同名导出 PDF 同目录）
 ├─ 03_原始备份/
 ├─ 16_不可变快照/
 ├─ summary.md
@@ -129,7 +128,7 @@ _physics_ppt_output_yyyyMMdd_HHmmss/
 
 依赖按功能启用：默认规范化/检查只需要 PowerPoint；启用 `-ApplyFormulaOmmlWhitelist` 时才强制要求 .NET 验证器；MathJax SVG 与 sharp 媒体优化仅在对应功能使用时需要。可用 `tools\Assert-Toolchain.ps1 -Deep` 检查推荐组件，使用 `-RequireFormulaValidator`、`-RequireFormulaSvg` 或 `-RequireMediaOptimization` 将指定功能提升为必需门禁。
 
-批量递归输入会自动排除临时 `~$` 文件、工作流输出目录和历史 `_physics_ppt_output_yyyyMMdd_HHmmss` 目录，避免重复处理生成文件。所有 CSV 报告统一写入 UTF-8 BOM，主路径使用 PowerShell 7，仍兼容 Windows PowerShell 5.1 和 Excel。
+批量递归输入会自动排除临时 `~$` 文件和工作流输出目录 `reports/`，避免重复处理生成文件。所有 CSV 报告统一写入 UTF-8 BOM，主路径使用 PowerShell 7，仍兼容 Windows PowerShell 5.1 和 Excel。
 
 ---
 
