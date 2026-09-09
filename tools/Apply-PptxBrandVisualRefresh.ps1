@@ -421,10 +421,14 @@ function Update-DividerSlide {
             $textRange.ParagraphFormat.Alignment = 2  # ppAlignCenter
             $boundWidth = $textRange.BoundWidth + 20
             $boundHeight = $textRange.BoundHeight + 12
-            $shape.Width = $boundWidth
-            $shape.Height = $boundHeight
-            $shape.Left = [Math]::Round(($slideWidth - $boundWidth) / 2, 1)
-            $shape.Top = [Math]::Round(($slideHeight - $boundHeight) / 2, 1)
+            # BoundWidth arrives as a COM Single; the +offset makes these
+            # Doubles.  Assign [single] so the put marshals as VT_R4 —
+            # assigning the raw Double can hit an IDispatch conversion path
+            # that throws InvalidCastException Double->Decimal.
+            $shape.Width = [single]$boundWidth
+            $shape.Height = [single]$boundHeight
+            $shape.Left = [single][Math]::Round(($slideWidth - $boundWidth) / 2, 1)
+            $shape.Top = [single][Math]::Round(($slideHeight - $boundHeight) / 2, 1)
             $centered++
         } catch {
             $Actions.Add("DividerShapeSkipped: $($_.Exception.Message) << $($_.ScriptStackTrace)") | Out-Null

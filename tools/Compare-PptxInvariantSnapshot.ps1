@@ -6,7 +6,8 @@
 param(
     [Parameter(Mandatory = $true)][string]$BeforePath,
     [Parameter(Mandatory = $true)][string]$AfterPath,
-    [string]$OutputPath
+    [string]$OutputPath,
+    [switch]$AllowAdvanceOnClickDisable
 )
 
 Set-StrictMode -Version Latest
@@ -39,13 +40,23 @@ function Compare-GeometryValue { param($Rows, [string]$Path, $Before, $After, [s
     }
     Add-Difference $Rows $Path "$Before" "$After" $Kind
 }
+function Get-SnapshotProperty { param($Row, [string]$Name)
+    # Snapshots written by older exporters (and synthetic test fixtures) may not
+    # carry newer fields; treat them as absent rather than throwing.
+    $property = $Row.PSObject.Properties[$Name]
+    if ($null -eq $property) { return $null }
+    return $property.Value
+}
 
 $before = Read-Snapshot $BeforePath
 $after = Read-Snapshot $AfterPath
 $rows = New-Object System.Collections.Generic.List[object]
 Compare-Value $rows 'slideCount' $before.slideCount $after.slideCount 'Blocker'
-Compare-Value $rows 'slideWidth' $before.slideWidth $after.slideWidth 'Blocker'
-Compare-Value $rows 'slideHeight' $before.slideHeight $after.slideHeight 'Blocker'
+# Slide dimensions come from the same Single COM pipeline as shape geometry,
+# so they get the same rounding tolerance (a string compare produced false
+# blockers for custom page sizes).
+Compare-GeometryValue $rows 'slideWidth' $before.slideWidth $after.slideWidth 'Blocker'
+Compare-GeometryValue $rows 'slideHeight' $before.slideHeight $after.slideHeight 'Blocker'
 
 $beforeSlides = @($before.slides); $afterSlides = @($after.slides)
 $slideCount = [Math]::Min($beforeSlides.Count, $afterSlides.Count)
@@ -54,12 +65,27 @@ for ($i = 0; $i -lt $slideCount; $i++) {
     Compare-Value $rows "$prefix.index" $bs.index $as.index 'Blocker'
     Compare-Value $rows "$prefix.slideId" $bs.slideId $as.slideId 'Blocker'
     Compare-Value $rows "$prefix.hidden" $bs.hidden $as.hidden 'Blocker'
-    if ("$($bs.transition.advanceOnClick)" -ne "$($as.transition.advanceOnClick)") {
-        $advanceKind = if ([int]$bs.transition.advanceOnClick -eq -1 -and [int]$as.transition.advanceOnClick -eq 0) { 'AllowedChange' } else { 'Blocker' }
-        Add-Difference $rows "$prefix.transition.advanceOnClick" "$($bs.transition.advanceOnClick)" "$($as.transition.advanceOnClick)" $advanceKind
+    foreach ($readStatusProperty in @('slideReadStatus', 'animationReadStatus', 'transitionReadStatus')) {
+        $beforeReadStatus = [string](Get-SnapshotProperty $bs $readStatusProperty)
+        $afterReadStatus = [string](Get-SnapshotProperty $as $readStatusProperty)
+        if ($beforeReadStatus -ne 'Readable' -or $afterReadStatus -ne 'Readable') {
+            Add-Difference $rows "$prefix.$readStatusProperty" $beforeReadStatus $afterReadStatus 'Blocker'
+        }
+    }
+    $beforeUnreadableShapeCount = Get-SnapshotProperty $bs 'unreadableShapeCount'
+    $afterUnreadableShapeCount = Get-SnapshotProperty $as 'unreadableShapeCount'
+    if ($null -eq $beforeUnreadableShapeCount -or $null -eq $afterUnreadableShapeCount -or
+        [int]$beforeUnreadableShapeCount -ne 0 -or [int]$afterUnreadableShapeCount -ne 0) {
+        Add-Difference $rows "$prefix.unreadableShapeCount" $beforeUnreadableShapeCount $afterUnreadableShapeCount 'Blocker'
+    }
+    $beforeAdvanceOnClick = Get-SnapshotProperty $bs.transition 'advanceOnClick'
+    $afterAdvanceOnClick = Get-SnapshotProperty $as.transition 'advanceOnClick'
+    if ("$beforeAdvanceOnClick" -ne "$afterAdvanceOnClick") {
+        $advanceKind = if ($AllowAdvanceOnClickDisable -and [int]$beforeAdvanceOnClick -eq -1 -and [int]$afterAdvanceOnClick -eq 0) { 'AllowedChange' } else { 'Blocker' }
+        Add-Difference $rows "$prefix.transition.advanceOnClick" "$beforeAdvanceOnClick" "$afterAdvanceOnClick" $advanceKind
     }
     foreach ($transitionProperty in @('advanceOnTime','advanceTime','entryEffect','speed')) {
-        Compare-Value $rows "$prefix.transition.$transitionProperty" $bs.transition.$transitionProperty $as.transition.$transitionProperty 'Blocker'
+        Compare-Value $rows "$prefix.transition.$transitionProperty" (Get-SnapshotProperty $bs.transition $transitionProperty) (Get-SnapshotProperty $as.transition $transitionProperty) 'Blocker'
     }
     Compare-Value $rows "$prefix.animations" ($bs.animations | ConvertTo-Json -Compress) ($as.animations | ConvertTo-Json -Compress) 'Blocker'
 
@@ -73,16 +99,57 @@ for ($i = 0; $i -lt $slideCount; $i++) {
         foreach ($property in @('name','type','zOrder','autoSize','wordWrap','text')) {
             Compare-Value $rows "$prefix.shapes[$id].$property" $b.$property $a.$property 'Blocker'
         }
+        $beforeShapeReadStatus = [string](Get-SnapshotProperty $b 'readStatus')
+        $afterShapeReadStatus = [string](Get-SnapshotProperty $a 'readStatus')
+        if ($beforeShapeReadStatus -ne 'Readable' -or $afterShapeReadStatus -ne 'Readable') {
+            Add-Difference $rows "$prefix.shapes[$id].readStatus" $beforeShapeReadStatus $afterShapeReadStatus 'Blocker'
+        }
         foreach ($property in @('left','top','width','height','rotation')) {
             Compare-GeometryValue $rows "$prefix.shapes[$id].$property" $b.$property $a.$property 'Blocker'
         }
+        foreach ($property in @('cropLeft','cropRight','cropTop','cropBottom')) {
+            Compare-GeometryValue $rows "$prefix.shapes[$id].$property" (Get-SnapshotProperty $b $property) (Get-SnapshotProperty $a $property) 'Blocker'
+        }
+        # Group-child rows carry the parent id; if it changes, the group was restructured.
+        Compare-Value $rows "$prefix.shapes[$id].groupId" (Get-SnapshotProperty $b 'groupId') (Get-SnapshotProperty $a 'groupId') 'Blocker'
     }
 }
 
 # Package relationships and embedded media are part of the teaching artifact.
 # Normalization is never allowed to rewrite them in this safety-first workflow.
-Compare-Value $rows 'package.relationships' ($before.package.relationships | ConvertTo-Json -Compress -Depth 8) ($after.package.relationships | ConvertTo-Json -Compress -Depth 8) 'Blocker'
-Compare-Value $rows 'package.media' ($before.package.media | ConvertTo-Json -Compress -Depth 8) ($after.package.media | ConvertTo-Json -Compress -Depth 8) 'Blocker'
+# PowerPoint SaveAs renumbers media part names and relationship ids even when
+# no byte of media changes (same save-churn class as the geometry rounding
+# false blockers), so compare canonical forms: media as an
+# extension+sha256+length multiset, relationships with media targets resolved
+# to the referenced content hash (external targets stay literal). A real
+# rewrite, deletion, or retarget still changes the canonical form and blocks.
+function Get-MediaExtension { param([string]$Part)
+    $extension = ''
+    if ($Part -match '\.([^.]+)$') { $extension = $Matches[1].ToLowerInvariant() }
+    return $extension
+}
+function Get-CanonicalMediaText { param($MediaEntries)
+    (@($MediaEntries | ForEach-Object {
+        '{0}|{1}|{2}' -f (Get-MediaExtension $_.part), $_.sha256, $_.length
+    } | Sort-Object) -join "`n")
+}
+function Get-CanonicalRelationshipText { param($RelationshipEntries, $MediaEntries)
+    $mediaHashByLeaf = @{}
+    foreach ($media in @($MediaEntries)) {
+        $leaf = [System.IO.Path]::GetFileName([string]$media.part)
+        $mediaHashByLeaf[$leaf] = [string]$media.sha256
+    }
+    (@($RelationshipEntries | ForEach-Object {
+        $target = [string]$_.target
+        $targetLeaf = [System.IO.Path]::GetFileName($target)
+        if (-not [string]::IsNullOrEmpty($targetLeaf) -and $mediaHashByLeaf.ContainsKey($targetLeaf)) {
+            $target = 'media:' + $mediaHashByLeaf[$targetLeaf]
+        }
+        '{0}|{1}|{2}|{3}' -f $_.part, $_.type, $target, $_.targetMode
+    } | Sort-Object) -join "`n")
+}
+Compare-Value $rows 'package.relationships' (Get-CanonicalRelationshipText $before.package.relationships $before.package.media) (Get-CanonicalRelationshipText $after.package.relationships $after.package.media) 'Blocker'
+Compare-Value $rows 'package.media' (Get-CanonicalMediaText $before.package.media) (Get-CanonicalMediaText $after.package.media) 'Blocker'
 
 $differenceArray = @($rows.ToArray())
 $blockerCount = @($differenceArray | Where-Object { $_.kind -eq 'Blocker' }).Count
