@@ -37,7 +37,11 @@ Public Sub NormalizeCurrentPresentation()
             End If
 
             If ShapeHasTable(shp) Then
-                NormalizeTableShape shp
+                If NORMALIZE_TABLE_STYLE Then
+                    NormalizeTableShape shp
+                Else
+                    report.Add CsvLine(pres.Name, CStr(sld.SlideIndex), shp.Name, "TableStyleSkipped", "Table styles preserved to avoid cell overflow or row-height changes.")
+                End If
                 GoTo NextShape
             End If
 
@@ -126,22 +130,57 @@ Private Sub NormalizeTextShape(ByVal shp As Shape, ByVal isVideo As Boolean)
     Dim isTitle As Boolean
     Dim targetSize As Single
     Dim targetColor As Long
+    Dim beforeSize As Single
+    Dim left As Single, top As Single, width As Single, height As Single
+    Dim autoSize As Long
+    Dim geometryDrift As Single
 
     On Error GoTo Failed
     isTitle = IsTitleShape(shp)
-    targetSize = IIf(isTitle, SIZE_TITLE, SIZE_BODY)
-    targetColor = IIf(isVideo, RGB(255, 255, 255), RGB(0, 0, 0))
+    If Not TryGetTextSize(shp, beforeSize) Then Err.Raise vbObjectError + 541, "NormalizeTextShape", "Text size could not be read safely."
+    targetSize = beforeSize
+    If isTitle Then
+        If beforeSize < SIZE_TITLE Then targetSize = SIZE_TITLE
+    ElseIf beforeSize > SIZE_BODY_MAX Then
+        targetSize = SIZE_BODY_MAX
+    End If
+    left = shp.Left
+    top = shp.Top
+    width = shp.Width
+    height = shp.Height
+    autoSize = shp.TextFrame2.AutoSize
+    ' White text is only written when the matching black video-slide background
+    ' is actually applied (NORMALIZE_SLIDE_BACKGROUND), mirroring the PowerShell gate.
+    If isVideo And NORMALIZE_SLIDE_BACKGROUND Then
+        targetColor = COLOR_WHITE
+    Else
+        targetColor = COLOR_BODY
+    End If
 
     With shp.TextFrame2.TextRange.Font
         .Name = FONT_LATIN
         .NameFarEast = FONT_CN
-        .Size = targetSize
+        If targetSize <> beforeSize Then .Size = targetSize
         .Bold = IIf(isTitle, msoTrue, msoFalse)
         .Fill.ForeColor.RGB = targetColor
     End With
+    If autoSize <> 0 Then
+        geometryDrift = Abs(shp.Left - left)
+        If Abs(shp.Top - top) > geometryDrift Then geometryDrift = Abs(shp.Top - top)
+        If Abs(shp.Width - width) > geometryDrift Then geometryDrift = Abs(shp.Width - width)
+        If Abs(shp.Height - height) > geometryDrift Then geometryDrift = Abs(shp.Height - height)
+        If geometryDrift > 0.05 Then
+            shp.TextFrame2.TextRange.Font.Size = beforeSize
+            shp.Left = left
+            shp.Top = top
+            shp.Width = width
+            shp.Height = height
+            Err.Raise vbObjectError + 542, "NormalizeTextShape", "AutoSize reflowed geometry; font size and bounds were rolled back."
+        End If
+    End If
     Exit Sub
 Failed:
-    Err.Clear
+    Err.Raise Err.Number, "NormalizeTextShape", Err.Description
 End Sub
 
 Private Sub NormalizeTableShape(ByVal shp As Shape)
@@ -160,14 +199,14 @@ Private Sub NormalizeTableShape(ByVal shp As Shape)
                     .NameFarEast = FONT_CN
                     .Size = IIf(isHeader, SIZE_TABLE_HEADER, SIZE_TABLE_BODY)
                     .Bold = IIf(isHeader, msoTrue, msoFalse)
-                    .Fill.ForeColor.RGB = RGB(0, 0, 0)
+                    .Fill.ForeColor.RGB = COLOR_BODY
                 End With
             End If
         Next c
     Next r
     Exit Sub
 Failed:
-    Err.Clear
+    Err.Raise Err.Number, "NormalizeTableShape", Err.Description
 End Sub
 
 Private Sub ClearDecorativeEffects(ByVal shp As Shape)
@@ -186,14 +225,17 @@ Private Function IsYellowishFill(ByVal rgb As Long) As Boolean
     IsYellowishFill = (r > 200 And g > 200 And b < 180)
 End Function
 
+' Matches the PowerShell mainline (STYLE.HIGHLIGHT.TEXT_COLOR, allowedProperties=[Color]):
+' only the text color of yellow-highlight boxes is normalized to the body color;
+' fill and border are preserved untouched. The previous fill/border rewrite
+' (including the fixed 1.75pt border) exceeded the configured authorization set.
 Private Sub NormalizeHighlightBox(ByVal shp As Shape)
     On Error Resume Next
     If shp.Fill.Visible = msoTrue Then
         If IsYellowishFill(shp.Fill.ForeColor.RGB) Then
-            shp.Fill.ForeColor.RGB = RGB(255, 242, 204)
-            shp.Line.Visible = msoTrue
-            shp.Line.ForeColor.RGB = RGB(214, 163, 0)
-            shp.Line.Weight = 1.75
+            If ShapeHasText(shp) Then
+                shp.TextFrame2.TextRange.Font.Fill.ForeColor.RGB = COLOR_BODY
+            End If
         End If
     End If
     On Error GoTo 0

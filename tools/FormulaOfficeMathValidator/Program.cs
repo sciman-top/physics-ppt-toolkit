@@ -31,7 +31,28 @@ if (!File.Exists(pptxPath))
     return 2;
 }
 
-var result = ValidatePresentation(pptxPath, maxErrors);
+ValidationResult result;
+try
+{
+    result = ValidatePresentation(pptxPath, maxErrors);
+}
+catch (Exception ex)
+{
+    // Emit the same JSON contract instead of a raw stack trace so callers can
+    // parse the failure.
+    var failure = new ValidationResult(
+        Path.GetFullPath(pptxPath),
+        0,
+        0,
+        0,
+        1,
+        new List<ValidationIssue> { new ValidationIssue($"Package could not be opened or validated: {ex.Message}", string.Empty, string.Empty) },
+        new List<SlideMathCount>(),
+        0,
+        new List<ValidationIssue>());
+    Console.WriteLine(JsonSerializer.Serialize(failure, new JsonSerializerOptions { WriteIndented = true }));
+    return 1;
+}
 var json = JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true });
 Console.WriteLine(json);
 return result.OpenXmlErrorCount == 0 ? 0 : 1;
@@ -64,8 +85,42 @@ static ValidationResult ValidatePresentation(string pptxPath, int maxErrors)
         }
     }
 
-    var validator = new OpenXmlValidator();
-    var errors = validator.Validate(document)
+    // Office2010 is the minimum schema level that covers a14:m math content;
+    // the parameterless Office2007 default would skip the very markup this
+    // validator exists to gate.
+    var validator = new OpenXmlValidator(FileFormatVersions.Office2010);
+    var allErrors = validator.Validate(document).ToList();
+
+    // The OpenXml SDK models a14:m (the MS-ODRAWXML math wrapper) as a leaf
+    // element, while the MS-ODRAWXML extension spec requires it to contain
+    // m:oMath — the exact markup PowerPoint itself writes for shape math.
+    // That single complaint is a known SDK limitation: it is reported
+    // transparently as KnownExtensionLimitations but does not fail the gate;
+    // every other validation error still does.
+    var knownLimitations = new List<ValidationErrorInfo>();
+    var blocking = new List<ValidationErrorInfo>();
+    foreach (var error in allErrors)
+    {
+        var xpath = error.Path?.XPath ?? string.Empty;
+        var description = error.Description ?? string.Empty;
+        if (xpath.Contains("a14:m", StringComparison.Ordinal) && description.Contains("leaf element", StringComparison.Ordinal))
+        {
+            knownLimitations.Add(error);
+        }
+        else
+        {
+            blocking.Add(error);
+        }
+    }
+
+    var errors = blocking
+        .Take(maxErrors)
+        .Select(e => new ValidationIssue(
+            e.Description ?? string.Empty,
+            e.Path?.XPath ?? string.Empty,
+            e.Part?.Uri.ToString() ?? string.Empty))
+        .ToList();
+    var knownIssues = knownLimitations
         .Take(maxErrors)
         .Select(e => new ValidationIssue(
             e.Description ?? string.Empty,
@@ -78,9 +133,11 @@ static ValidationResult ValidatePresentation(string pptxPath, int maxErrors)
         slideParts.Count,
         a14MathCount,
         officeMathCount,
-        errors.Count,
+        blocking.Count,
         errors,
-        slideMathCounts.Where(s => s.A14MathCount > 0 || s.OfficeMathCount > 0).ToList());
+        slideMathCounts.Where(s => s.A14MathCount > 0 || s.OfficeMathCount > 0).ToList(),
+        knownIssues.Count,
+        knownIssues);
 }
 
 static List<SlidePart> GetSlidePartsInPresentationOrder(PresentationPart? presentationPart)
@@ -132,7 +189,9 @@ public sealed record ValidationResult(
     int OfficeMathCount,
     int OpenXmlErrorCount,
     IReadOnlyList<ValidationIssue> OpenXmlErrors,
-    IReadOnlyList<SlideMathCount> SlidesWithMath);
+    IReadOnlyList<SlideMathCount> SlidesWithMath,
+    int KnownExtensionLimitationCount,
+    IReadOnlyList<ValidationIssue> KnownExtensionLimitations);
 
 public sealed record ValidationIssue(string Description, string XPath, string PartUri);
 

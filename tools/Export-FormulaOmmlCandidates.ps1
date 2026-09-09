@@ -39,6 +39,7 @@ $script:NsA = 'http://schemas.openxmlformats.org/drawingml/2006/main'
 $script:NsM = 'http://schemas.openxmlformats.org/officeDocument/2006/math'
 $script:NsMathMl = 'http://www.w3.org/1998/Math/MathML'
 $script:FormulaWhitelist = @()
+$script:FormulaColorHex = ''
 
 $configPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'config\physics-ppt-style.config.json'
 if (Test-Path -LiteralPath $configPath) {
@@ -47,26 +48,23 @@ if (Test-Path -LiteralPath $configPath) {
         if ($null -ne $config.formulaWhitelist) {
             $script:FormulaWhitelist = @($config.formulaWhitelist)
         }
+        $configuredFormulaColor = [string]$config.colors.formulaBlue
+        if ($configuredFormulaColor -notmatch '^#[0-9A-Fa-f]{6}$') {
+            throw "colors.formulaBlue must be a six-digit #RRGGBB value; received '$configuredFormulaColor'."
+        }
+        $script:FormulaColorHex = $configuredFormulaColor.TrimStart('#').ToUpperInvariant()
     } catch {
-        Write-Warning "Formula config could not be loaded: $($_.Exception.Message)"
+        throw "Formula config could not be loaded: $($_.Exception.Message)"
     }
+}
+if ([string]::IsNullOrWhiteSpace($script:FormulaColorHex)) {
+    throw "Formula config is missing colors.formulaBlue; OMML candidate generation cannot choose a safe color."
 }
 
 function Get-CurrentWhitelistRule {
     param([string]$FormulaText)
-    $normalized = Get-NormalizedFormulaText -Text $FormulaText
-    if ([string]::IsNullOrWhiteSpace($normalized)) { return $null }
-
-    foreach ($rule in @($script:FormulaWhitelist)) {
-        $pattern = Get-FormulaRuleValue -Rule $rule -Name 'sourcePattern'
-        if ([string]::IsNullOrWhiteSpace($pattern)) { continue }
-        try {
-            if ($normalized -match $pattern) { return $rule }
-        } catch {
-            continue
-        }
-    }
-    return $null
+    # Shared helper keeps matching case-sensitive and warns on invalid patterns.
+    return (Test-FormulaWhitelistMatch -Text $FormulaText -Whitelist $script:FormulaWhitelist)
 }
 
 function New-Element {
@@ -104,7 +102,7 @@ function New-RunProperties {
 
     $solidFill = New-Element -Document $Document -Prefix 'a' -Name 'solidFill' -Namespace $script:NsA
     $srgb = New-Element -Document $Document -Prefix 'a' -Name 'srgbClr' -Namespace $script:NsA
-    $srgb.SetAttribute('val', '0066CC')
+    $srgb.SetAttribute('val', $script:FormulaColorHex)
     $solidFill.AppendChild($srgb) | Out-Null
     $rPr.AppendChild($solidFill) | Out-Null
 
@@ -137,8 +135,10 @@ function Add-OmmlToken {
     if ([string]::IsNullOrWhiteSpace($trimmed)) { return }
 
     if ($trimmed -match '^([+\-−])(.+)$') {
-        Add-OmmlRun -Document $Document -Parent $Parent -Text $Matches[1]
-        Add-OmmlExpression -Document $Document -Parent $Parent -Expression $Matches[2]
+        $signText = $Matches[1]
+        $signRest = $Matches[2]
+        Add-OmmlRun -Document $Document -Parent $Parent -Text $signText
+        Add-OmmlExpression -Document $Document -Parent $Parent -Expression $signRest
         return
     }
 
@@ -153,16 +153,20 @@ function Add-OmmlToken {
     }
 
     if ($trimmed -match '^(.+?)_([物总有额动排液]|[0-9]+)(.*)$') {
+        # Capture groups into locals before recursing; nested -match calls invalidate $Matches.
+        $baseText = $Matches[1]
+        $subText = $Matches[2]
+        $restText = $Matches[3]
         $sub = New-Element -Document $Document -Prefix 'm' -Name 'sSub' -Namespace $script:NsM
         $base = New-Element -Document $Document -Prefix 'm' -Name 'e' -Namespace $script:NsM
         $subscript = New-Element -Document $Document -Prefix 'm' -Name 'sub' -Namespace $script:NsM
-        Add-OmmlExpression -Document $Document -Parent $base -Expression $Matches[1]
-        Add-OmmlExpression -Document $Document -Parent $subscript -Expression $Matches[2]
+        Add-OmmlExpression -Document $Document -Parent $base -Expression $baseText
+        Add-OmmlExpression -Document $Document -Parent $subscript -Expression $subText
         $sub.AppendChild($base) | Out-Null
         $sub.AppendChild($subscript) | Out-Null
         $Parent.AppendChild($sub) | Out-Null
-        if (-not [string]::IsNullOrWhiteSpace($Matches[3])) {
-            Add-OmmlExpression -Document $Document -Parent $Parent -Expression $Matches[3]
+        if (-not [string]::IsNullOrWhiteSpace($restText)) {
+            Add-OmmlExpression -Document $Document -Parent $Parent -Expression $restText
         }
         return
     }
@@ -254,8 +258,10 @@ function Add-MathMlToken {
     if ([string]::IsNullOrWhiteSpace($trimmed)) { return }
 
     if ($trimmed -match '^([+\-−])(.+)$') {
-        Add-MathMlOperator -Document $Document -Parent $Parent -Text $Matches[1]
-        Add-MathMlExpression -Document $Document -Parent $Parent -Expression $Matches[2]
+        $signText = $Matches[1]
+        $signRest = $Matches[2]
+        Add-MathMlOperator -Document $Document -Parent $Parent -Text $signText
+        Add-MathMlExpression -Document $Document -Parent $Parent -Expression $signRest
         return
     }
 
@@ -270,12 +276,16 @@ function Add-MathMlToken {
     }
 
     if ($trimmed -match '^(.+?)_([物总有额动排液]|[0-9]+)(.*)$') {
+        # Capture groups into locals before recursing; nested -match calls invalidate $Matches.
+        $baseText = $Matches[1]
+        $subText = $Matches[2]
+        $restText = $Matches[3]
         $msub = New-Element -Document $Document -Prefix '' -Name 'msub' -Namespace $script:NsMathMl
-        Add-MathMlExpression -Document $Document -Parent $msub -Expression $Matches[1]
-        Add-MathMlExpression -Document $Document -Parent $msub -Expression $Matches[2]
+        Add-MathMlExpression -Document $Document -Parent $msub -Expression $baseText
+        Add-MathMlExpression -Document $Document -Parent $msub -Expression $subText
         $Parent.AppendChild($msub) | Out-Null
-        if (-not [string]::IsNullOrWhiteSpace($Matches[3])) {
-            Add-MathMlExpression -Document $Document -Parent $Parent -Expression $Matches[3]
+        if (-not [string]::IsNullOrWhiteSpace($restText)) {
+            Add-MathMlExpression -Document $Document -Parent $Parent -Expression $restText
         }
         return
     }
@@ -373,6 +383,10 @@ $reviewRows = @(
 $results = New-Object System.Collections.Generic.List[object]
 for ($i = 0; $i -lt $reviewRows.Count; $i++) {
     $row = $reviewRows[$i]
+    if ($null -eq $row.PSObject.Properties['Slide'] -or [string]$row.Slide -notmatch '^\d+$') {
+        Write-Warning "Skipping candidate row with invalid Slide value: '$($row.Slide)' ($($row.File))"
+        continue
+    }
     $name = Get-FormulaDetailValue -Details ([string]$row.WhitelistCandidate) -Key 'name'
     $targetUnicodeMath = Get-FormulaDetailValue -Details ([string]$row.WhitelistCandidate) -Key 'targetUnicodeMath'
     $targetTex = Get-FormulaDetailValue -Details ([string]$row.WhitelistCandidate) -Key 'targetTex'

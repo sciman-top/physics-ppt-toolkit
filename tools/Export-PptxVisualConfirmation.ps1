@@ -59,11 +59,53 @@ function Get-AuditIssueFallbackKey {
     return ('{0}|{1}|{2}' -f [string]$Row.Slide, [string]$Row.Issue, [string]$Row.Severity)
 }
 
+function Get-CanonicalSlideSetKey {
+    param($Rows)
+    $numbers = @($Rows | ForEach-Object {
+        if ($_.Slide -notmatch '^\d+$') { return -1 }
+        [int]$_.Slide
+    })
+    if ($numbers -contains -1 -or $numbers.Count -ne @($numbers | Sort-Object -Unique).Count) { return '' }
+    return (($numbers | Sort-Object | ForEach-Object { [string]$_ }) -join ',')
+}
+
 function Add-MapCount {
     param([hashtable]$Map, [string]$Key)
     if ([string]::IsNullOrWhiteSpace($Key)) { return }
     if (-not $Map.ContainsKey($Key)) { $Map[$Key] = 0 }
     $Map[$Key] = [int]$Map[$Key] + 1
+}
+
+function Get-PropertySum {
+    param(
+        [object[]]$Rows,
+        [string]$PropertyName
+    )
+
+    [int]$sum = 0
+    foreach ($row in @($Rows)) {
+        if ($null -eq $row) { continue }
+        $property = $row.PSObject.Properties[$PropertyName]
+        if ($null -eq $property) { continue }
+        [int]$value = 0
+        if ([int]::TryParse([string]$property.Value, [ref]$value)) {
+            $sum += $value
+        }
+    }
+    return $sum
+}
+
+function Test-UsablePageImage {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    try {
+        if ((Get-Item -LiteralPath $Path).Length -le 0) { return $false }
+        $info = Get-BasicImageInfo -Path $Path
+        return ($info.Width -gt 0 -and $info.Height -gt 0)
+    } catch {
+        return $false
+    }
 }
 
 function Get-AuditIssueMaps {
@@ -84,57 +126,8 @@ function Get-AuditIssueMaps {
     }
 }
 
-function Test-BaselineIssueKnown {
-    param($Row, $IssueMaps)
-
-    if ($null -eq $IssueMaps) { return $false }
-    $exactKey = Get-AuditIssueKey -Row $Row
-    if ($IssueMaps.Exact.ContainsKey($exactKey)) { return $true }
-
-    $fallbackKey = Get-AuditIssueFallbackKey -Row $Row
-    if ($IssueMaps.Fallback.ContainsKey($fallbackKey)) { return $true }
-    return $false
-}
-
-function Get-ImageDeltaPercent {
-    param(
-        [string]$BeforePath,
-        [string]$AfterPath
-    )
-
-    if ([string]::IsNullOrWhiteSpace($BeforePath) -or [string]::IsNullOrWhiteSpace($AfterPath)) { return $null }
-    if (-not (Test-Path -LiteralPath $BeforePath) -or -not (Test-Path -LiteralPath $AfterPath)) { return $null }
-
-    Add-Type -AssemblyName System.Drawing
-    $before = $null
-    $after = $null
-    $beforeThumb = $null
-    $afterThumb = $null
-    try {
-        $before = [System.Drawing.Image]::FromFile($BeforePath)
-        $after = [System.Drawing.Image]::FromFile($AfterPath)
-        $width = 160
-        $height = 90
-        $beforeThumb = New-Object System.Drawing.Bitmap $before, $width, $height
-        $afterThumb = New-Object System.Drawing.Bitmap $after, $width, $height
-        [double]$sum = 0
-        for ($y = 0; $y -lt $height; $y++) {
-            for ($x = 0; $x -lt $width; $x++) {
-                $a = $beforeThumb.GetPixel($x, $y)
-                $b = $afterThumb.GetPixel($x, $y)
-                $sum += ([Math]::Abs($a.R - $b.R) + [Math]::Abs($a.G - $b.G) + [Math]::Abs($a.B - $b.B)) / (3 * 255)
-            }
-        }
-        return [Math]::Round(($sum / ($width * $height)) * 100, 2)
-    } catch {
-        return $null
-    } finally {
-        if ($null -ne $afterThumb) { $afterThumb.Dispose() }
-        if ($null -ne $beforeThumb) { $beforeThumb.Dispose() }
-        if ($null -ne $after) { $after.Dispose() }
-        if ($null -ne $before) { $before.Dispose() }
-    }
-}
+# Get-ImageDeltaPercent comes from PhysicsPpt.Common.ps1 (identical 160x90
+# metric) so every consumer shares one delta definition.
 
 function Convert-ToStatusColor {
     param([string]$Status)
@@ -269,9 +262,22 @@ foreach ($row in $baselineSlideRows) {
     if ($row.Slide -match '^\d+$') { $baselineSlideMap[[int]$row.Slide] = $row }
 }
 
-$slideCountMismatch = $false
-if ($hasBaseline -and $baselineSlideRows.Count -gt 0 -and $baselineSlideRows.Count -ne $slideRows.Count) {
-    $slideCountMismatch = $true
+$currentExpectedKey = if ($slideRows.Count -gt 0) { ((1..$slideRows.Count) -join ',') } else { '' }
+$currentSlideSetKey = Get-CanonicalSlideSetKey -Rows $slideRows
+# An empty metrics file is not evidence of a zero-slide presentation; it is a
+# failed/unfinished render and must fail the confirmation gate explicitly.
+$noRenderedMetrics = ($slideRows.Count -eq 0)
+$slideCountMismatch = $noRenderedMetrics -or ($currentSlideSetKey -ne $currentExpectedKey)
+$auditIssueSlides = @($auditRows | Where-Object {
+    $_.Slide -match '^\d+$' -and [int]$_.Slide -gt 0 -and $_.Severity -in @('Error', 'Warning')
+} | ForEach-Object { [int]$_.Slide } | Sort-Object -Unique)
+$renderedSlideNumbers = @($slideRows | ForEach-Object { [int]$_.Slide } | Sort-Object -Unique)
+$unrenderedAuditIssueSlides = @($auditIssueSlides | Where-Object { $_ -notin $renderedSlideNumbers })
+if ($unrenderedAuditIssueSlides.Count -gt 0) { $slideCountMismatch = $true }
+if ($hasBaseline) {
+    $baselineExpectedKey = if ($baselineSlideRows.Count -gt 0) { ((1..$baselineSlideRows.Count) -join ',') } else { '' }
+    $baselineSlideSetKey = Get-CanonicalSlideSetKey -Rows $baselineSlideRows
+    if ($baselineSlideSetKey -ne $baselineExpectedKey -or $baselineSlideSetKey -ne $currentSlideSetKey) { $slideCountMismatch = $true }
 }
 
 $confirmationRows = New-Object System.Collections.Generic.List[object]
@@ -280,9 +286,41 @@ foreach ($slide in @($slideRows | Sort-Object { [int]$_.Slide })) {
     $issues = @($auditRows | Where-Object { $_.Slide -match '^\d+$' -and [int]$_.Slide -eq $slideNo -and $_.Severity -in @('Error', 'Warning') })
     $errors = @($issues | Where-Object { $_.Severity -eq 'Error' })
     $warnings = @($issues | Where-Object { $_.Severity -eq 'Warning' })
-    $newErrors = @($errors | Where-Object { -not (Test-BaselineIssueKnown -Row $_ -IssueMaps $baselineIssueMaps) })
-    $newWarnings = @($warnings | Where-Object { -not (Test-BaselineIssueKnown -Row $_ -IssueMaps $baselineIssueMaps) })
-    $knownIssues = @($issues | Where-Object { Test-BaselineIssueKnown -Row $_ -IssueMaps $baselineIssueMaps })
+    $newErrors = New-Object System.Collections.Generic.List[object]
+    $newWarnings = New-Object System.Collections.Generic.List[object]
+    $knownIssues = New-Object System.Collections.Generic.List[object]
+    $baselineExactCounts = @{}
+    $baselineFallbackCounts = @{}
+    foreach ($baselineIssueKey in $baselineIssueMaps.Exact.Keys) { $baselineExactCounts[$baselineIssueKey] = [int]$baselineIssueMaps.Exact[$baselineIssueKey] }
+    foreach ($baselineIssueKey in $baselineIssueMaps.Fallback.Keys) { $baselineFallbackCounts[$baselineIssueKey] = [int]$baselineIssueMaps.Fallback[$baselineIssueKey] }
+    foreach ($issue in $issues) {
+        $issueKey = Get-AuditIssueKey -Row $issue
+        $fallbackKey = Get-AuditIssueFallbackKey -Row $issue
+        $isKnown = $false
+        if ($baselineExactCounts.ContainsKey($issueKey) -and $baselineExactCounts[$issueKey] -gt 0) {
+            # Consume both views of the same baseline row. This keeps exact
+            # matches and shape-name fallback matches one-to-one when a page
+            # contains duplicate issue types.
+            $baselineExactCounts[$issueKey] = [int]$baselineExactCounts[$issueKey] - 1
+            if ($baselineFallbackCounts.ContainsKey($fallbackKey) -and $baselineFallbackCounts[$fallbackKey] -gt 0) {
+                $baselineFallbackCounts[$fallbackKey] = [int]$baselineFallbackCounts[$fallbackKey] - 1
+            }
+            $isKnown = $true
+        } elseif ($baselineFallbackCounts.ContainsKey($fallbackKey) -and $baselineFallbackCounts[$fallbackKey] -gt 0) {
+            # Shape names are not stable across PowerPoint saves; fall back to
+            # slide + issue + severity, but consume the match to avoid
+            # allowing a newly duplicated issue to hide behind one baseline.
+            $baselineFallbackCounts[$fallbackKey] = [int]$baselineFallbackCounts[$fallbackKey] - 1
+            $isKnown = $true
+        }
+        if ($isKnown) {
+            $knownIssues.Add($issue) | Out-Null
+        } elseif ($issue.Severity -eq 'Error') {
+            $newErrors.Add($issue) | Out-Null
+        } elseif ($issue.Severity -eq 'Warning') {
+            $newWarnings.Add($issue) | Out-Null
+        }
+    }
     $pageImage = [string]$slide.ImagePath
 
     $baselinePageImage = ''
@@ -304,17 +342,22 @@ foreach ($slide in @($slideRows | Sort-Object { [int]$_.Slide })) {
     $reasonParts = New-Object System.Collections.Generic.List[string]
     $newIssueNames = @(($newErrors + $newWarnings) | Select-Object -ExpandProperty Issue -Unique | Sort-Object)
     $knownIssueNames = @($knownIssues | Select-Object -ExpandProperty Issue -Unique | Sort-Object)
+    $exportStatus = if ($slide.PSObject.Properties.Name -contains 'ExportStatus') { [string]$slide.ExportStatus } elseif (-not [string]::IsNullOrWhiteSpace([string]$slide.ImagePath)) { 'Succeeded' } else { 'Failed' }
 
-    if ([string]::IsNullOrWhiteSpace($pageImage) -or -not (Test-Path -LiteralPath $pageImage)) {
+    if ($exportStatus -ne 'Succeeded' -or -not (Test-UsablePageImage -Path $pageImage)) {
         $status = 'Failed'
         $confidence = 'High'
         $suggestedAction = 'FixOrRollback'
-        $reasonParts.Add('Rendered page image is missing.') | Out-Null
+        $reasonParts.Add('Rendered page image is missing, empty, undecodable, or its export status is not Succeeded.') | Out-Null
     } elseif ($slideCountMismatch) {
         $status = 'Failed'
         $confidence = 'High'
         $suggestedAction = 'FixOrRollback'
-        $reasonParts.Add("Slide count differs from baseline: current=$($slideRows.Count), baseline=$($baselineSlideRows.Count).") | Out-Null
+        if ($noRenderedMetrics) {
+            $reasonParts.Add('No rendered slide metrics were produced; page coverage cannot be confirmed.') | Out-Null
+        } else {
+            $reasonParts.Add("Slide count differs from baseline: current=$($slideRows.Count), baseline=$($baselineSlideRows.Count).") | Out-Null
+        }
     } elseif ($newErrors.Count -gt 0) {
         $status = 'Failed'
         $confidence = 'High'
@@ -386,16 +429,16 @@ foreach ($slide in @($slideRows | Sort-Object { [int]$_.Slide })) {
 }
 
 $rows = @($confirmationRows.ToArray())
-$failedCount = @($rows | Where-Object { $_.Status -eq 'Failed' }).Count
+$presentationErrors = @($auditRows | Where-Object { $_.Slide -match '^0$' -and $_.Severity -eq 'Error' })
+$failedCount = @($rows | Where-Object { $_.Status -eq 'Failed' }).Count + $presentationErrors.Count
+$failedCount += if ($slideCountMismatch) { 1 } else { 0 }
 $needsReviewCount = @($rows | Where-Object { $_.Status -eq 'NeedsReview' }).Count
 $passedWithKnownIssuesCount = @($rows | Where-Object { $_.Status -eq 'PassedWithKnownIssues' }).Count
 $passedCount = @($rows | Where-Object { $_.Status -eq 'Passed' }).Count
-$newErrorCount = @($rows | Measure-Object -Property NewErrorCount -Sum).Sum
-if ($null -eq $newErrorCount) { $newErrorCount = 0 }
-$newWarningCount = @($rows | Measure-Object -Property NewWarningCount -Sum).Sum
-if ($null -eq $newWarningCount) { $newWarningCount = 0 }
+$newErrorCount = Get-PropertySum -Rows $rows -PropertyName 'NewErrorCount'
+$newWarningCount = Get-PropertySum -Rows $rows -PropertyName 'NewWarningCount'
 
-$confirmationStatus = if ($failedCount -gt 0) {
+$confirmationStatus = if ($presentationErrors.Count -gt 0 -or $slideCountMismatch -or $failedCount -gt 0) {
     'Failed'
 } elseif ($needsReviewCount -gt 0) {
     'NeedsReview'
@@ -431,7 +474,9 @@ $manifest = [ordered]@{
     outputDir = $OutputDir
     slideCount = $rows.Count
     baselineSlideCount = if ($hasBaseline) { $baselineSlideRows.Count } else { 0 }
+    noRenderedMetrics = $noRenderedMetrics
     slideCountMismatch = $slideCountMismatch
+    unrenderedAuditIssueSlides = @($unrenderedAuditIssueSlides)
     confirmationStatus = $confirmationStatus
     automationGateStatus = $automationGateStatus
     passedCount = $passedCount
@@ -444,7 +489,7 @@ $manifest = [ordered]@{
     maxAllowedMetricDeltaPercent = $MaxAllowedMetricDeltaPercent
     confirmationCsv = $confirmationCsv
     contactSheet = if ($contactSheetCreated) { $contactSheetPath } else { '' }
-    rule = 'Fail missing pages, slide-count drift, or new rendered errors; keep baseline-known issues; mark new warnings, high pixel delta, or high visual metric delta for review; never modify PPTX.'
+    rule = 'Fail missing pages, slide-count drift, or audit issues without a rendered metrics row; keep baseline-known issues; mark new warnings, high pixel delta, or high visual metric delta for review; never modify PPTX.'
 }
 
 Write-Utf8BomText -Text ($manifest | ConvertTo-Json -Depth 6) -Path $manifestPath

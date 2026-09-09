@@ -19,6 +19,10 @@
 
 .PARAMETER ContactSheet
   Build an all-slide contact sheet with issue tags.
+
+.PARAMETER FailOnError
+  Return a failing process result when the rendered audit contains errors or a
+  page export failed. The default writes the complete audit for inspection.
 #>
 [CmdletBinding()]
 param(
@@ -45,7 +49,9 @@ param(
 
     [switch]$NoPdf,
 
-    [switch]$ContactSheet
+    [switch]$ContactSheet,
+
+    [switch]$FailOnError
 )
 
 Set-StrictMode -Version Latest
@@ -60,18 +66,8 @@ $script:MsoPlaceholder = 14
 $script:MsoPicture = 13
 $script:MsoMedia = 16
 
-function Convert-ToSafePathSegment {
-    param([string]$Name)
-    $safe = $Name
-    foreach ($ch in [System.IO.Path]::GetInvalidFileNameChars()) {
-        $safe = $safe.Replace([string]$ch, '_')
-    }
-    $safe = $safe -replace '\s+', '_'
-    $safe = $safe -replace '[^\p{L}\p{Nd}_-]+', '_'
-    $safe = $safe.Trim('_')
-    if ([string]::IsNullOrWhiteSpace($safe)) { return 'presentation' }
-    return $safe
-}
+# Convert-ToSafePathSegment comes from PhysicsPpt.Common.ps1; the shared version
+# preserves dots (deliverable convention, e.g. "13.2内能") instead of collapsing them.
 
 function Add-AuditRow {
     param(
@@ -316,6 +312,11 @@ if (-not (Test-Path -LiteralPath $OutputDir)) { New-Item -ItemType Directory -Pa
 
 $pageDir = Join-Path $OutputDir 'pages'
 if (-not (Test-Path -LiteralPath $pageDir)) { New-Item -ItemType Directory -Path $pageDir -Force | Out-Null }
+# Only generated page renders are disposable here. Removing them before the
+# current run prevents a failed export from being mistaken for a stale success.
+Get-ChildItem -LiteralPath $pageDir -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -like 'slide-*.png' -or $_.Name -like 'slide-*.PNG' } |
+    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
 
 $fileName = [System.IO.Path]::GetFileName($InputPath)
 $safeBase = Convert-ToSafePathSegment -Name ([System.IO.Path]::GetFileNameWithoutExtension($InputPath))
@@ -327,7 +328,7 @@ $pp = $null
 $pres = $null
 try {
     $pp = New-PowerPointApplication
-    $pres = $pp.Presentations.Open($InputPath, $script:MsoFalse, $script:MsoFalse, $script:MsoFalse)
+    $pres = $pp.Presentations.Open($InputPath, $script:MsoTrue, $script:MsoFalse, $script:MsoFalse)
     $slideWidth = [double]$pres.PageSetup.SlideWidth
     $slideHeight = [double]$pres.PageSetup.SlideHeight
     $slideCount = [int]$pres.Slides.Count
@@ -336,10 +337,16 @@ try {
         $pdfPath = Join-Path $OutputDir ($safeBase + '.pdf')
         try {
             $pres.ExportAsFixedFormat($pdfPath, 2) | Out-Null
+            if (-not (Test-Path -LiteralPath $pdfPath) -or (Get-Item -LiteralPath $pdfPath).Length -le 0) {
+                throw "PowerPoint did not create a non-empty PDF: $pdfPath"
+            }
             Add-AuditRow -Rows $auditRows -File $fileName -Slide 0 -Shape '(presentation)' -Issue 'PdfExported' -Severity 'Info' -Details $pdfPath
         } catch {
             try {
                 $pres.SaveAs($pdfPath, 32) | Out-Null
+                if (-not (Test-Path -LiteralPath $pdfPath) -or (Get-Item -LiteralPath $pdfPath).Length -le 0) {
+                    throw "PowerPoint did not create a non-empty PDF through SaveAs fallback: $pdfPath"
+                }
                 Add-AuditRow -Rows $auditRows -File $fileName -Slide 0 -Shape '(presentation)' -Issue 'PdfExportedBySaveAsFallback' -Severity 'Info' -Details $pdfPath
             } catch {
                 Add-AuditRow -Rows $auditRows -File $fileName -Slide 0 -Shape '(presentation)' -Issue 'PdfExportFailed' -Severity 'Error' -Details $_.Exception.Message
@@ -350,9 +357,21 @@ try {
     for ($slideNo = 1; $slideNo -le $slideCount; $slideNo++) {
         $slide = $pres.Slides.Item($slideNo)
         $imagePath = Join-Path $pageDir ('slide-{0:000}.png' -f $slideNo)
+        $slideExportStatus = 'Failed'
+        $slideExportError = ''
+        $metrics = $null
         try {
             Export-SlidePng -Slide $slide -Path $imagePath -Width $ExportWidth -Height $ExportHeight
+            if (-not (Test-Path -LiteralPath $imagePath) -or (Get-Item -LiteralPath $imagePath).Length -le 0) {
+                throw "PowerPoint did not create a non-empty PNG: $imagePath"
+            }
+            # Decode the exported bytes before marking the page successful. A
+            # non-empty but corrupt PNG must leave a structured failed row for
+            # the confirmation gate instead of aborting the whole audit.
+            $metrics = Get-ImageVisualMetrics -Path $imagePath
+            $slideExportStatus = 'Succeeded'
         } catch {
+            $slideExportError = $_.Exception.Message
             Add-AuditRow -Rows $auditRows -File $fileName -Slide $slideNo -Shape '(slide)' -Issue 'SlidePngExportFailed' -Severity 'Error' -Details $_.Exception.Message
         }
 
@@ -414,8 +433,7 @@ try {
             }
         }
 
-        if (Test-Path -LiteralPath $imagePath) {
-            $metrics = Get-ImageVisualMetrics -Path $imagePath
+        if ($slideExportStatus -eq 'Succeeded' -and $null -ne $metrics) {
             if ($metrics.IsVisuallyBlank) {
                 Add-AuditRow -Rows $auditRows -File $fileName -Slide $slideNo -Shape '(slide)' -Issue 'SlideLooksBlank' -Severity 'Error' -Details ("nonWhite={0}%; bounds={1}" -f $metrics.NonWhitePercent, $metrics.ContentBounds)
             }
@@ -425,6 +443,7 @@ try {
             $slideRows.Add([pscustomobject]@{
                 File = $fileName
                 Slide = $slideNo
+                ExportStatus = $slideExportStatus
                 ImagePath = $imagePath
                 Width = $metrics.Width
                 Height = $metrics.Height
@@ -435,6 +454,23 @@ try {
                 ContentTouchesEdge = $metrics.ContentTouchesEdge
                 ContentBounds = $metrics.ContentBounds
                 IssueCount = 0
+            }) | Out-Null
+        } else {
+            $slideRows.Add([pscustomobject]@{
+                File = $fileName
+                Slide = $slideNo
+                ExportStatus = 'Failed'
+                ImagePath = ''
+                Width = 0
+                Height = 0
+                WhitePercent = ''
+                NonWhitePercent = ''
+                DarkPercent = ''
+                IsVisuallyBlank = $false
+                ContentTouchesEdge = $false
+                ContentBounds = ''
+                IssueCount = 1
+                ExportError = $slideExportError
             }) | Out-Null
         }
     }
@@ -486,7 +522,10 @@ $manifest = [pscustomobject]@{
     inputPath = $InputPath
     outputDir = $OutputDir
     pageDir = $pageDir
-    slideCount = $slideRows.Count
+    slideCount = $slideCount
+    exportedSlideCount = @($slideRows | Where-Object { $_.ExportStatus -eq 'Succeeded' }).Count
+    exportFailedCount = @($slideRows | Where-Object { $_.ExportStatus -ne 'Succeeded' }).Count
+    slideNumbers = @($slideRows | Select-Object -ExpandProperty Slide | Sort-Object)
     errorCount = $errorCount
     warningCount = $warningCount
     auditCsv = $auditCsv
@@ -499,3 +538,4 @@ $manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $manifestPath -En
 
 Write-Host "Visual audit done: $OutputDir"
 Write-Host "Slides: $($slideRows.Count); Errors: $errorCount; Warnings: $warningCount"
+if ($FailOnError -and $errorCount -gt 0) { throw "Visual audit found $errorCount error(s)." }

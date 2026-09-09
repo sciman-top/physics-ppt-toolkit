@@ -119,6 +119,14 @@ foreach ($file in $files) {
     $zip = $null
     try {
         $zip = [System.IO.Compression.ZipFile]::OpenRead($file.FullName)
+        $slidePartMap = Get-PresentationOrderSlidePartMap -Zip $zip
+        $slideRelationshipOrder = @{}
+        foreach ($slidePair in @($slidePartMap.GetEnumerator())) {
+            $partName = [string]$slidePair.Value
+            if ($partName -match '^ppt/slides/(slide\d+\.xml)$') {
+                $slideRelationshipOrder[('ppt/slides/_rels/' + $Matches[1] + '.rels')] = [int]$slidePair.Key
+            }
+        }
         foreach ($entry in @($zip.Entries | Where-Object { $_.FullName -like '*.rels' })) {
             $xmlText = Read-EntryText -Entry $entry
             [xml]$xml = $xmlText
@@ -130,7 +138,7 @@ foreach ($file in $files) {
                 $risk = Get-LinkRisk -TypeName $typeName -TargetKind $targetInfo.Kind -Exists $targetInfo.Exists
                 $rows.Add([pscustomobject]@{
                     File = $file.Name
-                    Slide = Get-SlideNumberFromRelationshipPath -EntryName $entry.FullName
+                    Slide = if ($slideRelationshipOrder.ContainsKey($entry.FullName)) { $slideRelationshipOrder[$entry.FullName] } else { 0 }
                     Entry = $entry.FullName
                     RelationshipId = $rel.Id
                     Type = $typeName
@@ -142,6 +150,20 @@ foreach ($file in $files) {
                 }) | Out-Null
             }
         }
+    } catch {
+        # One unreadable package must not abort the whole batch with no output.
+        $rows.Add([pscustomobject]@{
+            File = $file.Name
+            Slide = 0
+            Entry = '(package)'
+            RelationshipId = ''
+            Type = 'PackageReadFailed'
+            Target = $_.Exception.Message
+            TargetKind = ''
+            LocalPath = ''
+            TargetExists = $false
+            Risk = 'HighPackageReadFailed'
+        }) | Out-Null
     } finally {
         if ($null -ne $zip) { $zip.Dispose() }
     }

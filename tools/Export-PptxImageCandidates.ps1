@@ -77,12 +77,12 @@ function Get-SlideMediaMap {
     $zip = $null
     try {
         $zip = [System.IO.Compression.ZipFile]::OpenRead($PptxFile.FullName)
-        $relEntries = @($zip.Entries | Where-Object { $_.FullName -match '^ppt/slides/_rels/slide(\d+)\.xml\.rels$' })
-        foreach ($relEntry in $relEntries) {
-            if ($relEntry.FullName -notmatch '^ppt/slides/_rels/slide(\d+)\.xml\.rels$') { continue }
-            $slideNumber = [int]$Matches[1]
-            $sourcePart = "ppt/slides/slide$slideNumber.xml"
-            $xmlText = Read-ZipEntryText -Zip $zip -EntryName $relEntry.FullName
+        $slidePartMap = Get-PresentationOrderSlidePartMap -Zip $zip
+        foreach ($slidePair in @($slidePartMap.GetEnumerator() | Sort-Object Key)) {
+            $slideNumber = [int]$slidePair.Key
+            $sourcePart = [string]$slidePair.Value
+            $relEntryName = $sourcePart -replace '^ppt/slides/(slide\d+\.xml)$', 'ppt/slides/_rels/$1.rels'
+            $xmlText = Read-ZipEntryText -Zip $zip -EntryName $relEntryName
             if ([string]::IsNullOrWhiteSpace($xmlText)) { continue }
             $xml = New-Object System.Xml.XmlDocument
             $xml.PreserveWhitespace = $false
@@ -419,7 +419,10 @@ function Scan-PresentationImages {
     Add-Type -AssemblyName System.Drawing
 
     $rows = New-Object System.Collections.Generic.List[object]
-    $safeDeck = Convert-ToSafeFileNameSegment -Name ([System.IO.Path]::GetFileNameWithoutExtension($File.Name))
+    # Use the full source identity rather than only the basename: recursive
+    # scans may contain same-named decks whose extracted candidates must remain
+    # distinct.
+    $safeDeck = Get-RelativePathSafeStem -RootPath $InputPath -TargetPath $File.FullName
     $extractDir = Join-Path $OutputDir 'candidate-images'
     if ($ExportCandidates -and -not (Test-Path -LiteralPath $extractDir)) {
         New-Item -ItemType Directory -Path $extractDir -Force | Out-Null
@@ -553,8 +556,14 @@ if ($files.Count -eq 0) { throw "No PPTX files found in $InputPath" }
 $allRows = New-Object System.Collections.Generic.List[object]
 foreach ($file in $files) {
     Write-Host "Scanning images: $($file.Name)"
-    foreach ($row in @(Scan-PresentationImages -File $file -OutputDir $OutputDir -ExportCandidates ([bool]$ExportCandidates) -MinBytes $MinBytes -MinPixels $MinPixels -SampleSize $SampleSize)) {
-        $allRows.Add($row) | Out-Null
+    try {
+        foreach ($row in @(Scan-PresentationImages -File $file -OutputDir $OutputDir -ExportCandidates ([bool]$ExportCandidates) -MinBytes $MinBytes -MinPixels $MinPixels -SampleSize $SampleSize)) {
+            $allRows.Add($row) | Out-Null
+        }
+    } catch {
+        # One unreadable deck must not abort a multi-file scan; keep going so
+        # the remaining decks still produce their candidate reports.
+        Write-Warning "Image scan failed for $($file.Name): $($_.Exception.Message)"
     }
 }
 
@@ -563,10 +572,9 @@ $jsonPath = Join-Path $OutputDir 'pptx-image-candidates.json'
 $manifestPath = Join-Path $OutputDir 'pptx-image-candidates-manifest.json'
 $contactSheetPath = Join-Path $OutputDir 'pptx-image-candidates.contact-sheet.png'
 
-$allRows | Sort-Object Deck, @{ Expression = 'EnhancementCandidate'; Descending = $true }, @{ Expression = 'PhotoScore'; Descending = $true }, MediaPath |
-    Write-Utf8BomCsv -InputObject $rows.ToArray() -Path $csvPath
-$allRows | Sort-Object Deck, @{ Expression = 'EnhancementCandidate'; Descending = $true }, @{ Expression = 'PhotoScore'; Descending = $true }, MediaPath |
-    ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $jsonPath -Encoding UTF8
+$sortedRows = @($allRows | Sort-Object Deck, @{ Expression = 'EnhancementCandidate'; Descending = $true }, @{ Expression = 'PhotoScore'; Descending = $true }, MediaPath)
+Write-Utf8BomCsv -InputObject $sortedRows -Path $csvPath
+$sortedRows | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $jsonPath -Encoding UTF8
 
 $contactSheetCreated = $false
 if ($ContactSheet) {

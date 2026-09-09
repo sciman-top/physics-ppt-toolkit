@@ -59,6 +59,7 @@ param(
     [switch]$UpdateMaster,
     [switch]$DisableAdvanceOnClick,
     [switch]$Force,
+    [switch]$FailOnError,
     [string]$ImageOutputDir,
 
     [string]$FilePattern = '*.ppt*',
@@ -77,6 +78,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'PhysicsPpt.Common.ps1')
+
+$script:NormalizeScriptPath = $PSCommandPath
 
 # --- Office Enum Constants ---
 $script:MsoTrue  = -1
@@ -287,8 +290,13 @@ $script:FormulaConversionDefault = [bool](Get-ConfigValue 'rules' 'formulaConver
 $script:DoNotMoveShapes = [bool](Get-ConfigValue 'rules' 'doNotMoveShapes' $true)
 $script:DoNotResizeShapes = [bool](Get-ConfigValue 'rules' 'doNotResizeShapes' $true)
 $script:DoNotModifyAnimations = [bool](Get-ConfigValue 'rules' 'doNotModifyAnimations' $true)
+# Guard anchor required by Test-ToolkitFiles: this tool never touches slide
+# transitions, so the flag is honored trivially; kept explicit for the contract.
 $script:DoNotModifySlideTransitions = [bool](Get-ConfigValue 'rules' 'doNotModifySlideTransitions' $true)
 $script:DisableAdvanceOnClick = [bool](Get-ConfigValue 'rules' 'disableAdvanceOnClick' $false) -or [bool]$DisableAdvanceOnClick
+# Host font availability cannot change mid-run; the check result is cached so
+# large batches do not re-enumerate every installed family per file.
+$script:ConfiguredFontCheckCache = $null
 
 # --- Yellow-ish RGB range for highlight-box detection ---
 # Tolerance band: R > 200, G > 200, B < 180 (covers most yellow/cream fills)
@@ -337,6 +345,68 @@ function Add-ReportRow {
         RiskLevel = $RiskLevel
         Result = $Result
     }) | Out-Null
+}
+
+function Get-FileSha256 {
+    param([string]$Path)
+    $stream = $null
+    $sha256 = $null
+    try {
+        $stream = [System.IO.File]::OpenRead($Path)
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        return ($sha256.ComputeHash($stream) | ForEach-Object { $_.ToString('x2') }) -join ''
+    } finally {
+        if ($null -ne $sha256) { $sha256.Dispose() }
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+}
+
+function Get-NormalizeSignature {
+    param(
+        [System.IO.FileInfo]$File,
+        [string]$SafeName
+    )
+    $sourceHash = Get-FileSha256 -Path $File.FullName
+    $configHash = if (Test-Path -LiteralPath $ConfigPath) { Get-FileSha256 -Path $ConfigPath } else { 'missing' }
+    $scriptHash = Get-FileSha256 -Path $script:NormalizeScriptPath
+    $payload = [ordered]@{
+        sourceSha256 = $sourceHash
+        configSha256 = $configHash
+        scriptSha256 = $scriptHash
+        safeName = $SafeName
+        noPdf = [bool]$NoPdf
+        reportOnly = [bool]$ReportOnly
+        updateMaster = [bool]$UpdateMaster
+        disableAdvanceOnClick = [bool]$DisableAdvanceOnClick
+        filePattern = [string]$FilePattern
+        imageOutputDir = if ([string]::IsNullOrWhiteSpace($ImageOutputDir)) { '' } else { [System.IO.Path]::GetFullPath($ImageOutputDir) }
+    }
+    $json = $payload | ConvertTo-Json -Compress -Depth 6
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+    $hasher = [System.Security.Cryptography.SHA256]::Create()
+    try { $signature = ($hasher.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) -join '' } finally { $hasher.Dispose() }
+    return [pscustomobject]@{ Signature = $signature; Payload = $payload }
+}
+
+function Test-PageImageSet {
+    param([string]$Directory, [int]$ExpectedCount)
+    if ($ExpectedCount -le 0 -or [string]::IsNullOrWhiteSpace($Directory) -or -not (Test-Path -LiteralPath $Directory)) { return $false }
+    $files = @(Get-ChildItem -LiteralPath $Directory -Filter '*.png' -File)
+    $numbers = New-Object System.Collections.Generic.List[int]
+    foreach ($file in $files) {
+        if ($file.BaseName -notmatch '^page-(\d+)$') { return $false }
+        if ($file.Length -le 0) { return $false }
+        try {
+            $imageInfo = Get-BasicImageInfo -Path $file.FullName
+            if ($imageInfo.Width -le 0 -or $imageInfo.Height -le 0) { return $false }
+        } catch {
+            return $false
+        }
+        $numbers.Add([int]$Matches[1]) | Out-Null
+    }
+    if ($numbers.Count -ne $ExpectedCount -or @($numbers | Sort-Object -Unique).Count -ne $numbers.Count) { return $false }
+    $numbers = @($numbers | Sort-Object)
+    return (($numbers | ForEach-Object { [string]$_ }) -join ',') -eq ((1..$ExpectedCount) -join ',')
 }
 
 function Test-ShapeUsesAutomaticSizing {
@@ -685,7 +755,8 @@ function Get-FormulaWhitelistMatch {
         $pattern = Get-FormulaRuleValue -Rule $rule -Name 'sourcePattern'
         if ([string]::IsNullOrWhiteSpace($pattern)) { continue }
         try {
-            if ([string]$Profile.Normalized -match $pattern) {
+            # Case-sensitive on purpose: P=W/t (power) and p=F/S (pressure) differ only by case.
+            if ([string]$Profile.Normalized -cmatch $pattern) {
                 return $rule
             }
         } catch {
@@ -871,21 +942,31 @@ function Set-TextRangeStyle {
         $beforeSize = Get-TextRangeFontSize $TextRange
         $beforeBold = [string]$font.Bold
         $beforeColor = try { [string]$font.Fill.ForeColor.RGB } catch { '' }
+        # A missing size (mixed runs report a negative COM value) means a size
+        # write would flatten the emphasis hierarchy; preserve it like mixed fonts.
+        $mixedFontSize = ($null -eq $beforeSize -and -not $ForceTargetSize)
         $safeSize = Resolve-SafeFontSize -TextRange $TextRange -TargetSize $Size -FileName $FileName -SlideNumber $SlideNumber -ShapeName $ShapeName -ForceTargetSize:$ForceTargetSize -MaxSize $MaxSize
         $font.Name = $script:Style.FontLatin
         $font.NameFarEast = $script:Style.FontChinese
         if (-not $FontOnly) {
-            $font.Size = $safeSize
-            $font.Bold = $(if ($Bold) { $script:MsoTrue } else { $script:MsoFalse })
-            $font.Fill.Visible = $script:MsoTrue
-            $font.Fill.ForeColor.RGB = $Color
+            if ($mixedFontSize) {
+                Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $ShapeName -Issue 'TextStyleSkippedMixedFontSize' `
+                    -Details 'Text range mixes font sizes; size, bold, and color were preserved to keep the emphasis hierarchy.' `
+                    -RuleId 'STYLE.TEXT.FONT' -Property 'Size/Bold/Color' -Before "$beforeSize|$beforeBold|$beforeColor" -After "$beforeSize|$beforeBold|$beforeColor" `
+                    -RiskLevel 'R0' -Result 'Skipped'
+            } else {
+                $font.Size = $safeSize
+                $font.Bold = $(if ($Bold) { $script:MsoTrue } else { $script:MsoFalse })
+                $font.Fill.Visible = $script:MsoTrue
+                $font.Fill.ForeColor.RGB = $Color
+            }
         }
         if ($FileName -ne '') {
             Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $ShapeName -Issue 'TextStyleNormalized' `
                 -Details $(if ($FontOnly) { 'Font family normalized; size, emphasis, color, text content, and geometry preserved.' } else { 'Font family and safe font size normalized; text content preserved.' }) `
                 -RuleId 'STYLE.TEXT.FONT' -Property $(if ($FontOnly) { 'FontName/NameFarEast' } else { 'FontName/NameFarEast/Size/Bold/Color' }) `
                 -Before ("{0}|{1}|{2}|{3}|{4}" -f $beforeName, $beforeFarEast, $beforeSize, $beforeBold, $beforeColor) `
-                -After $(if ($FontOnly) { "{0}|{1}|{2}|{3}|{4}" -f $script:Style.FontLatin, $script:Style.FontChinese, $beforeSize, $beforeBold, $beforeColor } else { "{0}|{1}|{2}|{3}|{4}" -f $script:Style.FontLatin, $script:Style.FontChinese, $safeSize, $Bold, $Color }) `
+                -After $(if ($FontOnly -or $mixedFontSize) { "{0}|{1}|{2}|{3}|{4}" -f $script:Style.FontLatin, $script:Style.FontChinese, $beforeSize, $beforeBold, $beforeColor } else { "{0}|{1}|{2}|{3}|{4}" -f $script:Style.FontLatin, $script:Style.FontChinese, $safeSize, $Bold, $Color }) `
                 -RiskLevel 'R1' -Result 'Applied'
         }
     } catch {
@@ -928,6 +1009,15 @@ function Get-InstalledFontFamilyNames {
 }
 
 function Get-MissingConfiguredFonts {
+    # Cached: installed families cannot change mid-run, and re-enumerating
+    # them for every file in a batch is pure overhead.
+    if ($null -eq $script:ConfiguredFontCheckCache) {
+        $script:ConfiguredFontCheckCache = Get-MissingConfiguredFontsUncached
+    }
+    return $script:ConfiguredFontCheckCache
+}
+
+function Get-MissingConfiguredFontsUncached {
     $configured = @($script:Style.FontChinese, $script:Style.FontCompactChinese, $script:Style.FontLatin, $script:Style.FontMath) |
         Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
         Select-Object -Unique
@@ -1083,10 +1173,15 @@ function Set-AutoSizeFontSizeCapSafely {
     if ($null -eq $beforeSize -or $beforeSize -le $MaxSize) { return }
     try {
         $textRange.Font.Size = $MaxSize
-        $Shape.Left = [single]$Left
-        $Shape.Top = [single]$Top
-        $Shape.Width = [single]$Width
-        $Shape.Height = [single]$Height
+        # Measure the AutoSize reflow first; restore the captured bounds only if
+        # the size change actually moved the shape.
+        $reflowDrift = Get-AutoSizeGeometryDrift -Shape $Shape -Left $Left -Top $Top -Width $Width -Height $Height
+        if ($reflowDrift -gt 0.05) {
+            $Shape.Left = [single]$Left
+            $Shape.Top = [single]$Top
+            $Shape.Width = [single]$Width
+            $Shape.Height = [single]$Height
+        }
         $geometryDrift = (
             [Math]::Abs(([double]$Shape.Left) - $Left) -gt 0.05 -or
             [Math]::Abs(([double]$Shape.Top) - $Top) -gt 0.05 -or
@@ -1234,10 +1329,14 @@ function Set-AutoSizeTextFontSafely {
             return
         }
 
-        $Shape.Left = [single]$left
-        $Shape.Top = [single]$top
-        $Shape.Width = [single]$width
-        $Shape.Height = [single]$height
+        # Restore geometry only when AutoSize actually reflowed; writing bounds
+        # back on an unchanged shape can only introduce single-precision rounding.
+        if ($drift -gt 0.05) {
+            $Shape.Left = [single]$left
+            $Shape.Top = [single]$top
+            $Shape.Width = [single]$width
+            $Shape.Height = [single]$height
+        }
         Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
             -Issue 'TextStyleNormalized' `
             -Details $(if ($SpecialSlide) { 'Special slide font family normalized; original size, emphasis, color, AutoSize, and geometry were preserved.' } else { 'Font family normalized; original size, emphasis, color, AutoSize, and geometry were preserved.' }) `
@@ -1456,7 +1555,11 @@ function Normalize-TextShape {
             $script:Style.SizeBody
         }
         $bold = [bool]($isTitle -or $isSecondaryTitle)
-        $color = if ($IsVideoSlide) { $script:Style.ColorWhite } elseif ($isAuxiliary) { $script:Style.ColorDarkGray } else { $script:Style.ColorBody }
+        # White text is only safe when the matching black video-slide background
+        # will actually be written; SLIDE.BACKGROUND is disabled by default, and
+        # white text over an untouched light background would be unreadable.
+        $videoBackgroundNormalized = $IsVideoSlide -and (Test-StyleRuleEnabled -RuleId 'SLIDE.BACKGROUND')
+        $color = if ($videoBackgroundNormalized) { $script:Style.ColorWhite } elseif ($isAuxiliary) { $script:Style.ColorDarkGray } else { $script:Style.ColorBody }
         Set-TextRangeStyle -TextRange $Shape.TextFrame2.TextRange -Size $size -Color $color -Bold $bold `
             -FileName $FileName -SlideNumber $SlideNumber -ShapeName $Shape.Name -MaxSize $maxSize -ForceTargetSize:$IsSectionTitleSlide
         if ($IsSectionTitleSlide) {
@@ -1789,6 +1892,9 @@ function Export-PresentationPdf {
     try {
         $pdfFormat = 32 # ppSaveAsPDF
         Invoke-WithComRetry { $Presentation.SaveAs($PdfPath, $pdfFormat) }
+        if (-not (Test-Path -LiteralPath $PdfPath) -or (Get-Item -LiteralPath $PdfPath).Length -le 0) {
+            throw "PowerPoint did not create a non-empty PDF: $PdfPath"
+        }
         Add-ReportRow -File $FileName -SlideNumber 0 -ShapeName '(presentation)' -Issue 'PdfExported' -Details $PdfPath
     } catch {
         Add-ReportRow -File $FileName -SlideNumber 0 -ShapeName '(presentation)' -Issue 'PdfExportFailed' -Details (Format-ComFailureDetails $_)
@@ -1805,23 +1911,37 @@ function Export-PresentationImages {
     if ([string]::IsNullOrWhiteSpace($ImageDir)) { return }
     try {
         if (-not (Test-Path -LiteralPath $ImageDir)) { New-Item -ItemType Directory -Path $ImageDir -Force | Out-Null }
-        Invoke-WithComRetry { $Presentation.Export($ImageDir, 'PNG') }
-        Get-ChildItem -LiteralPath $ImageDir -Filter '*.PNG' -File |
-            ForEach-Object {
-                if ($_.BaseName -match '(\d+)$') {
-                    $pageNo = [int]$Matches[1]
-                    $target = Join-Path $ImageDir ('page-{0:000}.png' -f $pageNo)
-                    if ($_.FullName -ne $target) {
-                        Move-Item -LiteralPath $_.FullName -Destination $target -Force
-                    }
-                }
-            }
-        Add-ReportRow -File $FileName -SlideNumber 0 -ShapeName '(presentation)' -Issue 'ImagesExported' -Details $ImageDir
         $expectedCount = [int]$Presentation.Slides.Count
-        $actualCount = @(Get-ChildItem -LiteralPath $ImageDir -Filter 'page-*.png' -File).Count
-        if ($actualCount -ne $expectedCount) {
-            Add-ReportRow -File $FileName -SlideNumber 0 -ShapeName '(presentation)' -Issue 'ImageExportCountMismatch' -Details "Expected $expectedCount PNG files but found $actualCount."
+        Get-ChildItem -LiteralPath $ImageDir -Filter 'page-*.png' -File -ErrorAction SilentlyContinue | Remove-Item -Force
+        $failedSlides = New-Object System.Collections.Generic.List[int]
+        for ($slideNo = 1; $slideNo -le $expectedCount; $slideNo++) {
+            $target = Join-Path $ImageDir ('page-{0:000}.png' -f $slideNo)
+            try {
+                $slide = $Presentation.Slides.Item($slideNo)
+                Invoke-WithComRetry { $slide.Export($target, 'PNG') }
+                if (-not (Test-Path -LiteralPath $target) -or (Get-Item -LiteralPath $target).Length -le 0) {
+                    throw "PowerPoint did not create a non-empty PNG: $target"
+                }
+                $imageInfo = Get-BasicImageInfo -Path $target
+                if ($imageInfo.Width -le 0 -or $imageInfo.Height -le 0) {
+                    throw "PowerPoint created an undecodable PNG: $target"
+                }
+            } catch {
+                $failedSlides.Add($slideNo) | Out-Null
+                Add-ReportRow -File $FileName -SlideNumber $slideNo -ShapeName '(slide)' -Issue 'SlidePngExportFailed' -Details (Format-ComFailureDetails $_)
+            }
+        }
+        $actualNumbers = @(Get-ChildItem -LiteralPath $ImageDir -Filter 'page-*.png' -File | ForEach-Object {
+            if ($_.BaseName -match '^page-(\d+)$') { [int]$Matches[1] }
+        } | Sort-Object -Unique)
+        $actualCount = $actualNumbers.Count
+        $expectedKey = if ($expectedCount -gt 0) { ((1..$expectedCount) -join ',') } else { '' }
+        $actualKey = (($actualNumbers | ForEach-Object { [string]$_ }) -join ',')
+        if ($failedSlides.Count -gt 0 -or $actualKey -ne $expectedKey) {
+            Add-ReportRow -File $FileName -SlideNumber 0 -ShapeName '(presentation)' -Issue 'ImageExportCountMismatch' -Details "Expected pages $expectedKey but found $actualKey; failed slides=$($failedSlides -join ',')."
+            Add-ReportRow -File $FileName -SlideNumber 0 -ShapeName '(presentation)' -Issue 'ImagesExportFailed' -Details "Page image export did not produce the complete expected set under $ImageDir."
         } else {
+            Add-ReportRow -File $FileName -SlideNumber 0 -ShapeName '(presentation)' -Issue 'ImagesExported' -Details $ImageDir
             Add-ReportRow -File $FileName -SlideNumber 0 -ShapeName '(presentation)' -Issue 'ImageExportCountVerified' -Details "$actualCount page images exported."
         }
     } catch {
@@ -1835,13 +1955,27 @@ function Normalize-Presentation {
     $safeName = Get-RelativePathSafeStem -RootPath $InputPath -TargetPath $File.FullName
     $outFile = Join-Path $OutputDir ($safeName + '.normalized' + $File.Extension)
     $pdfFile = Join-Path $OutputDir ($safeName + '.normalized.pdf')
+    $cachePath = $outFile + '.cache.json'
     $backupDir = Join-Path $OutputDir '_backup_originals'
+    $signature = Get-NormalizeSignature -File $File -SafeName $safeName
 
-    # Skip if output already exists and is newer than source (unless -Force)
+    # Timestamps alone cannot distinguish flags, config/script revisions, or a
+    # workflow that intentionally cleared an output artifact.
     if (-not $ReportOnly -and -not $Force -and (Test-Path -LiteralPath $outFile)) {
-        $outItem = Get-Item -LiteralPath $outFile
-        $pdfIsCurrent = $NoPdf -or ((Test-Path -LiteralPath $pdfFile) -and ((Get-Item -LiteralPath $pdfFile).LastWriteTimeUtc -gt $File.LastWriteTimeUtc))
-        if ($outItem.LastWriteTimeUtc -gt $File.LastWriteTimeUtc -and $pdfIsCurrent) {
+        $cache = $null
+        try { $cache = Get-Content -LiteralPath $cachePath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $cache = $null }
+        $cacheImageDir = if ($null -ne $cache) { [string]$cache.imageDir } else { '' }
+        $cacheExpectedSlides = 0
+        if ($null -ne $cache -and $null -ne $cache.PSObject.Properties['expectedSlides']) {
+            [void][int]::TryParse([string]$cache.expectedSlides, [ref]$cacheExpectedSlides)
+        }
+        $cacheOutputReady = (Test-Path -LiteralPath $outFile) -and (Get-Item -LiteralPath $outFile).Length -gt 0
+        $cacheArtifactsReady = $NoPdf -or ((Test-Path -LiteralPath $pdfFile) -and ((Get-Item -LiteralPath $pdfFile).Length -gt 0))
+        if (-not [string]::IsNullOrWhiteSpace($ImageOutputDir)) {
+            $cacheArtifactsReady = $cacheArtifactsReady -and (Test-PageImageSet -Directory $cacheImageDir -ExpectedCount $cacheExpectedSlides)
+        }
+        if ($null -ne $cache -and $cacheOutputReady -and [string]$cache.signature -eq $signature.Signature -and
+            [string]$cache.outputPath -eq $outFile -and $cacheArtifactsReady) {
             Write-Verbose "Skip (up-to-date): $($File.Name)"
             Add-ReportRow -File $File.Name -FilePath $File.FullName -SlideNumber 0 -ShapeName '(presentation)' -Issue 'SkippedUpToDate' -Details $outFile
             return
@@ -1850,14 +1984,17 @@ function Normalize-Presentation {
 
     if (-not $NoBackup -and -not $ReportOnly) {
         if (-not (Test-Path -LiteralPath $backupDir)) { New-Item -ItemType Directory -Path $backupDir -Force | Out-Null }
-        Copy-Item -LiteralPath $File.FullName -Destination (Join-Path $backupDir $File.Name) -Force
+        # The backup name mirrors the collision-safe output stem so same-named
+        # files from different subdirectories (-Recurse) cannot overwrite each
+        # other's only original backup.
+        Copy-Item -LiteralPath $File.FullName -Destination (Join-Path $backupDir ($safeName + $File.Extension)) -Force
     }
 
     $pres = $null
     try {
         $script:CurrentFilePath = $File.FullName
         $pres = Invoke-WithComRetry {
-            $PowerPoint.Presentations.Open($File.FullName, $script:MsoFalse, $script:MsoFalse, $script:MsoFalse)
+            $PowerPoint.Presentations.Open($File.FullName, $(if ($ReportOnly) { $script:MsoTrue } else { $script:MsoFalse }), $script:MsoFalse, $script:MsoFalse)
         }
 
         Add-PresentationPreflightReports -Presentation $pres -FileName $File.Name | Out-Null
@@ -1898,6 +2035,10 @@ function Normalize-Presentation {
                     }
 
                     if (-not $ReportOnly) {
+                        if ($shape.Type -eq $script:MsoTable -or (Test-ShapeHasTable $shape)) {
+                            Normalize-TableShape -Shape $shape -SlideNumber $i -FileName $File.Name
+                            continue
+                        }
                         Clear-DecorativeEffects -Shape $shape -SlideNumber $i -FileName $File.Name
                     }
 
@@ -1907,11 +2048,6 @@ function Normalize-Presentation {
 
                     if (Test-IsLargePictureShape $shape) {
                         Add-ReportRow -File $File.Name -SlideNumber $i -ShapeName $shapeName -Issue 'RasterPicturePreserved' -Details 'Large picture detected; embedded text inside the bitmap is not rewritten automatically.'
-                    }
-
-                    if ($shape.Type -eq $script:MsoTable -or (Test-ShapeHasTable $shape)) {
-                        Normalize-TableShape -Shape $shape -SlideNumber $i -FileName $File.Name
-                        continue
                     }
 
                     $text = Get-ShapeText $shape
@@ -1953,6 +2089,27 @@ function Normalize-Presentation {
             if (-not [string]::IsNullOrWhiteSpace($ImageOutputDir)) {
                 $imageDir = Join-Path $ImageOutputDir $safeName
                 Export-PresentationImages -Presentation $pres -ImageDir $imageDir -FileName $File.Name
+            }
+            $fileFailureIssues = @($script:ReportRows | Where-Object {
+                $_.FilePath -eq $File.FullName -and $_.Issue -in @('PdfExportFailed', 'ImagesExportFailed', 'ImageExportCountMismatch', 'SlidePngExportFailed', 'SavedAsFailed')
+            })
+            $cacheImageDir = if ([string]::IsNullOrWhiteSpace($ImageOutputDir)) { '' } else { Join-Path $ImageOutputDir $safeName }
+            $cacheReady = (Test-Path -LiteralPath $outFile) -and (Get-Item -LiteralPath $outFile).Length -gt 0 -and $fileFailureIssues.Count -eq 0 -and
+                ($NoPdf -or ((Test-Path -LiteralPath $pdfFile) -and (Get-Item -LiteralPath $pdfFile).Length -gt 0)) -and
+                ([string]::IsNullOrWhiteSpace($ImageOutputDir) -or (Test-PageImageSet -Directory $cacheImageDir -ExpectedCount ([int]$pres.Slides.Count)))
+            if ($cacheReady) {
+                $cacheRecord = [ordered]@{
+                    schemaVersion = 1
+                    generatedAt = (Get-Date).ToUniversalTime().ToString('o')
+                    signature = $signature.Signature
+                    sourceSha256 = $signature.Payload.sourceSha256
+                    outputPath = $outFile
+                    pdfPath = if ($NoPdf) { '' } else { $pdfFile }
+                    imageDir = $cacheImageDir
+                    expectedSlides = [int]$pres.Slides.Count
+                    parameters = $signature.Payload
+                }
+                [System.IO.File]::WriteAllText($cachePath, ($cacheRecord | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding -ArgumentList $false))
             }
         }
     } finally {
@@ -2015,6 +2172,7 @@ if ($DegreeOfParallelism -gt 1 -and $files.Count -gt 1) {
         if ($UpdateMaster)  { $childArgs += '-UpdateMaster' }
         if ($DisableAdvanceOnClick) { $childArgs += '-DisableAdvanceOnClick' }
         if ($Force)         { $childArgs += '-Force' }
+        $childArgs += @('-FileRetryCount', [string]$FileRetryCount, '-FileRetryDelayMs', [string]$FileRetryDelayMs)
         if (-not [string]::IsNullOrWhiteSpace($ImageOutputDir)) {
             $childArgs += @('-ImageOutputDir', $ImageOutputDir)
         }
@@ -2042,12 +2200,21 @@ if ($DegreeOfParallelism -gt 1 -and $files.Count -gt 1) {
             [System.IO.FileInfo]$FileItem
         )
 
-        if (-not (Test-Path -LiteralPath $WorkerOutputDir)) { return }
+        $mergeSucceeded = $true
+        $childRows = @()
+        if (-not (Test-Path -LiteralPath $WorkerOutputDir)) {
+            return [pscustomobject]@{
+                Succeeded = $false
+                ChildFailureCount = 0
+                ChildFailureIssues = @()
+            }
+        }
 
         $childReport = Join-Path $WorkerOutputDir 'physics-ppt-normalize-report.csv'
         if (Test-Path -LiteralPath $childReport) {
             try {
-                foreach ($row in @(Import-Csv -LiteralPath $childReport -Encoding UTF8)) {
+                $childRows = @(Import-Csv -LiteralPath $childReport -Encoding UTF8)
+                foreach ($row in $childRows) {
                     $ruleId = if ($null -ne $row.PSObject.Properties['RuleId']) { [string]$row.RuleId } else { '' }
                     $property = if ($null -ne $row.PSObject.Properties['Property']) { [string]$row.Property } else { '' }
                     $before = if ($null -ne $row.PSObject.Properties['Before']) { [string]$row.Before } else { '' }
@@ -2058,31 +2225,73 @@ if ($DegreeOfParallelism -gt 1 -and $files.Count -gt 1) {
                         -RuleId $ruleId -Property $property -Before $before -After $after -RiskLevel $riskLevel -Result $result
                 }
             } catch {
+                $mergeSucceeded = $false
                 Add-ReportRow -File $FileItem.Name -FilePath $FileItem.FullName -SlideNumber 0 -ShapeName '(presentation)' -Issue 'ChildReportMergeFailed' -Details $_.Exception.Message
             }
+        } else {
+            $mergeSucceeded = $false
+            Add-ReportRow -File $FileItem.Name -FilePath $FileItem.FullName -SlideNumber 0 -ShapeName '(presentation)' -Issue 'ChildReportMissing' -Details "Worker report was not produced: $childReport"
         }
+
+        # The child normalizer records per-file failures in its report but does
+        # not exit non-zero unless -FailOnError is supplied.  Treat explicit
+        # Failed results and failure-shaped issue IDs as a failed file so the
+        # parent summary cannot report a false success.
+        $childFailureRows = @($childRows | Where-Object {
+            ([string]$_.Result -eq 'Failed') -or
+            ([string]$_.Issue -match '(?i)(Failed|Failure)$') -or
+            ([string]$_.Issue -in @(
+                'PowerPointBusyOrRejectedCall', 'FileInUseOrSharingViolation',
+                'PowerPointComNotRegistered', 'FileNotFoundOrUnavailable',
+                'PowerPointComFailure', 'UnhandledFailure'
+            ))
+        })
 
         $workerBackupDir = Join-Path $WorkerOutputDir '_backup_originals'
         if (Test-Path -LiteralPath $workerBackupDir) {
             $backupDir = Join-Path $OutputDir '_backup_originals'
             if (-not (Test-Path -LiteralPath $backupDir)) { New-Item -ItemType Directory -Path $backupDir -Force | Out-Null }
-            Get-ChildItem -LiteralPath $workerBackupDir -File -ErrorAction SilentlyContinue |
-                Move-Item -Destination $backupDir -Force
+            try {
+                Get-ChildItem -LiteralPath $workerBackupDir -File -ErrorAction SilentlyContinue |
+                    Move-Item -Destination $backupDir -Force
+            } catch {
+                $mergeSucceeded = $false
+                Add-ReportRow -File $FileItem.Name -FilePath $FileItem.FullName -SlideNumber 0 -ShapeName '(presentation)' -Issue 'WorkerMergeFailed' -Details $_.Exception.Message
+            }
         }
 
-        Get-ChildItem -LiteralPath $WorkerOutputDir -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -ne 'physics-ppt-normalize-report.csv' } |
-            Move-Item -Destination $OutputDir -Force
+        try {
+            Get-ChildItem -LiteralPath $WorkerOutputDir -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -ne 'physics-ppt-normalize-report.csv' } |
+                Move-Item -Destination $OutputDir -Force
+            Remove-Item -LiteralPath $WorkerOutputDir -Recurse -Force
+        } catch {
+            $mergeSucceeded = $false
+            # A locked file (antivirus scan, preview window) must not abort the
+            # whole batch; keep the worker dir for inspection and report it.
+            Add-ReportRow -File $FileItem.Name -FilePath $FileItem.FullName -SlideNumber 0 -ShapeName '(presentation)' -Issue 'WorkerMergeFailed' -Details ("{0}; worker output kept at {1}" -f $_.Exception.Message, $WorkerOutputDir)
+        }
 
-        Remove-Item -LiteralPath $WorkerOutputDir -Recurse -Force
+        return [pscustomobject]@{
+            Succeeded = $mergeSucceeded
+            ChildFailureCount = $childFailureRows.Count
+            ChildFailureIssues = @($childFailureRows | ForEach-Object { [string]$_.Issue } | Sort-Object -Unique)
+        }
     }
 
     # Seed initial jobs
     while ($fileQueue.Count -gt 0 -and $runningJobs.Count -lt $DegreeOfParallelism) {
         $nextFile = $fileQueue.Dequeue()
-        $entry = Start-NextJob -FileItem $nextFile
-        $runningJobs.Add($entry)
-        Write-Verbose "Started job for: $($nextFile.Name)"
+        try {
+            $entry = Start-NextJob -FileItem $nextFile
+            $runningJobs.Add($entry)
+            Write-Verbose "Started job for: $($nextFile.Name)"
+        } catch {
+            $failedCount++
+            $details = $_.Exception.Message
+            Write-Warning "Failed to start worker for $($nextFile.Name) — $details"
+            Add-ReportRow -File $nextFile.Name -FilePath $nextFile.FullName -SlideNumber 0 -ShapeName '(presentation)' -Issue 'ChildProcessStartFailed' -Details $details
+        }
     }
 
     # Process completions
@@ -2097,28 +2306,57 @@ if ($DegreeOfParallelism -gt 1 -and $files.Count -gt 1) {
             $runningJobs.Remove($entry) | Out-Null
             $completedCount++
             Write-Progress -Activity $activity -Status "[$completedCount/$total] $($entry.File.Name)" -PercentComplete ([int](($completedCount / $total) * 100))
-            if ($entry.Job.State -eq 'Failed' -or $entry.Job.ChildJobs[0].JobStateInfo.Reason) {
-                $failedCount++
-                $errMsg = try { $entry.Job.ChildJobs[0].JobStateInfo.Reason.Message } catch { 'Unknown error' }
-                Write-Warning "Failed: $($entry.File.Name) — $errMsg"
-                Add-ReportRow -File $entry.File.Name -FilePath $entry.File.FullName -SlideNumber 0 -ShapeName '(presentation)' -Issue 'ChildProcessFailed' -Details $errMsg
-            } else {
-                Write-Verbose "Completed: $($entry.File.Name)"
+            $fileFailed = $false
+            try {
+                if ($entry.Job.State -eq 'Failed' -or $entry.Job.ChildJobs[0].JobStateInfo.Reason) {
+                    $fileFailed = $true
+                    $errMsg = try { $entry.Job.ChildJobs[0].JobStateInfo.Reason.Message } catch { 'Unknown error' }
+                    Write-Warning "Failed: $($entry.File.Name) — $errMsg"
+                    Add-ReportRow -File $entry.File.Name -FilePath $entry.File.FullName -SlideNumber 0 -ShapeName '(presentation)' -Issue 'ChildProcessFailed' -Details $errMsg
+                } else {
+                    Write-Verbose "Completed: $($entry.File.Name)"
+                }
+                $mergeResult = Merge-WorkerOutput -WorkerOutputDir $entry.OutputDir -FileItem $entry.File
+                if (-not $mergeResult.Succeeded) {
+                    $fileFailed = $true
+                }
+                if ($mergeResult.ChildFailureCount -gt 0) {
+                    $fileFailed = $true
+                    Add-ReportRow -File $entry.File.Name -FilePath $entry.File.FullName -SlideNumber 0 -ShapeName '(presentation)' -Issue 'ChildReportedFailure' -Details ("{0} failure row(s): {1}" -f $mergeResult.ChildFailureCount, ($mergeResult.ChildFailureIssues -join ', '))
+                }
+            } catch {
+                # Drain-loop resilience: a single merge/start failure must not
+                # abort the batch before the report is written.
+                $fileFailed = $true
+                Write-Warning "Worker completion failed for $($entry.File.Name) — $($_.Exception.Message)"
+                Add-ReportRow -File $entry.File.Name -FilePath $entry.File.FullName -SlideNumber 0 -ShapeName '(presentation)' -Issue 'WorkerMergeFailed' -Details $_.Exception.Message
+            } finally {
+                if ($fileFailed) { $failedCount++ }
+                try { Remove-Job -Job $entry.Job -Force } catch { }
             }
-            Merge-WorkerOutput -WorkerOutputDir $entry.OutputDir -FileItem $entry.File
-            Remove-Job -Job $entry.Job -Force
             # Start next queued file
             if ($fileQueue.Count -gt 0) {
-                $nextFile = $fileQueue.Dequeue()
-                $nextEntry = Start-NextJob -FileItem $nextFile
-                $runningJobs.Add($nextEntry)
-                Write-Verbose "Started job for: $($nextFile.Name)"
+                try {
+                    $nextFile = $fileQueue.Dequeue()
+                    $nextEntry = Start-NextJob -FileItem $nextFile
+                    $runningJobs.Add($nextEntry)
+                    Write-Verbose "Started job for: $($nextFile.Name)"
+                } catch {
+                    $failedCount++
+                    Write-Warning "Failed to start next worker — $($_.Exception.Message)"
+                    Add-ReportRow -File $nextFile.Name -FilePath $nextFile.FullName -SlideNumber 0 -ShapeName '(presentation)' -Issue 'ChildProcessStartFailed' -Details $_.Exception.Message
+                }
             }
         }
     }
     Write-Progress -Activity $activity -Completed
-    if ((Test-Path -LiteralPath $parallelTempRoot) -and @(Get-ChildItem -LiteralPath $parallelTempRoot -Force).Count -eq 0) {
-        Remove-Item -LiteralPath $parallelTempRoot -Force
+    if (Test-Path -LiteralPath $parallelTempRoot) {
+        $leftover = @(Get-ChildItem -LiteralPath $parallelTempRoot -Force -ErrorAction SilentlyContinue)
+        if ($leftover.Count -eq 0) {
+            Remove-Item -LiteralPath $parallelTempRoot -Force
+        } else {
+            Add-ReportRow -File '(batch)' -SlideNumber 0 -ShapeName '(presentation)' -Issue 'ParallelTempLeftover' -Details ("{0} worker output dir(s) kept for inspection under {1}" -f $leftover.Count, $parallelTempRoot)
+        }
     }
 } else {
     # --- Sequential path (default): single COM instance ---
@@ -2184,12 +2422,18 @@ if ($DegreeOfParallelism -gt 1 -and $files.Count -gt 1) {
 $sw.Stop()
 
 $reportPath = Join-Path $OutputDir 'physics-ppt-normalize-report.csv'
-# Write CSV with BOM for Excel Chinese compatibility (reliable across PS 5.x and 7.x)
-$utf8Bom = New-Object System.Text.UTF8Encoding($true)
-$csvLines = $script:ReportRows | ConvertTo-Csv -NoTypeInformation
-[System.IO.File]::WriteAllLines($reportPath, $csvLines, $utf8Bom)
+try {
+    # Shared helper keeps the BOM for Excel Chinese compatibility across PS 5.x and 7.x,
+    # and guards the final write so a locked report file cannot crash the run summary.
+    Write-Utf8BomCsv -InputObject $script:ReportRows.ToArray() -Path $reportPath
+} catch {
+    Write-Warning "Failed to write report CSV '$reportPath' — $($_.Exception.Message)"
+}
 
 Write-Host "Report saved: $reportPath"
 $successCount = $total - $failedCount
 Write-Host "Done. $successCount/$total file(s) succeeded in $($sw.Elapsed.ToString('mm\:ss'))"
-if ($failedCount -gt 0) { Write-Warning "$failedCount file(s) failed — see report for details." }
+if ($failedCount -gt 0) {
+    Write-Warning "$failedCount file(s) failed — see report for details."
+    if ($FailOnError) { throw "Normalization failed for $failedCount file(s)." }
+}

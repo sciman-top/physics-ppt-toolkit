@@ -28,12 +28,12 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'PhysicsPpt.Common.ps1')
 
 function Normalize-FormulaSource {
+    # Deliberately the same normalization as runtime whitelist matching
+    # (Get-NormalizedFormulaText). Suggested sourcePattern rows are regex-escaped
+    # from this output, so any extra mapping here would produce patterns the
+    # runtime can never match.
     param([string]$Text)
-    $t = [string]$Text
-    $t = $t -replace '\s+', ''
-    $t = $t.Replace('＝', '=').Replace('＋', '+').Replace('－', '-').Replace('（', '(').Replace('）', ')')
-    $t = $t.Replace('×', '*').Replace('∙', '·').Replace('·', '·').Replace('÷', '/')
-    return $t.Trim()
+    return (Get-NormalizedFormulaText -Text $Text)
 }
 
 function Convert-ToTex {
@@ -53,7 +53,8 @@ function Convert-ToTex {
     $t = $t.Replace('ρ', '\rho ')
     $t = $t.Replace('η', '\eta ')
     $t = $t.Replace('Ω', '\Omega ')
-    $t = $t.Replace('％', '\%')
+    # Escape both percent signs; a raw % would comment out the rest of the TeX line.
+    $t = $t -replace '[％%]', '\%'
     return ($t -replace '\s+', ' ').Trim()
 }
 
@@ -61,7 +62,7 @@ function Convert-ToUnicodeMath {
     param([string]$Text)
 
     $t = [string]$Text
-    $t = $t.Replace('＝', '=').Replace('×', '×').Replace('*', '×').Replace('∙', '·')
+    $t = $t.Replace('＝', '=').Replace('*', '×').Replace('∙', '·')
     foreach ($ch in @('物', '总', '有', '额', '动', '排', '液')) {
         $t = $t -replace "([A-Za-zρτηΩμ])$([regex]::Escape($ch))", ('$1_' + $ch)
     }
@@ -73,7 +74,8 @@ function Test-ExistingWhitelistMatch {
     param([string]$Normalized, [object[]]$Rules)
     foreach ($rule in @($Rules)) {
         try {
-            if ($Normalized -match ([string]$rule.sourcePattern)) { return $true }
+            # Case-sensitive, matching runtime whitelist resolution.
+            if ($Normalized -cmatch ([string]$rule.sourcePattern)) { return $true }
         } catch { }
     }
     return $false

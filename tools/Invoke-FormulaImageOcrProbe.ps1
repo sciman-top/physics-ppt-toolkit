@@ -73,7 +73,7 @@ if (-not (Test-Path -LiteralPath $FormulaImageCandidateCsv)) { throw "FormulaIma
 if (-not (Test-Path -LiteralPath $helper)) { throw "OCR helper not found: $helper" }
 if (-not (Test-Path -LiteralPath $OutputDir)) { New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null }
 
-$args = @(
+$pyArgs = @(
     $helper,
     '--input-csv', $FormulaImageCandidateCsv,
     '--output-dir', $OutputDir,
@@ -83,15 +83,15 @@ $args = @(
 )
 
 if ($OcrOriginal) {
-    $args += '--ocr-original'
+    $pyArgs += '--ocr-original'
 }
 
 if ($NoContactSheet) {
-    $args += '--no-contact-sheet'
+    $pyArgs += '--no-contact-sheet'
 }
 
 Write-Host "Using Python: $PythonPath"
-& $PythonPath @args
+& $PythonPath @pyArgs
 if ($LASTEXITCODE -ne 0) {
     throw "Formula image OCR probe failed with exit code $LASTEXITCODE"
 }

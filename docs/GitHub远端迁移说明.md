@@ -81,7 +81,7 @@ git remote -v
 当前仓库历史中已有大文件。直接运行下面命令大概率失败：
 
 ```powershell
-git push -u origin master
+git push -u origin main
 ```
 
 原因是 GitHub 会检查整个推送历史，不只检查当前工作区。

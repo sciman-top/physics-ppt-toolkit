@@ -5,8 +5,16 @@ Option Explicit
 '
 ' NOTE: VBA macros are an independent offline solution. They do NOT read config/physics-ppt-style.config.json.
 ' When updating the JSON config, sync these constants manually to keep PowerShell and VBA behavior consistent.
-' Mapping: FONT_CN -> fonts.chinese | FONT_LATIN -> fonts.latin | FONT_MATH -> fonts.math
-'          SIZE_* -> fontSizes.* | COLOR_* -> colors.*
+' Mapping (synced subset only):
+'   FONT_CN -> fonts.chinese | FONT_LATIN -> fonts.latin | FONT_MATH -> fonts.math
+'   SIZE_TITLE -> fontSizes.title1 | SIZE_BODY -> fontSizes.body | SIZE_TABLE_HEADER -> fontSizes.tableHeader
+'   SIZE_TABLE_BODY -> fontSizes.tableBody | SIZE_BODY_MAX -> fontSizes.bodyMax
+'   SIZE_MINIMUM -> fontSizes.minimum
+'   COLOR_WHITE -> colors.white | COLOR_BODY -> colors.body
+'   COLOR_YELLOW_FILL -> colors.yellowFill | COLOR_YELLOW_BORDER -> colors.yellowBorder
+' The remaining fontSizes/colors keys (sectionTitle, title2, formula*, footer,
+' sectionTitle/extensionTitle/formulaBlue/experimentGreen/darkGray) have no VBA counterpart:
+' the VBA fallback intentionally normalizes to a smaller set than the PowerShell mainline.
 ' Background normalization is intentionally opt-in in the VBA fallback, matching the
 ' PowerShell default. Set this constant to True only after visual review of the deck.
 Public Const NORMALIZE_SLIDE_BACKGROUND As Boolean = False
@@ -18,9 +26,22 @@ Public Const FONT_MATH As String = "Cambria Math"
 
 Public Const SIZE_TITLE As Single = 46
 Public Const SIZE_BODY As Single = 32
+Public Const SIZE_BODY_MAX As Single = 36
 Public Const SIZE_TABLE_HEADER As Single = 30
 Public Const SIZE_TABLE_BODY As Single = 28
 Public Const SIZE_MINIMUM As Single = 24
+
+' --- Color Constants (VBA Long = R + G*256 + B*65536) ---
+Public Const COLOR_WHITE As Long = 16777215   ' RGB(255, 255, 255) = colors.white   #FFFFFF
+Public Const COLOR_BODY As Long = 0           ' RGB(0, 0, 0)       = colors.body    #000000
+Public Const COLOR_YELLOW_FILL As Long = 13431551   ' RGB(255, 242, 204) = colors.yellowFill  #FFF2CC
+Public Const COLOR_YELLOW_BORDER As Long = 41942    ' RGB(214, 163, 0)   = colors.yellowBorder #D6A300
+
+' Table cell styling diverges from the PowerShell mainline, which is report-only
+' for tables ("TableStyleSkipped" to avoid cell overflow / row-height changes).
+' Default False keeps the VBA fallback aligned with the mainline; set True only
+' after visual review on a copy.
+Public Const NORMALIZE_TABLE_STYLE As Boolean = False
 
 ' --- Office Enum Constants ---
 Public Const MSO_TRUE_VAL As Long = -1
@@ -76,6 +97,15 @@ Public Function GetTextSize(ByVal shp As Shape) As Single
     Exit Function
 Failed:
     GetTextSize = 999
+End Function
+
+Public Function TryGetTextSize(ByVal shp As Shape, ByRef size As Single) As Boolean
+    On Error GoTo Failed
+    size = shp.TextFrame2.TextRange.Font.Size
+    TryGetTextSize = True
+    Exit Function
+Failed:
+    TryGetTextSize = False
 End Function
 
 Public Function ShapeHasTable(ByVal shp As Shape) As Boolean

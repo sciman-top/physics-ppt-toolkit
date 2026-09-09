@@ -5,7 +5,7 @@
 
 ## 1. 产品边界与入口
 - `docs/产品需求与工程路线图.md` 是产品边界与默认主线的 source of truth；`config/physics-ppt-style.config.json` 是 PowerShell 样式运行配置，VBA 常量必须按文件注释显式同步。
-- 主 entrypoint 是 `tools/Invoke-PhysicsPptWorkflow.ps1`；快速入口为根目录两个一键 `.cmd`，核心规范化实现是 `tools/Normalize-PhysicsPpt.ps1`。
+- 主 entrypoint 是 `tools/Invoke-PhysicsPptWorkflow.ps1`；快速入口为根目录三个一键 `.cmd`，核心规范化实现是 `tools/Normalize-PhysicsPpt.ps1`。
 - 本仓只对既有初中物理 PPT 做低风险样式规范化、公式审查和导出，不自动改写教学内容或重排课件。
 
 ## A. 仓库真值与领域不变量

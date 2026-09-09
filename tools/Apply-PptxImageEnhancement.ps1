@@ -107,8 +107,8 @@ function Apply-ReplacementsToPresentation {
 
     Add-Type -AssemblyName System.IO.Compression.FileSystem
 
-    $safeBase = [System.IO.Path]::GetFileNameWithoutExtension($File.Name)
-    $outPptx = Join-Path $OutputDir ($safeBase + '.image-enhanced.pptx')
+    $safeBase = Get-RelativePathSafeStem -RootPath $script:InputRootForIdentity -TargetPath $File.FullName
+    $outPptx = Join-Path $OutputDir ($safeBase + '.image-enhanced' + $File.Extension)
     $reportPath = Join-Path $OutputDir ($safeBase + '.image-enhancement-apply-report.csv')
     $manifestPath = Join-Path $OutputDir ($safeBase + '.image-enhancement-apply.json')
     if ((Test-Path -LiteralPath $outPptx) -and -not $Force) {
@@ -222,24 +222,57 @@ $ProbeCsv = [System.IO.Path]::GetFullPath($ProbeCsv)
 $OutputDir = [System.IO.Path]::GetFullPath($OutputDir)
 if (-not (Test-Path -LiteralPath $ProbeCsv)) { throw "ProbeCsv not found: $ProbeCsv" }
 if (-not (Test-Path -LiteralPath $OutputDir)) { New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null }
+$inputItem = Get-Item -LiteralPath $InputPath
+$script:InputRootForIdentity = if ($inputItem.PSIsContainer) { $inputItem.FullName } else { Split-Path -Parent $inputItem.FullName }
 
 $probeRows = @(Import-Csv -LiteralPath $ProbeCsv -Encoding UTF8 | Where-Object { $_.Status -eq 'Success' })
 if ($probeRows.Count -eq 0) { throw 'ProbeCsv contains no successful rows.' }
 
 $rowsByDeck = @{}
+$rowsByDeckPath = @{}
 foreach ($row in $probeRows) {
     $deck = [string]$row.Deck
     if (-not $rowsByDeck.ContainsKey($deck)) {
         $rowsByDeck[$deck] = New-Object System.Collections.Generic.List[object]
     }
     $rowsByDeck[$deck].Add($row) | Out-Null
+
+    # DeckPath is the unambiguous key; Deck (file name) alone would apply rows
+    # across same-named decks in a recursive tree. Normalize both separators
+    # and casing because this repository runs on Windows.
+    if ($null -ne $row.PSObject.Properties['DeckPath'] -and -not [string]::IsNullOrWhiteSpace([string]$row.DeckPath)) {
+        $deckPath = (([string]$row.DeckPath) -replace '/', '\')
+        try { $deckPath = [System.IO.Path]::GetFullPath($deckPath) } catch { }
+        $deckPath = $deckPath.ToLowerInvariant()
+        if (-not $rowsByDeckPath.ContainsKey($deckPath)) {
+            $rowsByDeckPath[$deckPath] = New-Object System.Collections.Generic.List[object]
+        }
+        $rowsByDeckPath[$deckPath].Add($row) | Out-Null
+    }
 }
 
 $files = @(Get-PresentationFiles -Path $InputPath -Pattern $FilePattern -Recurse:$Recurse -SupportedExtensions @('.pptx') -ExcludedRoots @($OutputDir))
+$sameNameDeckCount = @{}
 foreach ($file in $files) {
-    if (-not $rowsByDeck.ContainsKey($file.Name)) { continue }
+    if ($rowsByDeck.ContainsKey($file.Name)) {
+        if (-not $sameNameDeckCount.ContainsKey($file.Name)) { $sameNameDeckCount[$file.Name] = 0 }
+        $sameNameDeckCount[$file.Name]++
+    }
+}
+
+foreach ($file in $files) {
+    $filePathKey = ([System.IO.Path]::GetFullPath($file.FullName)).ToLowerInvariant()
+    $rowsForFile = $null
+    if ($rowsByDeckPath.Count -gt 0 -and $rowsByDeckPath.ContainsKey($filePathKey)) {
+        $rowsForFile = $rowsByDeckPath[$filePathKey].ToArray()
+    } elseif ($rowsByDeck.ContainsKey($file.Name) -and [int]$sameNameDeckCount[$file.Name] -eq 1) {
+        # Legacy probe CSVs without DeckPath: fall back to file name only when
+        # it is unambiguous in this input tree.
+        $rowsForFile = $rowsByDeck[$file.Name].ToArray()
+    }
+    if ($null -eq $rowsForFile) { continue }
     Write-Host "Applying image enhancements: $($file.Name)"
-    Apply-ReplacementsToPresentation -File $file -Rows $rowsByDeck[$file.Name].ToArray() -OutputDir $OutputDir -MaxSizeMultiplier $MaxSizeMultiplier -RequireSameDimensions $RequireSameDimensions -Force ([bool]$Force)
+    Apply-ReplacementsToPresentation -File $file -Rows $rowsForFile -OutputDir $OutputDir -MaxSizeMultiplier $MaxSizeMultiplier -RequireSameDimensions $RequireSameDimensions -Force ([bool]$Force)
 }
 
 Write-Host "Image enhancement apply done: $OutputDir"

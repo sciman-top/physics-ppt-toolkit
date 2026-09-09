@@ -48,6 +48,10 @@
 
 .PARAMETER Force
   Recreate outputs even when they already exist.
+
+.PARAMETER FailOnError
+  Return a failing process result when any file or media item could not be
+  optimized. The default keeps producing reports for batch inspection.
 #>
 [CmdletBinding()]
 param(
@@ -80,7 +84,9 @@ param(
 
     [string]$ToolRoot = '',
 
-    [switch]$Force
+    [switch]$Force,
+
+    [switch]$FailOnError
 )
 
 Set-StrictMode -Version Latest
@@ -164,6 +170,37 @@ function New-SharpenedBitmap {
     return $target
 }
 
+function New-TempMediaPath {
+    # GetTempFileName() materializes a placeholder file that ChangeExtension
+    # then orphans (one 0-byte .tmp leaked per optimized media). A random name
+    # creates nothing on disk until something actually writes it.
+    param([string]$Extension)
+    return (Join-Path ([System.IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('N') + $Extension))
+}
+
+function Test-JpegExifOrientationNeutral {
+    # The built-in System.Drawing JPEG path re-encodes pixels as-is but drops
+    # all metadata, including the EXIF orientation tag. Viewers that honor the
+    # tag would render the optimized copy differently from the original, so any
+    # orientation other than 1 must not go through this path.
+    param([string]$Path)
+    Add-Type -AssemblyName System.Drawing
+    $image = $null
+    try {
+        $image = [System.Drawing.Image]::FromFile($Path)
+        foreach ($propertyItem in $image.PropertyItems) {
+            if ($propertyItem.Id -eq 0x0112) {
+                return ([int]$propertyItem.Value[0] -in 0, 1)
+            }
+        }
+        return $true
+    } catch {
+        return $true
+    } finally {
+        if ($null -ne $image) { $image.Dispose() }
+    }
+}
+
 function Optimize-JpegMedia {
     param(
         [string]$Path,
@@ -175,7 +212,7 @@ function Optimize-JpegMedia {
     $source = $null
     $bitmap = $null
     $working = $null
-    $temp = [System.IO.Path]::ChangeExtension([System.IO.Path]::GetTempFileName(), '.jpg')
+    $temp = New-TempMediaPath -Extension '.jpg'
     try {
         $source = [System.Drawing.Image]::FromFile($Path)
         $bitmap = New-Object System.Drawing.Bitmap $source
@@ -299,7 +336,13 @@ function Invoke-OxipngMedia {
         [string]$ToolPath
     )
 
-    $raw = & $ToolPath -o 4 --strip safe --out $OutputFile $InputFile 2>&1
+    $previousEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $raw = & $ToolPath -o 4 --strip safe --out $OutputFile $InputFile 2>&1
+    } finally {
+        $ErrorActionPreference = $previousEap
+    }
     if ($LASTEXITCODE -ne 0) {
         throw ("oxipng failed: " + (($raw | Out-String).Trim()))
     }
@@ -396,7 +439,7 @@ function Optimize-PresentationMedia {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     Add-Type -AssemblyName System.Drawing
 
-    $safeName = [System.IO.Path]::GetFileNameWithoutExtension($File.Name)
+    $safeName = Get-RelativePathSafeStem -RootPath $InputPath -TargetPath $File.FullName
     $outPptx = Join-Path $OutputDir ($safeName + '.media-optimized.pptx')
     $reportPath = Join-Path $OutputDir ($safeName + '.media-optimization-report.csv')
     $manifestPath = Join-Path $OutputDir ($safeName + '.media-optimization.json')
@@ -444,9 +487,12 @@ function Optimize-PresentationMedia {
                 try {
                     $toolName = 'System.Drawing JPEG'
                     if ($UseSharp -and $SharpAvailable) {
-                        $temp = [System.IO.Path]::ChangeExtension([System.IO.Path]::GetTempFileName(), '.jpg')
+                        $temp = New-TempMediaPath -Extension '.jpg'
                         $null = Invoke-SharpMedia -InputFile $media.FullName -OutputFile $temp -Kind 'jpeg' -Quality $JpegQuality -Sharpen:$SharpenJpeg -ResolvedNodePath $ResolvedNodePath -ModulePath $ResolvedNodeModulesPath -WorkerPath $SharpWorkerPath
                         $toolName = 'sharp/libvips'
+                    } elseif (-not (Test-JpegExifOrientationNeutral -Path $media.FullName)) {
+                        Add-ReportRow -Rows $rows -File $File.Name -MediaPath $rel -Extension $ext -OriginalBytes $originalBytes -OptimizedBytes $originalBytes -Action 'Kept' -Reason 'EXIF orientation tag present; the built-in JPEG path would strip it and change the rendered orientation' -Tool 'System.Drawing JPEG' -Width $info.Width -Height $info.Height
+                        continue
                     } else {
                         $temp = Optimize-JpegMedia -Path $media.FullName -Quality $JpegQuality -Sharpen:$SharpenJpeg
                     }
@@ -468,7 +514,7 @@ function Optimize-PresentationMedia {
 
             if ($ext -eq '.png') {
                 if ($Tools.ContainsKey('oxipng') -or ($UseSharp -and $SharpAvailable)) {
-                    $temp = [System.IO.Path]::ChangeExtension([System.IO.Path]::GetTempFileName(), '.png')
+                    $temp = New-TempMediaPath -Extension '.png'
                     try {
                         $toolName = 'sharp/libvips'
                         if ($Tools.ContainsKey('oxipng')) {
@@ -521,6 +567,7 @@ function Optimize-PresentationMedia {
     $savedPercentTotal = if ($originalBytesTotal -gt 0) { [Math]::Round(($savedBytesTotal / $originalBytesTotal) * 100, 2) } else { 0 }
     $replacedCount = @($rows | Where-Object { $_.Action -eq 'Replaced' }).Count
     $failedCount = @($rows | Where-Object { $_.Action -eq 'Failed' }).Count
+    if ($failedCount -gt 0 -or -not (Test-Path -LiteralPath $outPptx)) { $status = 'failed' }
 
     $manifest = [pscustomobject]@{
         generatedAt = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
@@ -545,6 +592,7 @@ function Optimize-PresentationMedia {
         externalTools = $Tools
     }
     $manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+    return $manifest
 }
 
 $InputPath = [System.IO.Path]::GetFullPath($InputPath)
@@ -558,18 +606,26 @@ if (-not [string]::IsNullOrWhiteSpace($NodeModulesPath)) {
     if (-not (Test-Path -LiteralPath $NodeModulesPath)) { throw "NodeModulesPath not found: $NodeModulesPath" }
     $resolvedNodeModulesPath = (Get-Item -LiteralPath $NodeModulesPath).FullName
 }
-$sharpAvailable = Test-SharpAvailable -ResolvedNodePath $resolvedNodePath -ModulePath $resolvedNodeModulesPath
-if ($UseSharp -and -not $sharpAvailable) {
-    Write-Warning 'UseSharp was requested, but sharp/libvips is not available. Falling back to built-in JPEG behavior and PNG reporting.'
+# Probe sharp only when it can actually be used; spawning node to test the
+# module is wasted work for the default built-in path.
+$sharpAvailable = $false
+if ($UseSharp) {
+    $sharpAvailable = Test-SharpAvailable -ResolvedNodePath $resolvedNodePath -ModulePath $resolvedNodeModulesPath
+    if (-not $sharpAvailable) {
+        Write-Warning 'UseSharp was requested, but sharp/libvips is not available. Falling back to built-in JPEG behavior and PNG reporting.'
+    }
 }
 $sharpWorkerPath = Join-Path $PSScriptRoot 'Optimize-PptxMedia.worker.js'
 $tools = Get-ExternalToolMap -ResolvedNodePath $resolvedNodePath -ModulePath $resolvedNodeModulesPath -SharpAvailable $sharpAvailable -ToolRoot $ToolRoot
 $files = @(Get-PresentationFiles -Path $InputPath -Pattern $FilePattern -Recurse:$Recurse -SupportedExtensions @('.pptx') -ExcludedRoots @($OutputDir))
 if ($files.Count -eq 0) { throw "No .pptx files found in $InputPath" }
 
+$failedFileCount = 0
 foreach ($file in $files) {
     Write-Host "Optimizing media: $($file.Name)"
-    Optimize-PresentationMedia -File $file -OutputDir $OutputDir -Tools $tools -SharpAvailable $sharpAvailable -ResolvedNodePath $resolvedNodePath -ResolvedNodeModulesPath $resolvedNodeModulesPath -SharpWorkerPath $sharpWorkerPath -MinBytes $MinBytes -MinSavingsPercent $MinSavingsPercent -JpegQuality $JpegQuality -SharpenJpeg ([bool]$SharpenJpeg) -UseSharp ([bool]$UseSharp) -Force ([bool]$Force)
+    $result = Optimize-PresentationMedia -File $file -OutputDir $OutputDir -Tools $tools -SharpAvailable $sharpAvailable -ResolvedNodePath $resolvedNodePath -ResolvedNodeModulesPath $resolvedNodeModulesPath -SharpWorkerPath $sharpWorkerPath -MinBytes $MinBytes -MinSavingsPercent $MinSavingsPercent -JpegQuality $JpegQuality -SharpenJpeg ([bool]$SharpenJpeg) -UseSharp ([bool]$UseSharp) -Force ([bool]$Force)
+    if ($null -ne $result -and [string]$result.status -eq 'failed') { $failedFileCount++ }
 }
 
 Write-Host "Media optimization done: $OutputDir"
+if ($FailOnError -and $failedFileCount -gt 0) { throw "Media optimization failed for $failedFileCount file(s)." }

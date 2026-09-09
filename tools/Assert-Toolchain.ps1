@@ -255,7 +255,10 @@ function Test-VendoredExecutable {
     }
 
     $version = Invoke-VersionProbe -FilePath $path -Arguments $VersionArguments -MaxLines $MaxLines
-    if ($version.ExitCode -eq 0 -or -not [string]::IsNullOrWhiteSpace($version.Text)) {
+    # A version-looking banner from a broken executable or a WindowsApps
+    # placeholder is not proof that the tool is callable. Exit code is the
+    # authoritative probe result.
+    if ($version.ExitCode -eq 0) {
         Add-ToolchainCheck -Name $Name -Tier $Tier -Status 'OK' -Version $version.Text -Path $path
     } else {
         Add-ToolchainCheck -Name $Name -Tier $Tier -Status 'FAIL' -Path $path -Details 'Version probe failed.'
@@ -311,25 +314,29 @@ if ([string]::IsNullOrWhiteSpace($npmPath)) {
 Test-NodePackage -PackageName '@mathjax/src' -RelativePackageJson 'node_modules\@mathjax\src\package.json' -Tier $mathJaxTier | Out-Null
 Test-NodePackage -PackageName 'sharp' -RelativePackageJson 'node_modules\sharp\package.json' -Tier $sharpTier | Out-Null
 
-if ($Deep -and -not [string]::IsNullOrWhiteSpace($nodePath)) {
+$runNodeSmoke = $Deep -or $RequireFormulaSvg -or $RequireMediaOptimization
+if ($runNodeSmoke -and -not [string]::IsNullOrWhiteSpace($nodePath)) {
     $svgOut = Join-Path ([System.IO.Path]::GetTempPath()) ("physics-ppt-toolchain-" + [guid]::NewGuid().ToString('N') + ".svg")
     try {
         $renderScript = Join-Path $root 'tools\Render-FormulaSvg.mjs'
         $renderOutput = & $nodePath $renderScript --tex 'P=\frac{W}{t}' --out $svgOut 2>&1
         if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $svgOut) -and (Get-Item -LiteralPath $svgOut).Length -gt 0) {
-            Add-ToolchainCheck -Name 'MathJax SVG render call' -Tier 'Recommended' -Status 'OK' -Path $renderScript
+            Add-ToolchainCheck -Name 'MathJax SVG render call' -Tier $mathJaxTier -Status 'OK' -Path $renderScript
         } else {
-            Add-ToolchainCheck -Name 'MathJax SVG render call' -Tier 'Recommended' -Status 'FAIL' -Path $renderScript -Details (($renderOutput | ForEach-Object { [string]$_ }) -join ' ')
+            Add-ToolchainCheck -Name 'MathJax SVG render call' -Tier $mathJaxTier -Status 'FAIL' -Path $renderScript -Details (($renderOutput | ForEach-Object { [string]$_ }) -join ' ')
         }
     } finally {
         if (Test-Path -LiteralPath $svgOut) { Remove-Item -LiteralPath $svgOut -Force }
     }
 
-    $sharpProbe = Invoke-NodeRepositoryProbe -NodePath $nodePath -Script "require('sharp'); process.stdout.write(require('sharp/package.json').version)"
+    # sharp does not export package.json in current releases; requiring the
+    # module itself is the callable probe. Keep the version optional so an
+    # exports-map change cannot turn a healthy install into a false failure.
+    $sharpProbe = Invoke-NodeRepositoryProbe -NodePath $nodePath -Script "const sharp=require('sharp'); process.stdout.write(String(sharp.versions?.sharp || 'loaded'))"
     if ($sharpProbe.ExitCode -eq 0) {
-        Add-ToolchainCheck -Name 'sharp require call' -Tier 'Recommended' -Status 'OK' -Version $sharpProbe.Text
+        Add-ToolchainCheck -Name 'sharp require call' -Tier $sharpTier -Status 'OK' -Version $sharpProbe.Text
     } else {
-        Add-ToolchainCheck -Name 'sharp require call' -Tier 'Recommended' -Status 'FAIL' -Details $sharpProbe.Text
+        Add-ToolchainCheck -Name 'sharp require call' -Tier $sharpTier -Status 'FAIL' -Details $sharpProbe.Text
     }
 }
 
@@ -340,19 +347,23 @@ Test-VendoredExecutable -Name 'oxipng portable' -Tier 'Recommended' -RelativePat
 Test-VendoredExecutable -Name 'Real-ESRGAN ncnn Vulkan portable' -Tier 'Recommended' -RelativePath 'tools\vendor\realesrgan-ncnn-vulkan-20220424\realesrgan-ncnn-vulkan.exe'
 Test-VendoredExecutable -Name 'Pandoc portable' -Tier 'Optional' -RelativePath 'tools\vendor\pandoc\pandoc-3.9.0.2\pandoc.exe' -VersionArguments @('--version') -MaxLines 1
 
-$pythonPath = Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
-if (-not (Test-Path -LiteralPath $pythonPath)) {
-    $pythonPath = Resolve-CommandPath 'python'
-}
+# Resolve python from PATH only: machine-specific absolute paths leak personal
+# environment layout and make the check result host-dependent.
+$pythonPath = Resolve-CommandPath 'python'
 
 if ([string]::IsNullOrWhiteSpace($pythonPath) -or -not (Test-Path -LiteralPath $pythonPath)) {
     Add-ToolchainCheck -Name 'Python for OCR probes' -Tier 'Recommended' -Status 'MISSING' -Details 'RapidOCR review probes need local Python.'
 } else {
     $pythonVersion = Invoke-VersionProbe -FilePath $pythonPath -Arguments @('--version')
-    Add-ToolchainCheck -Name 'Python for OCR probes' -Tier 'Recommended' -Status 'OK' -Version $pythonVersion.Text -Path $pythonPath
-
-    foreach ($module in @('PIL', 'cv2', 'numpy', 'onnxruntime', 'rapidocr_onnxruntime')) {
-        Test-PythonModule -PythonExe $pythonPath -ModuleName $module -Tier 'Recommended'
+    # Judge by exit code like the node/npm probes: the WindowsApps store
+    # placeholder also prints a version-ish banner but exits non-zero.
+    if ($pythonVersion.ExitCode -eq 0) {
+        Add-ToolchainCheck -Name 'Python for OCR probes' -Tier 'Recommended' -Status 'OK' -Version $pythonVersion.Text -Path $pythonPath
+        foreach ($module in @('PIL', 'cv2', 'numpy', 'onnxruntime', 'rapidocr_onnxruntime')) {
+            Test-PythonModule -PythonExe $pythonPath -ModuleName $module -Tier 'Recommended'
+        }
+    } else {
+        Add-ToolchainCheck -Name 'Python for OCR probes' -Tier 'Recommended' -Status 'MISSING' -Details ('python --version exited with code ' + $pythonVersion.ExitCode + ' (store placeholder or broken install).')
     }
 }
 

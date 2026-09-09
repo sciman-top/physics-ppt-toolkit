@@ -41,6 +41,7 @@ $ErrorActionPreference = 'Stop'
 
 $script:MsoTrue = -1
 $script:MsoFalse = 0
+$script:MsoGroup = 6
 
 function Add-FixRow {
     param(
@@ -71,6 +72,9 @@ if (-not (Test-Path -LiteralPath $VisualAuditCsv)) { throw "VisualAuditCsv not f
 
 $outDir = Split-Path -Parent $OutputPath
 if (-not (Test-Path -LiteralPath $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
+if ([string]::Equals([System.IO.Path]::GetFullPath($InputPath), $OutputPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "OutputPath must differ from InputPath; the source PPTX is never modified in place."
+}
 
 $rows = @(
     Import-Csv -LiteralPath $VisualAuditCsv -Encoding UTF8 |
@@ -98,14 +102,25 @@ try {
         try {
             $slide = $pres.Slides.Item($slideNo)
             $shape = $null
+            $nameMatches = New-Object System.Collections.Generic.List[object]
             foreach ($candidate in $slide.Shapes) {
                 if ([string]$candidate.Name -eq $shapeName) {
-                    $shape = $candidate
-                    break
+                    $nameMatches.Add($candidate)
                 }
             }
-            if ($null -eq $shape) {
+            if ($nameMatches.Count -eq 0) {
                 Add-FixRow -Rows $reportRows -File ([System.IO.Path]::GetFileName($InputPath)) -Slide $slideNo -Shape $shapeName -Issue 'ShapeOutOfSlideBounds' -Status 'ShapeNotFound' -Details ''
+                continue
+            }
+            if ($nameMatches.Count -gt 1) {
+                Add-FixRow -Rows $reportRows -File ([System.IO.Path]::GetFileName($InputPath)) -Slide $slideNo -Shape $shapeName -Issue 'ShapeOutOfSlideBounds' -Status 'SkippedAmbiguousName' -Details ("{0} shapes on this slide share the name; refusing to move the wrong one." -f $nameMatches.Count)
+                continue
+            }
+            $shape = $nameMatches[0]
+            $shapeType = 0
+            try { $shapeType = [int]$shape.Type } catch { }
+            if ($shapeType -eq $script:MsoGroup) {
+                Add-FixRow -Rows $reportRows -File ([System.IO.Path]::GetFileName($InputPath)) -Slide $slideNo -Shape $shapeName -Issue 'ShapeOutOfSlideBounds' -Status 'SkippedGroup' -Details 'Group shapes are skipped by default; moving one would change every child shape position.'
                 continue
             }
 

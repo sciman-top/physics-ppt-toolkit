@@ -59,6 +59,15 @@ $script:NsA = 'http://schemas.openxmlformats.org/drawingml/2006/main'
 $script:NsP = 'http://schemas.openxmlformats.org/presentationml/2006/main'
 $script:NsMc = 'http://schemas.openxmlformats.org/markup-compatibility/2006'
 $script:NsA14 = 'http://schemas.microsoft.com/office/drawing/2010/main'
+$script:NsR = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+
+# Apply-time whitelist re-validation: the scan-time match is never trusted on
+# its own, so a stale or hand-edited review CSV cannot smuggle in a formula
+# that the current config whitelist does not cover.
+$script:FormulaWhitelist = Get-PhysicsPptFormulaWhitelist
+if ($script:FormulaWhitelist.Count -eq 0) {
+    Write-Warning "Formula whitelist is empty or unavailable; every candidate row will be rejected."
+}
 
 function Get-FormulaKey {
     param([object]$Row)
@@ -108,9 +117,11 @@ function Write-ZipEntryText {
     $stream = $null
     $writer = $null
     try {
-        $stream = $newEntry.Open()
-        $utf8Bom = New-Object System.Text.UTF8Encoding($true)
-        $writer = New-Object System.IO.StreamWriter($stream, $utf8Bom)
+    $stream = $newEntry.Open()
+    # XML parts are written without BOM to match PowerPoint's own output;
+    # Read-ZipEntryText detects either encoding on the read side.
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    $writer = New-Object System.IO.StreamWriter($stream, $utf8NoBom)
         $writer.Write($Text)
     } finally {
         if ($null -ne $writer) { $writer.Dispose() }
@@ -141,6 +152,45 @@ function New-NamespaceManager {
     return ,$ns
 }
 
+function Get-SlidePartNameMap {
+    <#
+      Map 1-based presentation-order slide numbers to their zip part names.
+      slideN.xml file numbers follow creation order, not presentation order,
+      so this mapping must go through ppt/presentation.xml sldIdLst + rels.
+    #>
+    param([System.IO.Compression.ZipArchive]$Zip)
+    $map = @{}
+    $presText = Read-ZipEntryText -Zip $Zip -EntryName 'ppt/presentation.xml'
+    $relsText = Read-ZipEntryText -Zip $Zip -EntryName 'ppt/_rels/presentation.xml.rels'
+    if ([string]::IsNullOrWhiteSpace($presText) -or [string]::IsNullOrWhiteSpace($relsText)) { return $map }
+
+    $presDoc = New-Object System.Xml.XmlDocument
+    $presDoc.PreserveWhitespace = $false
+    $presDoc.LoadXml($presText)
+    $relsDoc = New-Object System.Xml.XmlDocument
+    $relsDoc.PreserveWhitespace = $false
+    $relsDoc.LoadXml($relsText)
+
+    $relTargets = @{}
+    foreach ($rel in $relsDoc.GetElementsByTagName('Relationship')) {
+        $id = [string]$rel.GetAttribute('Id')
+        if (-not [string]::IsNullOrWhiteSpace($id)) {
+            $relTargets[$id] = [string]$rel.GetAttribute('Target')
+        }
+    }
+
+    $index = 0
+    foreach ($sldId in $presDoc.SelectNodes('//*[local-name()="sldId"]')) {
+        $index++
+        $rid = [string]$sldId.GetAttribute('id', $script:NsR)
+        if ([string]::IsNullOrWhiteSpace($rid) -or -not $relTargets.ContainsKey($rid)) { continue }
+        $target = Resolve-PackageTarget -SourcePart 'ppt/presentation.xml' -Target $relTargets[$rid]
+        if ([string]::IsNullOrWhiteSpace($target)) { continue }
+        $map[$index] = $target
+    }
+    return $map
+}
+
 function Get-ShapeText {
     param([System.Xml.XmlElement]$Shape, [System.Xml.XmlNamespaceManager]$NamespaceManager)
     $texts = New-Object System.Collections.Generic.List[string]
@@ -148,6 +198,18 @@ function Get-ShapeText {
         $texts.Add([string]$node.InnerText) | Out-Null
     }
     return ($texts -join '')
+}
+
+function Test-IsProtectedScopeShape {
+    # Shapes inside groups (invariant: groups are never modified) and inside
+    # mc:Fallback branches (writing there would corrupt fallback content).
+    param([System.Xml.XmlElement]$Shape)
+    $ancestor = $Shape.ParentNode
+    while ($null -ne $ancestor) {
+        if ($ancestor.LocalName -eq 'grpSp' -or $ancestor.LocalName -eq 'Fallback') { return $true }
+        $ancestor = $ancestor.ParentNode
+    }
+    return $false
 }
 
 function Find-TargetShape {
@@ -159,15 +221,24 @@ function Find-TargetShape {
     )
     $formulaNorm = Get-NormalizedFormulaText -Text $FormulaText
     $fallback = $null
+    $textMatches = New-Object System.Collections.Generic.List[object]
     foreach ($shape in @($Document.SelectNodes('//p:sp', $NamespaceManager))) {
-        $nameNode = $shape.SelectSingleNode('./p:nvSpPr/p:cNvPr', $NamespaceManager)
-        if ($null -eq $nameNode -or [string]$nameNode.GetAttribute('name') -ne $ShapeName) { continue }
-        if ($null -eq $fallback) { $fallback = $shape }
+        if (Test-IsProtectedScopeShape -Shape $shape) { continue }
         $shapeNorm = Get-NormalizedFormulaText -Text (Get-ShapeText -Shape $shape -NamespaceManager $NamespaceManager)
-        if (-not [string]::IsNullOrWhiteSpace($formulaNorm) -and $shapeNorm.Contains($formulaNorm)) {
-            return $shape
+        $textHit = (-not [string]::IsNullOrWhiteSpace($formulaNorm) -and $shapeNorm.Contains($formulaNorm))
+        $nameNode = $shape.SelectSingleNode('./p:nvSpPr/p:cNvPr', $NamespaceManager)
+        $nameHit = ($null -ne $nameNode -and [string]$nameNode.GetAttribute('name') -eq $ShapeName)
+        if ($textHit) {
+            if ($nameHit) { return $shape }
+            $textMatches.Add($shape) | Out-Null
+        } elseif ($nameHit -and $null -eq $fallback) {
+            $fallback = $shape
         }
     }
+    # Default shape names are re-localized by PowerPoint on every save
+    # ("TextBox 3" vs "文本框 3"), so the scan-time name may not survive
+    # normalization; a unique formula-text match is still unambiguous.
+    if ($textMatches.Count -eq 1) { return $textMatches[0] }
     return $fallback
 }
 
@@ -185,7 +256,7 @@ function Find-ExactFormulaParagraph {
         }
         $paragraphText = $text -join ''
         $paragraphNorm = Get-NormalizedFormulaText -Text $paragraphText
-        if ($paragraphNorm -eq $formulaNorm) {
+        if ($paragraphNorm -ceq $formulaNorm) {
             return $paragraph
         }
     }
@@ -205,13 +276,24 @@ function Replace-ParagraphWithOmml {
         throw "Invalid OMML fragment root: $OmmlFragmentPath"
     }
 
+    # Keep the paragraph's endParaRPr (paragraph-mark formatting, common in
+    # Chinese decks) but re-append it after the math zone so the CT_TextParagraph
+    # child order stays schema-valid: pPr, content, endParaRPr.
+    $endParaRPr = $null
     foreach ($child in @($Paragraph.ChildNodes)) {
+        if ($child.LocalName -eq 'endParaRPr' -and $child.NamespaceURI -eq $script:NsA) {
+            $endParaRPr = $child
+            continue
+        }
         if ($child.LocalName -eq 'pPr' -and $child.NamespaceURI -eq $script:NsA) { continue }
         $Paragraph.RemoveChild($child) | Out-Null
     }
 
     $imported = $SlideDocument.ImportNode($fragment.DocumentElement, $true)
     $Paragraph.AppendChild($imported) | Out-Null
+    if ($null -ne $endParaRPr) {
+        $Paragraph.AppendChild($endParaRPr) | Out-Null
+    }
 }
 
 function Wrap-ShapeInAlternateContent {
@@ -257,6 +339,9 @@ if (-not (Test-Path -LiteralPath $OmmlCandidateCsv)) { throw "OmmlCandidateCsv n
 
 $outDir = Split-Path -Parent $OutputPath
 if (-not (Test-Path -LiteralPath $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
+if ([string]::Equals($InputPath, $OutputPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "OutputPath must differ from InputPath; the source PPTX is never modified in place."
+}
 $reportDir = Split-Path -Parent $ReportPath
 if (-not (Test-Path -LiteralPath $reportDir)) { New-Item -ItemType Directory -Path $reportDir -Force | Out-Null }
 
@@ -292,9 +377,23 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zip = $null
 try {
     $zip = [System.IO.Compression.ZipFile]::Open($OutputPath, [System.IO.Compression.ZipArchiveMode]::Update)
+    $slidePartMap = Get-SlidePartNameMap -Zip $zip
     foreach ($row in $reviewRows) {
+        if ([string]$row.Slide -notmatch '^\d+$') {
+            Add-ReportRow -Rows $reportRows -File $row.File -Slide 0 -Shape ([string]$row.Shape) -Issue 'FormulaRowInvalidSlide' -Details ("Slide='{0}'" -f $row.Slide)
+            continue
+        }
         $slideNo = [int]$row.Slide
         $shapeName = [string]$row.Shape
+
+        # Apply-time whitelist re-validation against the current config; the
+        # scan-time CSV is never trusted on its own (case-sensitive match).
+        $rule = Test-FormulaWhitelistMatch -Text ([string]$row.FormulaText) -Whitelist $script:FormulaWhitelist
+        if ($null -eq $rule) {
+            Add-ReportRow -Rows $reportRows -File $row.File -Slide $slideNo -Shape $shapeName -Issue 'FormulaWhitelistRejected' -Details ("No case-sensitive whitelist match in current config for: {0}" -f $row.FormulaText)
+            continue
+        }
+
         $key = Get-FormulaKey -Row $row
         if (-not $candidateByKey.ContainsKey($key)) {
             Add-ReportRow -Rows $reportRows -File $row.File -Slide $slideNo -Shape $shapeName -Issue 'FormulaOmmlCandidateMissing' -Details $key
@@ -302,13 +401,29 @@ try {
         }
 
         $candidate = $candidateByKey[$key]
+        $candidateSource = if ($null -ne $candidate.PSObject.Properties['TargetSource']) { [string]$candidate.TargetSource } else { '' }
+        if ($candidateSource -ne 'CurrentConfig') {
+            Add-ReportRow -Rows $reportRows -File $row.File -Slide $slideNo -Shape $shapeName -Issue 'FormulaWhitelistRejected' -Details ("candidate TargetSource='{0}'; only CurrentConfig candidates may be applied." -f $candidateSource)
+            continue
+        }
+        $ruleTarget = Get-FormulaRuleValue -Rule $rule -Name 'targetUnicodeMath'
+        $candidateTarget = if ($null -ne $candidate.PSObject.Properties['TargetUnicodeMath']) { [string]$candidate.TargetUnicodeMath } else { '' }
+        if (-not [string]::Equals($candidateTarget, $ruleTarget, [System.StringComparison]::Ordinal)) {
+            Add-ReportRow -Rows $reportRows -File $row.File -Slide $slideNo -Shape $shapeName -Issue 'FormulaWhitelistRejected' -Details ("candidate target '{0}' does not match current whitelist '{1}'." -f $candidateTarget, $ruleTarget)
+            continue
+        }
+
         $fragmentPath = [string]$candidate.OmmlFragment
         if ([string]::IsNullOrWhiteSpace($fragmentPath) -or -not (Test-Path -LiteralPath $fragmentPath)) {
             Add-ReportRow -Rows $reportRows -File $row.File -Slide $slideNo -Shape $shapeName -Issue 'FormulaOmmlFragmentMissing' -Details $fragmentPath
             continue
         }
 
-        $entryName = "ppt/slides/slide$slideNo.xml"
+        if (-not $slidePartMap.ContainsKey($slideNo)) {
+            Add-ReportRow -Rows $reportRows -File $row.File -Slide $slideNo -Shape $shapeName -Issue 'FormulaSlideXmlMissing' -Details ("no presentation-order slide part resolved for slide {0}" -f $slideNo)
+            continue
+        }
+        $entryName = [string]$slidePartMap[$slideNo]
         $slideText = Read-ZipEntryText -Zip $zip -EntryName $entryName
         if ([string]::IsNullOrWhiteSpace($slideText)) {
             Add-ReportRow -Rows $reportRows -File $row.File -Slide $slideNo -Shape $shapeName -Issue 'FormulaSlideXmlMissing' -Details $entryName
@@ -330,6 +445,11 @@ try {
             $paragraph = Find-ExactFormulaParagraph -Shape $shape -NamespaceManager $ns -FormulaText ([string]$row.FormulaText)
             if ($null -eq $paragraph) {
                 Add-ReportRow -Rows $reportRows -File $row.File -Slide $slideNo -Shape $shapeName -Issue 'FormulaExactParagraphNotFound' -Details ([string]$row.FormulaText)
+                continue
+            }
+            $unsafeNodes = @($paragraph.SelectNodes('.//a:fld', $ns)) + @($paragraph.SelectNodes('.//a:br', $ns))
+            if ($unsafeNodes.Count -gt 0) {
+                Add-ReportRow -Rows $reportRows -File $row.File -Slide $slideNo -Shape $shapeName -Issue 'FormulaParagraphUnsafeNodes' -Details 'Paragraph contains a:fld/a:br; conversion skipped for manual review.'
                 continue
             }
 

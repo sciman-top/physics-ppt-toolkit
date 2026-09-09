@@ -6,6 +6,7 @@ import path from 'node:path';
 function parseArgs(argv) {
   const args = {
     tex: '',
+    texFile: '',
     out: '',
     display: true,
     em: 32,
@@ -18,6 +19,9 @@ function parseArgs(argv) {
     const next = argv[i + 1];
     if (key === '--tex') {
       args.tex = next || '';
+      i++;
+    } else if (key === '--tex-file') {
+      args.texFile = next || '';
       i++;
     } else if (key === '--out') {
       args.out = next || '';
@@ -43,13 +47,16 @@ function parseArgs(argv) {
 function printUsage() {
   process.stdout.write(`Usage:
   node tools/Render-FormulaSvg.mjs --tex "P=\\\\frac{W}{t}" --out reports/formula.svg
+  node tools/Render-FormulaSvg.mjs --tex-file formula.tex --out reports/formula.svg
 
 Options:
-  --tex       TeX formula source.
-  --out       Output SVG path.
-  --inline    Render in inline mode instead of display mode.
-  --em        MathJax em size in px. Default: 32.
-  --width-em  Container width in em. Default: 80.
+  --tex        TeX formula source.
+  --tex-file   Path to a UTF-8 file with the TeX source (preferred for callers;
+               avoids command-line quoting limits on Windows hosts).
+  --out        Output SVG path.
+  --inline     Render in inline mode instead of display mode.
+  --em         MathJax em size in px. Default: 32.
+  --width-em   Container width in em. Default: 80.
 `);
 }
 
@@ -104,8 +111,11 @@ try {
     printUsage();
     process.exit(0);
   }
+  if (args.texFile) {
+    args.tex = await fs.readFile(args.texFile, 'utf8');
+  }
   if (!args.tex.trim()) {
-    throw new Error('Missing --tex.');
+    throw new Error('Missing --tex or --tex-file.');
   }
   if (!args.out.trim()) {
     throw new Error('Missing --out.');
@@ -118,5 +128,9 @@ try {
   await fs.writeFile(args.out, svg, 'utf8');
   process.stdout.write(`SVG written: ${path.resolve(args.out)}\n`);
 } finally {
-  globalThis.MathJax.done();
+  // MathJax setup may itself have failed; never mask that error with a
+  // TypeError about a missing done().
+  if (typeof globalThis.MathJax?.done === 'function') {
+    globalThis.MathJax.done();
+  }
 }

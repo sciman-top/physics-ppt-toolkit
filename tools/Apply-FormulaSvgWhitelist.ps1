@@ -36,6 +36,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$OutputPath,
 
+    [string]$ReviewFileName,
+
     [string]$SvgOutputDir,
 
     [string]$ReportPath,
@@ -53,6 +55,15 @@ $ErrorActionPreference = 'Stop'
 
 $script:MsoTrue = -1
 $script:MsoFalse = 0
+$script:MsoGroup = 6
+
+# Apply-time whitelist re-validation: the scan-time match is never trusted on
+# its own, so a stale or hand-edited review CSV cannot smuggle in a formula
+# that the current config whitelist does not cover.
+$script:FormulaWhitelist = Get-PhysicsPptFormulaWhitelist
+if ($script:FormulaWhitelist.Count -eq 0) {
+    Write-Warning "Formula whitelist is empty or unavailable; every candidate row will be rejected."
+}
 
 function Get-ShapeText {
     param($Shape)
@@ -65,23 +76,47 @@ function Get-ShapeText {
 }
 
 function Find-MatchingShape {
+    # Priority: name+text pair, then a unique formula-text match (default shape
+    # names are re-localized by PowerPoint on every save, so the scan-time name
+    # may not survive normalization). Ambiguous matches return $null and are
+    # reported instead of guessed.
     param($Slide, [string]$ShapeName, [string]$FormulaText)
     $formulaNorm = Get-NormalizedFormulaText -Text $FormulaText
-    $fallback = $null
+    $nameMatches = New-Object System.Collections.Generic.List[object]
+    $textMatches = New-Object System.Collections.Generic.List[object]
 
     foreach ($shape in $Slide.Shapes) {
         try {
-            if ([string]$shape.Name -ne $ShapeName) { continue }
-            if ($null -eq $fallback) { $fallback = $shape }
-            $shapeText = Get-ShapeText -Shape $shape
-            $shapeNorm = Get-NormalizedFormulaText -Text $shapeText
-            if (-not [string]::IsNullOrWhiteSpace($formulaNorm) -and $shapeNorm.Contains($formulaNorm)) {
-                return $shape
-            }
+            $shapeNorm = Get-NormalizedFormulaText -Text (Get-ShapeText -Shape $shape)
+            $textHit = (-not [string]::IsNullOrWhiteSpace($formulaNorm) -and $shapeNorm.Contains($formulaNorm))
+            $nameHit = ([string]$shape.Name -eq $ShapeName)
+            if ($textHit -and $nameHit) { return $shape }
+            if ($textHit) { $textMatches.Add($shape) | Out-Null }
+            elseif ($nameHit) { $nameMatches.Add($shape) | Out-Null }
         } catch { }
     }
 
-    return $fallback
+    if ($textMatches.Count -eq 1) { return $textMatches[0] }
+    return $null
+}
+
+function Get-MatchingShapeAmbiguity {
+    param($Slide, [string]$ShapeName, [string]$FormulaText)
+    $formulaNorm = Get-NormalizedFormulaText -Text $FormulaText
+    $textHitCount = 0
+    $nameHitCount = 0
+    foreach ($shape in $Slide.Shapes) {
+        try {
+            $shapeNorm = Get-NormalizedFormulaText -Text (Get-ShapeText -Shape $shape)
+            $textHit = (-not [string]::IsNullOrWhiteSpace($formulaNorm) -and $shapeNorm.Contains($formulaNorm))
+            $nameHit = ([string]$shape.Name -eq $ShapeName)
+            if ($textHit -and $nameHit) { return 1 }
+            if ($textHit) { $textHitCount++ }
+            elseif ($nameHit) { $nameHitCount++ }
+        } catch { }
+    }
+    if ($textHitCount -gt 0) { return $textHitCount }
+    return $nameHitCount
 }
 
 function Add-ReportRow {
@@ -128,6 +163,9 @@ if (-not (Test-Path -LiteralPath $FormulaReviewCsv)) { throw "FormulaReviewCsv n
 if (-not (Test-Path -LiteralPath $SvgOutputDir)) { New-Item -ItemType Directory -Path $SvgOutputDir -Force | Out-Null }
 $outDir = Split-Path -Parent $OutputPath
 if (-not (Test-Path -LiteralPath $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
+if ([string]::Equals($InputPath, $OutputPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "OutputPath must differ from InputPath; the source PPTX is never modified in place."
+}
 $reportDir = Split-Path -Parent $ReportPath
 if (-not (Test-Path -LiteralPath $reportDir)) { New-Item -ItemType Directory -Path $reportDir -Force | Out-Null }
 
@@ -135,14 +173,23 @@ $renderer = Join-Path $PSScriptRoot 'Render-FormulaSvg.mjs'
 if (-not (Test-Path -LiteralPath $renderer)) { throw "Renderer not found: $renderer" }
 
 $rows = New-Object System.Collections.Generic.List[object]
+$inputFileName = [System.IO.Path]::GetFileName($InputPath)
+$reviewFileNameForMatch = if ([string]::IsNullOrWhiteSpace($ReviewFileName)) { $inputFileName } else { [string]$ReviewFileName }
+# File filter mirrors Apply-FormulaOmmlWhitelist: a batch-aggregated review CSV
+# must never apply another deck's rows to this deck.
 $reviewRows = @(
     Import-Csv -LiteralPath $FormulaReviewCsv -Encoding UTF8 |
-        Where-Object { $_.SuggestedAction -eq 'ReviewWhitelistConversion' } |
+        Where-Object {
+            $_.SuggestedAction -eq 'ReviewWhitelistConversion' -and (
+                ($null -ne $_.PSObject.Properties['FilePath'] -and $_.FilePath -eq $reviewFileNameForMatch) -or
+                $_.File -eq $reviewFileNameForMatch
+            )
+        } |
         Select-Object -First $MaxItems
 )
 
 if ($reviewRows.Count -eq 0) {
-    Add-ReportRow -Rows $rows -File ([System.IO.Path]::GetFileName($InputPath)) -Slide 0 -Shape '(presentation)' -Issue 'NoFormulaWhitelistCandidate' -Details 'No ReviewWhitelistConversion rows found.'
+    Add-ReportRow -Rows $rows -File $inputFileName -Slide 0 -Shape '(presentation)' -Issue 'NoFormulaWhitelistCandidate' -Details 'No matching ReviewWhitelistConversion rows found.'
     Write-Report -Rows $rows -Path $ReportPath
     Write-Host "Report saved: $ReportPath"
     return
@@ -154,31 +201,70 @@ $pp = $null
 $pres = $null
 try {
     $pp = New-PowerPointApplication
-    $pres = $pp.Presentations.Open($OutputPath, $script:MsoFalse, $script:MsoFalse, $script:MsoFalse)
+    $pres = Invoke-WithComRetry -Action { $pp.Presentations.Open($OutputPath, $script:MsoFalse, $script:MsoFalse, $script:MsoFalse) }
 
     foreach ($row in $reviewRows) {
+        if ([string]$row.Slide -notmatch '^\d+$') {
+            Add-ReportRow -Rows $rows -File $row.File -Slide 0 -Shape ([string]$row.Shape) -Issue 'FormulaRowInvalidSlide' -Details ("Slide='{0}'" -f $row.Slide)
+            continue
+        }
         $slideNo = [int]$row.Slide
         $shapeName = [string]$row.Shape
+
+        # Apply-time whitelist re-validation against the current config; both
+        # the source text and the TeX target must still match (case-sensitive).
+        $rule = Test-FormulaWhitelistMatch -Text ([string]$row.FormulaText) -Whitelist $script:FormulaWhitelist
+        if ($null -eq $rule) {
+            Add-ReportRow -Rows $rows -File $row.File -Slide $slideNo -Shape $shapeName -Issue 'FormulaWhitelistRejected' -Details ("No case-sensitive whitelist match in current config for: {0}" -f $row.FormulaText)
+            continue
+        }
+        $ruleTex = Get-FormulaRuleValue -Rule $rule -Name 'targetTex'
         $tex = Get-FormulaDetailValue -Details ([string]$row.WhitelistCandidate) -Key 'targetTex'
         if ([string]::IsNullOrWhiteSpace($tex)) {
             Add-ReportRow -Rows $rows -File $row.File -Slide $slideNo -Shape $shapeName -Issue 'FormulaSvgSkipped' -Details 'WhitelistCandidate does not contain targetTex.'
             continue
         }
+        if (-not [string]::Equals($tex, $ruleTex, [System.StringComparison]::Ordinal)) {
+            Add-ReportRow -Rows $rows -File $row.File -Slide $slideNo -Shape $shapeName -Issue 'FormulaWhitelistRejected' -Details ("candidate targetTex '{0}' does not match current whitelist '{1}'." -f $tex, $ruleTex)
+            continue
+        }
 
-        $svgName = 'slide-{0:000}-{1}.svg' -f $slideNo, (Convert-ToSafeFormulaPathSegment -Name $shapeName)
-        $svgPath = Join-Path $SvgOutputDir $svgName
-        $renderArgs = @($renderer, '--tex', $tex, '--out', $svgPath)
-        $renderOutput = & $NodeExe @renderArgs 2>&1
+        # Pass TeX through a UTF-8 file: command-line quoting rules differ between
+        # hosts and can corrupt formulas containing quotes or trailing backslashes.
+        $svgName = 'slide-{0:000}-{1}' -f $slideNo, (Convert-ToSafeFormulaPathSegment -Name $shapeName)
+        $svgPath = Join-Path $SvgOutputDir ($svgName + '.svg')
+        $texPath = Join-Path $SvgOutputDir ($svgName + '.tex')
+        [System.IO.File]::WriteAllText($texPath, $tex, (New-Object System.Text.UTF8Encoding($false)))
+        $renderArgs = @($renderer, '--tex-file', $texPath, '--out', $svgPath)
+        $renderOutput = $null
+        $previousEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $renderOutput = & $NodeExe @renderArgs 2>&1
+        } finally {
+            $ErrorActionPreference = $previousEap
+        }
         if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $svgPath)) {
             Add-ReportRow -Rows $rows -File $row.File -Slide $slideNo -Shape $shapeName -Issue 'FormulaSvgRenderFailed' -Details (($renderOutput | Out-String).Trim())
             continue
         }
 
+        $slide = $null
+        $shape = $null
+        $inserted = $null
         try {
             $slide = $pres.Slides.Item($slideNo)
             $shape = Find-MatchingShape -Slide $slide -ShapeName $shapeName -FormulaText ([string]$row.FormulaText)
             if ($null -eq $shape) {
-                Add-ReportRow -Rows $rows -File $row.File -Slide $slideNo -Shape $shapeName -Issue 'FormulaShapeNotFound' -Details ([string]$row.FormulaText)
+                $matchCount = Get-MatchingShapeAmbiguity -Slide $slide -ShapeName $shapeName -FormulaText ([string]$row.FormulaText)
+                $reason = if ($matchCount -gt 1) { "found on {0} shapes; ambiguous." -f $matchCount } else { 'no shape with this name carries the formula text.' }
+                Add-ReportRow -Rows $rows -File $row.File -Slide $slideNo -Shape $shapeName -Issue 'FormulaShapeNotFound' -Details $reason
+                continue
+            }
+            $shapeType = 0
+            try { $shapeType = [int]$shape.Type } catch { }
+            if ($shapeType -eq $script:MsoGroup) {
+                Add-ReportRow -Rows $rows -File $row.File -Slide $slideNo -Shape $shapeName -Issue 'FormulaSvgSkipped' -Details 'Group shapes are skipped by default.'
                 continue
             }
 
@@ -192,11 +278,15 @@ try {
             Add-ReportRow -Rows $rows -File $row.File -Slide $slideNo -Shape $shapeName -Issue 'FormulaSvgInserted' -Details ("tex={0}; svg={1}; original hidden." -f $tex, $svgPath)
         } catch {
             Add-ReportRow -Rows $rows -File $row.File -Slide $slideNo -Shape $shapeName -Issue 'FormulaSvgInsertFailed' -Details $_.Exception.Message
+        } finally {
+            Release-ComObjectSafe -ComObject $inserted
+            Release-ComObjectSafe -ComObject $shape
+            Release-ComObjectSafe -ComObject $slide
         }
     }
 
-    $pres.SaveAs($OutputPath)
-    Add-ReportRow -Rows $rows -File ([System.IO.Path]::GetFileName($InputPath)) -Slide 0 -Shape '(presentation)' -Issue 'SavedAs' -Details $OutputPath
+    Invoke-WithComRetry -Action { $pres.SaveAs($OutputPath) } | Out-Null
+    Add-ReportRow -Rows $rows -File $inputFileName -Slide 0 -Shape '(presentation)' -Issue 'SavedAs' -Details $OutputPath
 } finally {
     if ($null -ne $pres) {
         try { $pres.Close() | Out-Null } catch { }

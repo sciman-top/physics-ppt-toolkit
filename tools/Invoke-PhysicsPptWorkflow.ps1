@@ -14,7 +14,9 @@
   Path to a .pptx/.pptm file or a directory containing PPT files.
 
 .PARAMETER OutputRoot
-  Optional output root. Defaults to reports/<source PPTX stem>/ under the toolkit root.
+  Optional output root. Defaults to a source-identity directory under reports;
+  file inputs include the extension and generated artifacts include a stable
+  short identity suffix.
 
 .PARAMETER VersionedDelivery
   Resolve the output root to the next unused reports/<source>_v<N> folder so each
@@ -100,7 +102,7 @@ param(
     [switch]$SkipPreflightReport,
     [switch]$DisableAdvanceOnClick,
 
-    [ValidateRange(1, 1000)]
+    [ValidateRange(1, 100)]
     [int]$FormulaOmmlMaxItems = 100
 )
 
@@ -145,17 +147,23 @@ function Assert-PowerPointAutomationReady {
 }
 
 function Get-DefaultOutputRoot {
-    # Per-source standardized layout: reports/<source PPTX stem>/ keeps every
-    # artifact of one source file in a single named directory.
+    # Per-source standardized layout: reports/<source identity>/ keeps every
+    # artifact of one source file in a single named directory. Include the
+    # extension for file inputs so lesson.pptx and lesson.pptm do not share a
+    # PDF/report directory.
     param([System.IO.FileSystemInfo]$InputItem)
     $invalidChars = [System.IO.Path]::GetInvalidFileNameChars()
-    $sourceName = if ($InputItem.PSIsContainer) { $InputItem.Name } else { [System.IO.Path]::GetFileNameWithoutExtension($InputItem.Name) }
+    $sourceName = if ($InputItem.PSIsContainer) {
+        $InputItem.Name
+    } else {
+        '{0}__{1}' -f [System.IO.Path]::GetFileNameWithoutExtension($InputItem.Name), $InputItem.Extension.TrimStart('.').ToLowerInvariant()
+    }
     $safeSource = (($sourceName.ToCharArray() | ForEach-Object { if ($invalidChars -contains $_) { '_' } else { $_ } }) -join '')
     $reportsRoot = Join-Path (Split-Path -Parent $PSScriptRoot) 'reports'
     return Join-Path $reportsRoot $safeSource
 }
 
-function Get-VersionedDeliveryRoot {
+function New-VersionedDeliveryRoot {
     # Versioned delivery layout: reports/<source>_v<N>/ keeps every delivered
     # generation in its own directory; the highest _vN is the newest. An
     # unversioned delivery folder counts as generation 1, so the first
@@ -164,13 +172,25 @@ function Get-VersionedDeliveryRoot {
     $baseDir = Get-DefaultOutputRoot -InputItem $InputItem
     $parent = Split-Path -Parent $baseDir
     $stem = Split-Path -Leaf $baseDir
-    $maxVersion = if (Test-Path -LiteralPath $baseDir) { 1 } else { 0 }
-    foreach ($dir in @(Get-ChildItem -LiteralPath $parent -Directory -ErrorAction SilentlyContinue)) {
-        if ($dir.Name -match ('^' + [regex]::Escape($stem) + '_v(\d+)$')) {
-            $maxVersion = [Math]::Max($maxVersion, [int]$Matches[1])
+    if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+    for ($attempt = 0; $attempt -lt 100; $attempt++) {
+        $maxVersion = if (Test-Path -LiteralPath $baseDir) { 1 } else { 0 }
+        foreach ($dir in @(Get-ChildItem -LiteralPath $parent -Directory -ErrorAction SilentlyContinue)) {
+            if ($dir.Name -match ('^' + [regex]::Escape($stem) + '_v(\d+)$')) {
+                $maxVersion = [Math]::Max($maxVersion, [int]$Matches[1])
+            }
+        }
+        $candidate = Join-Path $parent ('{0}_v{1}' -f $stem, ($maxVersion + 1))
+        try {
+            # No -Force: directory creation is the atomic claim under normal
+            # Windows filesystem semantics; a concurrent winner causes retry.
+            New-Item -ItemType Directory -Path $candidate -ErrorAction Stop | Out-Null
+            return $candidate
+        } catch {
+            if (-not (Test-Path -LiteralPath $candidate -PathType Container)) { throw }
         }
     }
-    return Join-Path $parent ('{0}_v{1}' -f $stem, ($maxVersion + 1))
+    throw "Unable to claim a unique versioned delivery directory under $parent."
 }
 
 function Convert-ReportCsv {
@@ -528,8 +548,10 @@ function Export-SourcePageImages {
     $sourceImageRoot = Join-Path $OutputRoot '07_原始页面图片'
     $items = @{}
     $pp = $null
+    $presentations = $null
     try {
         $pp = New-PowerPointApplication
+        try { $presentations = $pp.Presentations } catch { $presentations = $null }
         foreach ($file in $Files) {
             $identity = $IdentityMap[$file.FullName]
             $imageDir = Join-Path $sourceImageRoot $identity.safeStem
@@ -537,9 +559,34 @@ function Export-SourcePageImages {
             try {
                 if (-not (Test-Path -LiteralPath $imageDir)) { New-Item -ItemType Directory -Path $imageDir -Force | Out-Null }
                 Get-ChildItem -LiteralPath $imageDir -Filter '*.png' -File -ErrorAction SilentlyContinue | Remove-Item -Force
-                $pres = $pp.Presentations.Open($file.FullName, 0, 0, 0)
-                $pres.Export($imageDir, 'PNG')
-                Rename-ExportedPageImages -ImageDir $imageDir
+                # Read-only open: this pass only renders page images and never saves.
+                $pres = Invoke-WithComRetry -Action { $presentations.Open($file.FullName, -1, 0, 0) }
+                $expectedSlides = [int]$pres.Slides.Count
+                $failedSlides = New-Object System.Collections.Generic.List[int]
+                for ($slideNo = 1; $slideNo -le $expectedSlides; $slideNo++) {
+                    $target = Join-Path $imageDir ('page-{0:000}.png' -f $slideNo)
+                    try {
+                        $slide = $pres.Slides.Item($slideNo)
+                        Invoke-WithComRetry -Action { $slide.Export($target, 'PNG') } | Out-Null
+                        if (-not (Test-Path -LiteralPath $target) -or (Get-Item -LiteralPath $target).Length -le 0) {
+                            throw "PowerPoint did not create a non-empty PNG: $target"
+                        }
+                        $imageInfo = Get-BasicImageInfo -Path $target
+                        if ($imageInfo.Width -le 0 -or $imageInfo.Height -le 0) {
+                            throw "PowerPoint created an undecodable PNG: $target"
+                        }
+                    } catch {
+                        $failedSlides.Add($slideNo) | Out-Null
+                    }
+                }
+                $actualSlides = @(Get-ChildItem -LiteralPath $imageDir -Filter 'page-*.png' -File | ForEach-Object {
+                    if ($_.BaseName -match '^page-(\d+)$') { [int]$Matches[1] }
+                } | Sort-Object -Unique)
+                $expectedKey = if ($expectedSlides -gt 0) { ((1..$expectedSlides) -join ',') } else { '' }
+                $actualKey = (($actualSlides | ForEach-Object { [string]$_ }) -join ',')
+                if ($failedSlides.Count -gt 0 -or $actualKey -ne $expectedKey) {
+                    throw "Original page image set is incomplete: expected=$expectedKey; actual=$actualKey; failed=$($failedSlides -join ',')."
+                }
                 $items[$file.FullName] = $imageDir
             } catch {
                 Write-Warning "Original page image export failed for $($file.Name): $($_.Exception.Message)"
@@ -555,8 +602,9 @@ function Export-SourcePageImages {
     } finally {
         if ($null -ne $pp) {
             try { $pp.Quit() | Out-Null } catch { }
-            Release-ComObjectSafe -ComObject $pp
         }
+        Release-ComObjectSafe -ComObject $presentations
+        Release-ComObjectSafe -ComObject $pp
         [System.GC]::Collect()
         [System.GC]::WaitForPendingFinalizers()
     }
@@ -746,13 +794,62 @@ function New-ReviewIndexes {
 
 function Get-ExpectedSlideCount {
     param($Rows)
-    return @($Rows | Where-Object { $_.Issue -eq 'SlideType' -and $_.Slide -match '^\d+$' } | Select-Object -ExpandProperty Slide -Unique).Count
+    $slides = @($Rows | Where-Object { $_.Issue -eq 'SlideType' -and $_.Slide -match '^\d+$' } | Select-Object -ExpandProperty Slide -Unique)
+    if ($slides.Count -eq 0) { return $null }
+    return $slides.Count
 }
 
 function Get-PageImageCount {
     param([string]$ImageDir)
     if ([string]::IsNullOrWhiteSpace($ImageDir) -or -not (Test-Path -LiteralPath $ImageDir)) { return 0 }
     return @(Get-ChildItem -LiteralPath $ImageDir -Filter 'page-*.png' -File).Count
+}
+
+function Test-UsablePageImage {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    try {
+        if ((Get-Item -LiteralPath $Path).Length -le 0) { return $false }
+        $info = Get-BasicImageInfo -Path $Path
+        return ($info.Width -gt 0 -and $info.Height -gt 0)
+    } catch {
+        return $false
+    }
+}
+
+function Test-PageImageSet {
+    param([string]$ImageDir, [int]$ExpectedCount)
+
+    if ($ExpectedCount -le 0 -or [string]::IsNullOrWhiteSpace($ImageDir) -or -not (Test-Path -LiteralPath $ImageDir -PathType Container)) { return $false }
+    $files = @(Get-ChildItem -LiteralPath $ImageDir -Filter '*.png' -File)
+    $numbers = New-Object System.Collections.Generic.List[int]
+    foreach ($file in $files) {
+        if ($file.BaseName -notmatch '^page-(\d+)$') { return $false }
+        if (-not (Test-UsablePageImage -Path $file.FullName)) { return $false }
+        $numbers.Add([int]$Matches[1]) | Out-Null
+    }
+    if ($numbers.Count -ne $ExpectedCount -or @($numbers | Sort-Object -Unique).Count -ne $numbers.Count) { return $false }
+    $numbers = @($numbers | Sort-Object)
+    return (($numbers | ForEach-Object { [string]$_ }) -join ',') -eq ((1..$ExpectedCount) -join ',')
+}
+
+function Get-FileSha256 {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '' }
+    $stream = $null
+    $sha256 = $null
+    try {
+        $stream = [System.IO.File]::OpenRead($Path)
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        return ($sha256.ComputeHash($stream) | ForEach-Object { $_.ToString('x2') }) -join ''
+    } catch {
+        return ''
+    } finally {
+        if ($null -ne $sha256) { $sha256.Dispose() }
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
 }
 
 function Get-FileLength {
@@ -763,83 +860,20 @@ function Get-FileLength {
 
 function Get-PdfPageCount {
     param([string]$PdfPath)
-    if ([string]::IsNullOrWhiteSpace($PdfPath) -or -not (Test-Path -LiteralPath $PdfPath)) { return 0 }
+    if ([string]::IsNullOrWhiteSpace($PdfPath) -or -not (Test-Path -LiteralPath $PdfPath)) { return $null }
     try {
         $text = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($PdfPath))
-        return ([regex]::Matches($text, '/Type\s*/Page\b')).Count
-    } catch {
-        return 0
-    }
-}
-
-function Get-ImageDeltaPercent {
-    param(
-        [string]$BeforePath,
-        [string]$AfterPath
-    )
-
-    if ([string]::IsNullOrWhiteSpace($BeforePath) -or [string]::IsNullOrWhiteSpace($AfterPath)) { return $null }
-    if (-not (Test-Path -LiteralPath $BeforePath) -or -not (Test-Path -LiteralPath $AfterPath)) { return $null }
-
-    Add-Type -AssemblyName System.Drawing
-    $before = $null
-    $after = $null
-    $beforeThumb = $null
-    $afterThumb = $null
-    try {
-        $before = [System.Drawing.Image]::FromFile($BeforePath)
-        $after = [System.Drawing.Image]::FromFile($AfterPath)
-        $width = 120
-        $height = 68
-        $beforeThumb = New-Object System.Drawing.Bitmap $before, $width, $height
-        $afterThumb = New-Object System.Drawing.Bitmap $after, $width, $height
-        [double]$sum = 0
-        for ($y = 0; $y -lt $height; $y++) {
-            for ($x = 0; $x -lt $width; $x++) {
-                $a = $beforeThumb.GetPixel($x, $y)
-                $b = $afterThumb.GetPixel($x, $y)
-                $sum += ([Math]::Abs($a.R - $b.R) + [Math]::Abs($a.G - $b.G) + [Math]::Abs($a.B - $b.B)) / (3 * 255)
-            }
-        }
-        return [Math]::Round(($sum / ($width * $height)) * 100, 2)
+        $count = ([regex]::Matches($text, '/Type\s*/Page\b')).Count
+        if ($count -le 0) { return $null }
+        return $count
     } catch {
         return $null
-    } finally {
-        if ($null -ne $afterThumb) { $afterThumb.Dispose() }
-        if ($null -ne $beforeThumb) { $beforeThumb.Dispose() }
-        if ($null -ne $after) { $after.Dispose() }
-        if ($null -ne $before) { $before.Dispose() }
     }
 }
 
-function Get-ImageWhitePercent {
-    param([string]$ImagePath)
-
-    if ([string]::IsNullOrWhiteSpace($ImagePath) -or -not (Test-Path -LiteralPath $ImagePath)) { return $null }
-
-    Add-Type -AssemblyName System.Drawing
-    $image = $null
-    $thumb = $null
-    try {
-        $image = [System.Drawing.Image]::FromFile($ImagePath)
-        $width = 120
-        $height = 68
-        $thumb = New-Object System.Drawing.Bitmap $image, $width, $height
-        $white = 0
-        for ($y = 0; $y -lt $height; $y++) {
-            for ($x = 0; $x -lt $width; $x++) {
-                $pixel = $thumb.GetPixel($x, $y)
-                if ($pixel.R -ge 245 -and $pixel.G -ge 245 -and $pixel.B -ge 245) { $white++ }
-            }
-        }
-        return [Math]::Round(($white / ($width * $height)) * 100, 2)
-    } catch {
-        return $null
-    } finally {
-        if ($null -ne $thumb) { $thumb.Dispose() }
-        if ($null -ne $image) { $image.Dispose() }
-    }
-}
+# Get-ImageDeltaPercent / Get-ImageWhitePercent live in PhysicsPpt.Common.ps1
+# so the workflow overview and the visual confirmation gate share one metric
+# (same thumbnail resolution, same 8% threshold semantics).
 
 function Get-PptxMediaSummary {
     param([string]$PptxPath)
@@ -927,6 +961,181 @@ function Get-ObjectPropertyValue {
     return $property.Value
 }
 
+function Test-PreparedManifestMatchesCurrent {
+    param($Prepared, $Current)
+
+    if ($null -eq $Prepared -or $null -eq $Current) { return $false }
+    foreach ($propertyName in @('mode', 'source', 'output')) {
+        $preparedValue = [string](Get-ObjectPropertyValue -Object $Prepared -PropertyName $propertyName -DefaultValue '')
+        $currentValue = [string](Get-ObjectPropertyValue -Object $Current -PropertyName $propertyName -DefaultValue '')
+        if (-not [string]::Equals($preparedValue, $currentValue, [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+    }
+
+    $preparedFiles = @((Get-ObjectPropertyValue -Object $Prepared -PropertyName 'files' -DefaultValue @()))
+    $currentFiles = @((Get-ObjectPropertyValue -Object $Current -PropertyName 'files' -DefaultValue @()))
+    if ($preparedFiles.Count -ne $currentFiles.Count) { return $false }
+    $preparedByInput = @{}
+    foreach ($preparedFile in $preparedFiles) {
+        $input = [string](Get-ObjectPropertyValue -Object $preparedFile -PropertyName 'input' -DefaultValue '')
+        if ([string]::IsNullOrWhiteSpace($input) -or $preparedByInput.ContainsKey($input)) { return $false }
+        $preparedByInput[$input] = $preparedFile
+    }
+
+    foreach ($currentFile in $currentFiles) {
+        $input = [string](Get-ObjectPropertyValue -Object $currentFile -PropertyName 'input' -DefaultValue '')
+        if ([string]::IsNullOrWhiteSpace($input)) { return $false }
+        $matchingKey = @($preparedByInput.Keys | Where-Object { [string]::Equals([string]$_, $input, [System.StringComparison]::OrdinalIgnoreCase) })
+        if ($matchingKey.Count -ne 1) { return $false }
+        $preparedFile = $preparedByInput[$matchingKey[0]]
+
+        foreach ($propertyName in @('inputRelativePath', 'displayName', 'outputStem', 'inputSha256', 'normalizedPptx', 'pdf', 'pageImages', 'sourcePageImages')) {
+            $preparedValue = [string](Get-ObjectPropertyValue -Object $preparedFile -PropertyName $propertyName -DefaultValue '')
+            $currentValue = [string](Get-ObjectPropertyValue -Object $currentFile -PropertyName $propertyName -DefaultValue '')
+            if (-not [string]::Equals($preparedValue, $currentValue, [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+        }
+
+        $preparedValidation = Get-ObjectPropertyValue -Object $preparedFile -PropertyName 'validation' -DefaultValue $null
+        $currentValidation = Get-ObjectPropertyValue -Object $currentFile -PropertyName 'validation' -DefaultValue $null
+        foreach ($propertyName in @('expectedSlides', 'pageImageCount', 'sourcePageImageCount', 'pdfPageCount', 'pageImagesMatchExpected', 'sourceImagesMatchExpected', 'pdfPagesMatchExpected')) {
+            $preparedValue = [string](Get-ObjectPropertyValue -Object $preparedValidation -PropertyName $propertyName -DefaultValue '')
+            $currentValue = [string](Get-ObjectPropertyValue -Object $currentValidation -PropertyName $propertyName -DefaultValue '')
+            if ($preparedValue -ne $currentValue) { return $false }
+        }
+    }
+
+    $preparedInvariant = Get-ObjectPropertyValue -Object $Prepared -PropertyName 'invariantGate' -DefaultValue $null
+    $currentInvariant = Get-ObjectPropertyValue -Object $Current -PropertyName 'invariantGate' -DefaultValue $null
+    foreach ($propertyName in @('status', 'blockedCount')) {
+        if ([string](Get-ObjectPropertyValue -Object $preparedInvariant -PropertyName $propertyName -DefaultValue '') -ne
+            [string](Get-ObjectPropertyValue -Object $currentInvariant -PropertyName $propertyName -DefaultValue '')) { return $false }
+    }
+    return $true
+}
+
+function Test-PreparedPacketMatchesCurrent {
+    param($Packet, $Current)
+
+    if ($null -eq $Packet -or $null -eq $Current) { return $false }
+    if ([int](Get-ObjectPropertyValue -Object $Packet -PropertyName 'protocolVersion' -DefaultValue 0) -ne 1) { return $false }
+    $packetStatus = [string](Get-ObjectPropertyValue -Object $Packet -PropertyName 'status' -DefaultValue '')
+    if ($packetStatus -notin @('Ready', 'ReviewUnavailable')) { return $false }
+    $packetFiles = @((Get-ObjectPropertyValue -Object $Packet -PropertyName 'files' -DefaultValue @()))
+    $currentFiles = @((Get-ObjectPropertyValue -Object $Current -PropertyName 'files' -DefaultValue @()))
+    if ($packetFiles.Count -ne $currentFiles.Count) { return $false }
+    $packetByInput = @{}
+    foreach ($packetFile in $packetFiles) {
+        $input = [string](Get-ObjectPropertyValue -Object $packetFile -PropertyName 'input' -DefaultValue '')
+        if ([string]::IsNullOrWhiteSpace($input) -or $packetByInput.ContainsKey($input)) { return $false }
+        $packetByInput[$input] = $packetFile
+    }
+
+    foreach ($currentFile in $currentFiles) {
+        $input = [string](Get-ObjectPropertyValue -Object $currentFile -PropertyName 'input' -DefaultValue '')
+        $matchingKey = @($packetByInput.Keys | Where-Object { [string]::Equals([string]$_, $input, [System.StringComparison]::OrdinalIgnoreCase) })
+        if ($matchingKey.Count -ne 1) { return $false }
+        $packetFile = $packetByInput[$matchingKey[0]]
+        $packetFileStatus = [string](Get-ObjectPropertyValue -Object $packetFile -PropertyName 'status' -DefaultValue '')
+        $packetPages = @((Get-ObjectPropertyValue -Object $packetFile -PropertyName 'pages' -DefaultValue @()))
+        $currentPageDir = [string](Get-ObjectPropertyValue -Object $currentFile -PropertyName 'pageImages' -DefaultValue '')
+        $currentSourcePageDir = [string](Get-ObjectPropertyValue -Object $currentFile -PropertyName 'sourcePageImages' -DefaultValue '')
+        $currentValidation = Get-ObjectPropertyValue -Object $currentFile -PropertyName 'validation' -DefaultValue $null
+        $expectedSlides = [int](Get-ObjectPropertyValue -Object $currentValidation -PropertyName 'expectedSlides' -DefaultValue 0)
+
+        if ($packetFileStatus -eq 'ReviewUnavailable') {
+            if ($packetPages.Count -ne 0 -or $packetStatus -ne 'ReviewUnavailable') { return $false }
+            continue
+        }
+        if ($packetFileStatus -ne 'Ready' -or $packetStatus -ne 'Ready' -or $expectedSlides -le 0 -or $packetPages.Count -ne $expectedSlides) { return $false }
+        if (-not (Test-PageImageSet -ImageDir $currentPageDir -ExpectedCount $expectedSlides) -or
+            -not (Test-PageImageSet -ImageDir $currentSourcePageDir -ExpectedCount $expectedSlides)) { return $false }
+
+        foreach ($packetPage in $packetPages) {
+            $slide = [int](Get-ObjectPropertyValue -Object $packetPage -PropertyName 'slide' -DefaultValue 0)
+            if ($slide -lt 1) { return $false }
+            $sourcePath = Join-Path $currentSourcePageDir ('page-{0:000}.png' -f $slide)
+            $normalizedPath = Join-Path $currentPageDir ('page-{0:000}.png' -f $slide)
+            foreach ($pair in @(
+                @('sourceImage', $sourcePath, 'sourceSha256'),
+                @('normalizedImage', $normalizedPath, 'normalizedSha256')
+            )) {
+                $packetPath = [string](Get-ObjectPropertyValue -Object $packetPage -PropertyName $pair[0] -DefaultValue '')
+                if (-not [string]::Equals($packetPath, $pair[1], [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+                $packetHash = [string](Get-ObjectPropertyValue -Object $packetPage -PropertyName $pair[2] -DefaultValue '')
+                if ([string]::IsNullOrWhiteSpace($packetHash) -or (Get-FileSha256 -Path $pair[1]) -ne $packetHash) { return $false }
+            }
+        }
+    }
+    return $true
+}
+
+function Get-ExistingPreparedAiEvidence {
+    param(
+        [string]$ManifestPath,
+        [string]$PacketPath,
+        [string]$InputFullPath,
+        [string]$OutputRoot,
+        [string]$Mode,
+        [System.IO.FileInfo[]]$Files
+    )
+
+    $empty = [pscustomobject]@{ reusable = $false; manifest = $null; sourceImageDirs = @{} }
+    if ($Mode -eq 'ForceRebuild') { return $empty }
+    if (-not (Test-Path -LiteralPath $ManifestPath) -or -not (Test-Path -LiteralPath $PacketPath)) { return $empty }
+
+    $prepared = Read-JsonObject -Path $ManifestPath
+    $packet = Read-JsonObject -Path $PacketPath
+    if ($null -eq $prepared -or $null -eq $packet) { return $empty }
+    foreach ($pair in @(
+        @('mode', $Mode),
+        @('source', $InputFullPath),
+        @('output', $OutputRoot)
+    )) {
+        if (-not [string]::Equals([string](Get-ObjectPropertyValue -Object $prepared -PropertyName $pair[0] -DefaultValue ''), [string]$pair[1], [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $empty
+        }
+    }
+
+    $preparedFiles = @((Get-ObjectPropertyValue -Object $prepared -PropertyName 'files' -DefaultValue @()))
+    if ($preparedFiles.Count -ne $Files.Count) { return $empty }
+    $preparedByInput = @{}
+    foreach ($preparedFile in $preparedFiles) {
+        $input = [string](Get-ObjectPropertyValue -Object $preparedFile -PropertyName 'input' -DefaultValue '')
+        if ([string]::IsNullOrWhiteSpace($input) -or $preparedByInput.ContainsKey($input)) { return $empty }
+        $preparedByInput[$input] = $preparedFile
+    }
+
+    $sourceImageDirs = @{}
+    foreach ($file in $Files) {
+        $matchingKey = @($preparedByInput.Keys | Where-Object { [string]::Equals([string]$_, $file.FullName, [System.StringComparison]::OrdinalIgnoreCase) })
+        if ($matchingKey.Count -ne 1) { return $empty }
+        $preparedFile = $preparedByInput[$matchingKey[0]]
+        if ([string](Get-ObjectPropertyValue -Object $preparedFile -PropertyName 'inputSha256' -DefaultValue '') -ne (Get-FileSha256 -Path $file.FullName)) { return $empty }
+
+        $normalizedPath = [string](Get-ObjectPropertyValue -Object $preparedFile -PropertyName 'normalizedPptx' -DefaultValue '')
+        $normalizedHash = [string](Get-ObjectPropertyValue -Object $preparedFile -PropertyName 'normalizedPptxSha256' -DefaultValue '')
+        if ([string]::IsNullOrWhiteSpace($normalizedPath) -or [string]::IsNullOrWhiteSpace($normalizedHash) -or
+            (Get-FileSha256 -Path $normalizedPath) -ne $normalizedHash) { return $empty }
+
+        if ($Mode -in @('NormalizeAndPdf', 'ForceRebuild')) {
+            $pdfPath = [string](Get-ObjectPropertyValue -Object $preparedFile -PropertyName 'pdf' -DefaultValue '')
+            $pdfHash = [string](Get-ObjectPropertyValue -Object $preparedFile -PropertyName 'pdfSha256' -DefaultValue '')
+            if ([string]::IsNullOrWhiteSpace($pdfPath) -or [string]::IsNullOrWhiteSpace($pdfHash) -or
+                (Get-FileSha256 -Path $pdfPath) -ne $pdfHash) { return $empty }
+        }
+
+        $validation = Get-ObjectPropertyValue -Object $preparedFile -PropertyName 'validation' -DefaultValue $null
+        $expectedSlides = [int](Get-ObjectPropertyValue -Object $validation -PropertyName 'expectedSlides' -DefaultValue 0)
+        $pageImageDir = [string](Get-ObjectPropertyValue -Object $preparedFile -PropertyName 'pageImages' -DefaultValue '')
+        $sourcePageImageDir = [string](Get-ObjectPropertyValue -Object $preparedFile -PropertyName 'sourcePageImages' -DefaultValue '')
+        if ($expectedSlides -le 0 -or -not (Test-PageImageSet -ImageDir $pageImageDir -ExpectedCount $expectedSlides) -or
+            -not (Test-PageImageSet -ImageDir $sourcePageImageDir -ExpectedCount $expectedSlides)) { return $empty }
+        $sourceImageDirs[$file.FullName] = $sourcePageImageDir
+    }
+
+    if (-not (Test-PreparedPacketMatchesCurrent -Packet $packet -Current $prepared)) { return $empty }
+    return [pscustomobject]@{ reusable = $true; manifest = $prepared; sourceImageDirs = $sourceImageDirs }
+}
+
 function Get-VisualArtifactCountSum {
     param(
         $Items,
@@ -943,6 +1152,58 @@ function Get-VisualArtifactCountSum {
         }
     }
     return $sum
+}
+
+function Get-DeliveryGateAssessment {
+    param(
+        $Manifest,
+        [string]$Mode,
+        [bool]$IncludeReviewArtifacts,
+        [bool]$IncludeVisualAudit
+    )
+    $blocked = New-Object System.Collections.Generic.List[string]
+    $review = New-Object System.Collections.Generic.List[string]
+    $requiresDeliveryArtifacts = ($Mode -ne 'CheckOnly')
+    foreach ($file in @($Manifest.files)) {
+        $name = [string](Get-ObjectPropertyValue -Object $file -PropertyName 'displayName' -DefaultValue $file.input)
+        if ($Mode -ne 'CheckOnly' -and [string]$file.status -ne 'success') {
+            $blocked.Add("${name}: normalized output status is $($file.status)") | Out-Null
+        }
+        if ($Mode -ne 'CheckOnly' -and [string]::IsNullOrWhiteSpace([string]$file.normalizedPptx)) {
+            $blocked.Add("${name}: normalized PPTX is missing") | Out-Null
+        }
+        $validation = Get-ObjectPropertyValue -Object $file -PropertyName 'validation' -DefaultValue $null
+        if ($null -eq $validation) {
+            if ($Mode -ne 'CheckOnly') { $blocked.Add("${name}: validation record is missing") | Out-Null }
+            continue
+        }
+        if ($requiresDeliveryArtifacts -and $IncludeReviewArtifacts -and -not [bool]$validation.pageImagesMatchExpected) {
+            $blocked.Add("${name}: normalized page-image set is incomplete") | Out-Null
+        }
+        if ($requiresDeliveryArtifacts -and $IncludeReviewArtifacts -and -not [bool]$validation.sourceImagesMatchExpected) {
+            $blocked.Add("${name}: source page-image set is incomplete") | Out-Null
+        }
+        if ($Mode -in @('NormalizeAndPdf', 'ForceRebuild') -and -not [bool]$validation.pdfPagesMatchExpected) {
+            $blocked.Add("${name}: PDF page count is missing or mismatched") | Out-Null
+        }
+    }
+    if ($requiresDeliveryArtifacts -and $IncludeVisualAudit) {
+        foreach ($visual in @((Get-ObjectPropertyValue -Object $Manifest -PropertyName 'visualAuditArtifacts' -DefaultValue @()))) {
+            $name = [string](Get-ObjectPropertyValue -Object $visual -PropertyName 'file' -DefaultValue 'visual audit')
+            $auditStatus = [string](Get-ObjectPropertyValue -Object $visual -PropertyName 'visualAuditStatus' -DefaultValue '')
+            if ($auditStatus -ne 'Completed') {
+                $blocked.Add("${name}: visual audit status is $auditStatus") | Out-Null
+                continue
+            }
+            $confirmationGate = [string](Get-ObjectPropertyValue -Object $visual -PropertyName 'visualConfirmationGateStatus' -DefaultValue '')
+            if ($confirmationGate -eq 'Failed') {
+                $blocked.Add("${name}: visual confirmation failed") | Out-Null
+            } elseif ($confirmationGate -ne 'Passed') {
+                $review.Add("${name}: visual confirmation requires review ($confirmationGate)") | Out-Null
+            }
+        }
+    }
+    [pscustomobject]@{ blocked = @($blocked.ToArray() | Select-Object -Unique); review = @($review.ToArray() | Select-Object -Unique) }
 }
 
 function Read-JsonObject {
@@ -1029,6 +1290,11 @@ function Resolve-DotNetCommand {
     }
 
     foreach ($candidate in $candidates) {
+        # EAP is lowered around native calls: on Windows PowerShell 5.1, stderr
+        # from `2>&1` would otherwise become a terminating NativeCommandError
+        # before $LASTEXITCODE could be judged.
+        $previousEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
         try {
             $sdks = & $candidate --list-sdks 2>&1
             if ($LASTEXITCODE -eq 0 -and @($sdks | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }).Count -gt 0) {
@@ -1036,6 +1302,8 @@ function Resolve-DotNetCommand {
             }
         } catch {
             continue
+        } finally {
+            $ErrorActionPreference = $previousEap
         }
     }
 
@@ -1226,8 +1494,19 @@ function New-Manifest {
         $reviewIndex = if ($null -ne $ReviewIndexes -and $ReviewIndexes.ContainsKey($file.FullName)) { $ReviewIndexes[$file.FullName] } else { $null }
         $reviewSlides = @(Get-ReviewSlideRecords -Rows $fileRows -ImageDir $imageDir -SourceImageDir $sourceImageDir)
         $expectedSlides = Get-ExpectedSlideCount -Rows $fileRows
+        if ($null -eq $expectedSlides -and $IncludeReviewArtifacts) {
+            # A valid normalization cache reports only SkippedUpToDate at
+            # slide 0. Recover the count from the already validated contiguous
+            # page set instead of treating a cache hit as an unknown deck.
+            $cachedPageCount = @(Get-ChildItem -LiteralPath $imageDir -Filter 'page-*.png' -File -ErrorAction SilentlyContinue).Count
+            if ($cachedPageCount -gt 0 -and (Test-PageImageSet -ImageDir $imageDir -ExpectedCount $cachedPageCount)) {
+                $expectedSlides = $cachedPageCount
+            }
+        }
         $sourcePageImageCount = Get-PageImageCount -ImageDir $sourceImageDir
         $pdfPageCount = Get-PdfPageCount -PdfPath $pdfPath
+        $pageImagesMatchExpected = if (-not $IncludeReviewArtifacts -or $Mode -eq 'CheckOnly') { $true } else { $null -ne $expectedSlides -and (Test-PageImageSet -ImageDir $imageDir -ExpectedCount ([int]$expectedSlides)) }
+        $sourceImagesMatchExpected = if (-not $IncludeReviewArtifacts -or $Mode -eq 'CheckOnly') { $true } else { $null -ne $expectedSlides -and (Test-PageImageSet -ImageDir $sourceImageDir -ExpectedCount ([int]$expectedSlides)) }
         $status = if ($failed) { 'failed' } elseif ($Mode -eq 'CheckOnly') { 'checked' } elseif ($saved) { 'success' } else { 'unknown' }
 
             [pscustomobject]@{
@@ -1236,10 +1515,13 @@ function New-Manifest {
                 displayName = $identity.displayName
                 outputStem = $safeName
             inputBytes = Get-FileLength -Path $file.FullName
+            inputSha256 = Get-FileSha256 -Path $file.FullName
             normalizedPptx = if ($saved) { $pptxPath } elseif ($Mode -eq 'CheckOnly') { $null } else { $pptxPath }
             normalizedPptxBytes = Get-FileLength -Path $pptxPath
+            normalizedPptxSha256 = Get-FileSha256 -Path $pptxPath
             pdf = if ($pdf) { $pdfPath } elseif ($Mode -in @('CheckOnly', 'SafeNormalize')) { $null } else { $pdfPath }
             pdfBytes = Get-FileLength -Path $pdfPath
+            pdfSha256 = Get-FileSha256 -Path $pdfPath
             pageImages = if ($images) { $imageDir } elseif ($Mode -eq 'CheckOnly' -or -not $IncludeReviewArtifacts) { $null } else { $imageDir }
             sourcePageImages = if ($IncludeReviewArtifacts) { $sourceImageDir } else { $null }
             contactSheet = $contactSheet
@@ -1255,9 +1537,9 @@ function New-Manifest {
                 pageImageCount = $pageImageCount
                 sourcePageImageCount = $sourcePageImageCount
                 pdfPageCount = $pdfPageCount
-                pageImagesMatchExpected = (-not $IncludeReviewArtifacts -or $expectedSlides -eq 0 -or $pageImageCount -eq $expectedSlides)
-                sourceImagesMatchExpected = (-not $IncludeReviewArtifacts -or $expectedSlides -eq 0 -or $sourcePageImageCount -eq 0 -or $sourcePageImageCount -eq $expectedSlides)
-                pdfPagesMatchExpected = ($expectedSlides -eq 0 -or $pdfPageCount -eq 0 -or $pdfPageCount -eq $expectedSlides)
+                pageImagesMatchExpected = $pageImagesMatchExpected
+                sourceImagesMatchExpected = $sourceImagesMatchExpected
+                pdfPagesMatchExpected = ($Mode -notin @('NormalizeAndPdf', 'ForceRebuild') -or ($null -ne $expectedSlides -and $null -ne $pdfPageCount -and $pdfPageCount -eq $expectedSlides))
             }
             report = $ReportPath
             status = $status
@@ -1567,6 +1849,18 @@ function Write-Summary {
     [System.IO.File]::WriteAllLines($Path, $lines, $utf8Bom)
 }
 
+function Open-PathForReview {
+    # Opening the result is a convenience, never a delivery step: on headless
+    # hosts it degrades to a warning instead of flipping a successful run to a
+    # non-zero exit.
+    param([string]$Path)
+    try {
+        Invoke-Item -LiteralPath $Path
+    } catch {
+        Write-Warning "Could not open '$Path' — $($_.Exception.Message)"
+    }
+}
+
 function Open-GeneratedPptxResult {
     param(
         $Manifest,
@@ -1590,12 +1884,12 @@ function Open-GeneratedPptxResult {
     }
 
     if ($formulaOutputs.Count -eq 1) {
-        Invoke-Item -LiteralPath $formulaOutputs[0]
+        Open-PathForReview -Path $formulaOutputs[0]
         return
     } elseif ($formulaOutputs.Count -gt 1) {
         $formulaDir = Join-Path $OutputRoot '14_公式OMML副本'
         if (Test-Path -LiteralPath $formulaDir) {
-            Invoke-Item -LiteralPath $formulaDir
+            Open-PathForReview -Path $formulaDir
             return
         }
     }
@@ -1606,7 +1900,8 @@ function Open-GeneratedPptxResult {
             @($Manifest.visualAuditArtifacts) |
                 Where-Object {
                     $fixed = Get-ObjectPropertyValue -Object $_ -PropertyName 'fixedPptx' -DefaultValue ''
-                    -not [string]::IsNullOrWhiteSpace($fixed) -and (Test-Path -LiteralPath $fixed)
+                    $fixedGate = Get-ObjectPropertyValue -Object $_ -PropertyName 'fixedVisualConfirmationGateStatus' -DefaultValue ''
+                    -not [string]::IsNullOrWhiteSpace($fixed) -and (Test-Path -LiteralPath $fixed) -and $fixedGate -eq 'Passed'
                 } |
                 ForEach-Object { Get-ObjectPropertyValue -Object $_ -PropertyName 'fixedPptx' -DefaultValue '' } |
                 Select-Object -Unique
@@ -1614,10 +1909,10 @@ function Open-GeneratedPptxResult {
     }
 
     if ($fixedOutputs.Count -eq 1) {
-        Invoke-Item -LiteralPath $fixedOutputs[0]
+        Open-PathForReview -Path $fixedOutputs[0]
         return
     } elseif ($fixedOutputs.Count -gt 1 -and -not [string]::IsNullOrWhiteSpace($VisualFixDir) -and (Test-Path -LiteralPath $VisualFixDir)) {
-        Invoke-Item -LiteralPath $VisualFixDir
+        Open-PathForReview -Path $VisualFixDir
         return
     }
 
@@ -1628,11 +1923,11 @@ function Open-GeneratedPptxResult {
     )
 
     if ($outputs.Count -eq 1) {
-        Invoke-Item -LiteralPath $outputs[0]
+        Open-PathForReview -Path $outputs[0]
     } elseif ($outputs.Count -gt 1 -and (Test-Path -LiteralPath $NormalizedDir)) {
-        Invoke-Item -LiteralPath $NormalizedDir
+        Open-PathForReview -Path $NormalizedDir
     } else {
-        Invoke-Item -LiteralPath $OutputRoot
+        Open-PathForReview -Path $OutputRoot
     }
 }
 
@@ -1992,7 +2287,16 @@ function Invoke-FormulaOmmlArtifacts {
                 $validatorStatus = 'SkippedValidatorMissing'
             } else {
                 try {
-                    $validatorOutput = & $dotnet run --project $validatorProject -c Release -- $outputPptx --max-errors 20 2>&1
+                    # Lower EAP around the native call: on Windows PowerShell 5.1,
+                    # build warnings on stderr would otherwise become terminating
+                    # errors even when the validator itself succeeds.
+                    $previousEap = $ErrorActionPreference
+                    $ErrorActionPreference = 'Continue'
+                    try {
+                        $validatorOutput = & $dotnet run --project $validatorProject -c Release -- $outputPptx --max-errors 20 2>&1
+                    } finally {
+                        $ErrorActionPreference = $previousEap
+                    }
                     $validatorText = ($validatorOutput | ForEach-Object { [string]$_ }) -join [Environment]::NewLine
                     $utf8Bom = New-Object System.Text.UTF8Encoding($true)
                     [System.IO.File]::WriteAllText($validatorJson, $validatorText, $utf8Bom)
@@ -2132,7 +2436,8 @@ function Invoke-InvariantGate {
         [string]$OutputRoot,
         [string]$NormalizedDir,
         $IdentityMap,
-        [string]$Mode
+        [string]$Mode,
+        [bool]$AllowAdvanceOnClickDisable = $false
     )
 
     $gateRoot = Join-Path $OutputRoot '16_不可变快照'
@@ -2160,7 +2465,7 @@ function Invoke-InvariantGate {
             } else {
                 & $snapshotScript -InputPath $file.FullName -OutputPath $beforeSnapshot | Out-Null
                 & $snapshotScript -InputPath $normalized -OutputPath $afterSnapshot | Out-Null
-                & $compareScript -BeforePath $beforeSnapshot -AfterPath $afterSnapshot -OutputPath $compareResult | Out-Null
+                & $compareScript -BeforePath $beforeSnapshot -AfterPath $afterSnapshot -OutputPath $compareResult -AllowAdvanceOnClickDisable:$AllowAdvanceOnClickDisable | Out-Null
                 $comparison = Get-Content -LiteralPath $compareResult -Raw -Encoding UTF8 | ConvertFrom-Json
                 $item.passed = [bool]$comparison.passed
                 $item.status = if ($item.passed) { 'Passed' } else { 'BlockedInvariantDifference' }
@@ -2181,7 +2486,13 @@ $root = Split-Path -Parent $PSScriptRoot
 $inputItem = Get-Item -LiteralPath $InputPath
 $inputFullPath = $inputItem.FullName
 if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
-    $OutputRoot = if ($VersionedDelivery) { Get-VersionedDeliveryRoot -InputItem $inputItem } else { Get-DefaultOutputRoot -InputItem $inputItem }
+    if ($VersionedDelivery) {
+        # Re-check the computed version right before adoption so two concurrent
+        # runs cannot claim the same _vN directory.
+        $OutputRoot = New-VersionedDeliveryRoot -InputItem $inputItem
+    } else {
+        $OutputRoot = Get-DefaultOutputRoot -InputItem $inputItem
+    }
 } elseif ($VersionedDelivery) {
     throw 'Specify either -OutputRoot or -VersionedDelivery, not both.'
 }
@@ -2207,7 +2518,20 @@ $formulaOmmlDir = Join-Path $OutputRoot '14_公式OMML副本'
 $formulaOmmlAuditDir = Join-Path $OutputRoot '15_公式OMML审查'
 $exportsPdf = $Mode -notin @('CheckOnly', 'SafeNormalize')
 $invariantDir = Join-Path $OutputRoot '16_不可变快照'
-$outputDirs = @($OutputRoot, $reportDir, $normalizedDir, $backupDir, $invariantDir)
+$existingManifestPath = Join-Path $OutputRoot 'review-manifest.json'
+$existingAiPacketPath = Join-Path $OutputRoot 'ai-visual-review-request.json'
+$preparedAiEvidence = if (-not [string]::IsNullOrWhiteSpace($AiVisualReviewResult)) {
+    Get-ExistingPreparedAiEvidence -ManifestPath $existingManifestPath -PacketPath $existingAiPacketPath -InputFullPath $inputFullPath -OutputRoot $OutputRoot -Mode $Mode -Files $files
+} else {
+    [pscustomobject]@{ reusable = $false; manifest = $null; sourceImageDirs = @{} }
+}
+$reusePreparedAiEvidence = [bool]$preparedAiEvidence.reusable
+# CheckOnly never writes deliverables, backups, or snapshots, so those
+# directories are not materialized for it.
+$outputDirs = @($OutputRoot, $reportDir)
+if ($Mode -ne 'CheckOnly') {
+    $outputDirs += @($normalizedDir, $backupDir, $invariantDir)
+}
 if ($IncludeReviewArtifacts) {
     $outputDirs += @($imageDir, $contactSheetDir, $reviewSheetDir, $sourceImageDir, $beforeAfterDir, $reviewPagePackageDir, $reviewIndexDir)
 }
@@ -2220,9 +2544,6 @@ if ($IncludeVisualAudit) {
 if ($ApplyFormulaOmmlWhitelist) {
     $outputDirs += @($formulaOmmlDir, $formulaOmmlAuditDir)
 }
-foreach ($dir in $outputDirs) {
-    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-}
 
 $stepCount = 5
 if ($IncludeVisualAudit) { $stepCount++ }
@@ -2234,6 +2555,13 @@ $toolchainArgs = @{}
 if ($ApplyFormulaOmmlWhitelist) { $toolchainArgs.RequireFormulaValidator = $true }
 & (Join-Path $PSScriptRoot 'Assert-Toolchain.ps1') @toolchainArgs
 Assert-PowerPointAutomationReady
+
+# Output directories are created only after Step 1 passes: a failed self-check
+# must not leave a half-empty versioned delivery directory behind, because the
+# highest _vN is treated as the newest delivery.
+foreach ($dir in $outputDirs) {
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+}
 
 $reportOnlyPath = Join-Path $reportDir 'physics-ppt-report-only.csv'
 $normalizeReportPath = Join-Path $normalizedDir 'physics-ppt-normalize-report.csv'
@@ -2277,6 +2605,17 @@ if ($Mode -eq 'CheckOnly') {
     if ($IncludeReviewArtifacts) {
         $normalizeArgs.ImageOutputDir = $imageDir
     }
+    if ($IncludeReviewArtifacts -and -not $reusePreparedAiEvidence) {
+        # Clear previous page images first: a deck whose slide count shrank would
+        # otherwise leave stale page-NNN.png files that fail the count check.
+        foreach ($file in $files) {
+            $identity = $identityMap[$file.FullName]
+            $fileImageDir = Join-Path $imageDir $identity.safeStem
+            if (Test-Path -LiteralPath $fileImageDir) {
+                Get-ChildItem -LiteralPath $fileImageDir -Filter 'page-*.png' -File -ErrorAction SilentlyContinue | Remove-Item -Force
+            }
+        }
+    }
     & (Join-Path $PSScriptRoot 'Normalize-PhysicsPpt.ps1') @normalizeArgs
 
     if (Test-Path -LiteralPath $normalizeReportPath) {
@@ -2285,14 +2624,26 @@ if ($Mode -eq 'CheckOnly') {
 
     $sourceBackupDir = Join-Path $normalizedDir '_backup_originals'
     if (Test-Path -LiteralPath $sourceBackupDir) {
-        Get-ChildItem -LiteralPath $sourceBackupDir -File | Move-Item -Destination $backupDir -Force
-        Remove-Item -LiteralPath $sourceBackupDir -Force
+        try {
+            Get-ChildItem -LiteralPath $sourceBackupDir -File | Move-Item -Destination $backupDir -Force
+            Remove-Item -LiteralPath $sourceBackupDir -Force
+        } catch {
+            # A locked backup must not abort the batch; the files stay in place
+            # and the warning points at the directory for manual collection.
+            Write-Warning "Original backup move failed — $($_.Exception.Message); files remain under $sourceBackupDir"
+        }
     }
 }
 
 Write-Host "Step 4/${stepCount}: build review artifacts and manifest"
 $rows = Convert-ReportCsv -Path $finalReportPath
-$sourceImageDirs = if ($Mode -eq 'CheckOnly' -or -not $IncludeReviewArtifacts) { @{} } else { Export-SourcePageImages -Files $files -OutputRoot $OutputRoot -IdentityMap $identityMap }
+$sourceImageDirs = if ($Mode -eq 'CheckOnly' -or -not $IncludeReviewArtifacts) {
+    @{}
+} elseif ($reusePreparedAiEvidence) {
+    $preparedAiEvidence.sourceImageDirs
+} else {
+    Export-SourcePageImages -Files $files -OutputRoot $OutputRoot -IdentityMap $identityMap
+}
 $contactSheets = if ($Mode -eq 'CheckOnly' -or -not $IncludeReviewArtifacts) { @{} } else { New-ContactSheets -Files $files -OutputRoot $OutputRoot -IdentityMap $identityMap }
 $reviewSheets = if ($Mode -eq 'CheckOnly' -or -not $IncludeReviewArtifacts) { @{} } else { New-ReviewContactSheets -Files $files -OutputRoot $OutputRoot -Rows $rows -IdentityMap $identityMap }
 $beforeAfterSheets = if ($Mode -eq 'CheckOnly' -or -not $IncludeReviewArtifacts) { @{} } else { New-BeforeAfterReviewSheets -Files $files -OutputRoot $OutputRoot -Rows $rows -SourceImageDirs $sourceImageDirs -IdentityMap $identityMap }
@@ -2303,13 +2654,25 @@ $manifestPath = Join-Path $OutputRoot 'review-manifest.json'
 $summaryPath = Join-Path $OutputRoot 'summary.md'
 $manifest = New-Manifest -Files $files -InputFullPath $inputFullPath -OutputRoot $OutputRoot -ReportPath $finalReportPath -Mode $Mode -IncludeReviewArtifacts ([bool]$IncludeReviewArtifacts) -ReportRows $rows -ContactSheets $contactSheets -ReviewSheets $reviewSheets -SourceImageDirs $sourceImageDirs -BeforeAfterSheets $beforeAfterSheets -ReviewPagePackages $reviewPagePackages -ReviewIndexes $reviewIndexes -FormulaReviewIndex $formulaReviewIndex -IdentityMap $identityMap
 
-$invariantGate = Invoke-InvariantGate -Files $files -OutputRoot $OutputRoot -NormalizedDir $normalizedDir -IdentityMap $identityMap -Mode $Mode
+$invariantGate = Invoke-InvariantGate -Files $files -OutputRoot $OutputRoot -NormalizedDir $normalizedDir -IdentityMap $identityMap -Mode $Mode -AllowAdvanceOnClickDisable ([bool]$DisableAdvanceOnClick)
 $manifest | Add-Member -NotePropertyName invariantGate -NotePropertyValue $invariantGate -Force
 $manifest | Add-Member -NotePropertyName deliveryBlocked -NotePropertyValue ([bool]($invariantGate.enabled -and $invariantGate.status -eq 'Blocked')) -Force
 $manifest | Add-Member -NotePropertyName deliveryStatus -NotePropertyValue $(if ($invariantGate.enabled -and $invariantGate.status -eq 'Blocked') { 'BlockedInvariantGate' } else { 'Pending' }) -Force
 
 $formulaWhitelistSuggestionArtifacts = Invoke-FormulaWhitelistSuggestionArtifacts -FormulaReviewIndex $formulaReviewIndex -OutputRoot $OutputRoot -MaxSuggestions 120
 $manifest | Add-Member -NotePropertyName formulaWhitelistSuggestionArtifacts -NotePropertyValue $formulaWhitelistSuggestionArtifacts -Force
+
+# The prepared packet binds itself to the exact bytes of review-manifest.json.
+# Populate the packet metadata before the first manifest write so the packet
+# hash remains valid for the rest of this workflow turn.
+$aiReviewPacketPath = Join-Path $OutputRoot 'ai-visual-review-request.json'
+if ($PrepareAiVisualReview -or -not [string]::IsNullOrWhiteSpace($AiVisualReviewResult)) {
+    $manifest | Add-Member -NotePropertyName aiVisualReviewPrepared -NotePropertyValue $true -Force
+    $manifest | Add-Member -NotePropertyName aiVisualReviewPacket -NotePropertyValue $aiReviewPacketPath -Force
+} else {
+    $manifest | Add-Member -NotePropertyName aiVisualReviewPrepared -NotePropertyValue $false -Force
+    $manifest | Add-Member -NotePropertyName aiVisualReviewPacket -NotePropertyValue $null -Force
+}
 
 if ($IncludeVisualAudit) {
     $currentStep = 5
@@ -2341,49 +2704,69 @@ if ($ApplyFormulaOmmlWhitelist) {
 }
 
 Write-Host "Step ${stepCount}/${stepCount}: write summary and manifest"
-$manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
-if ($PrepareAiVisualReview) {
-    $aiReviewPacketPath = Join-Path $OutputRoot 'ai-visual-review-request.json'
-    & (Join-Path $PSScriptRoot 'Export-PptxAiReviewPacket.ps1') -ManifestPath $manifestPath -OutputPath $aiReviewPacketPath | Out-Null
-    $manifest | Add-Member -NotePropertyName aiVisualReviewPrepared -NotePropertyValue $true -Force
-    $manifest | Add-Member -NotePropertyName aiVisualReviewPacket -NotePropertyValue $aiReviewPacketPath -Force
-    $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
-} else {
-    $manifest | Add-Member -NotePropertyName aiVisualReviewPrepared -NotePropertyValue $false -Force
-    $manifest | Add-Member -NotePropertyName aiVisualReviewPacket -NotePropertyValue $null -Force
-    $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+$currentManifest = $manifest
+$preparedManifest = if (Test-Path -LiteralPath $manifestPath) { Read-JsonObject -Path $manifestPath } else { $null }
+$preparedManifestMatchesCurrent = Test-PreparedManifestMatchesCurrent -Prepared $preparedManifest -Current $manifest
+$preparedPacket = if (Test-Path -LiteralPath $aiReviewPacketPath) { Read-JsonObject -Path $aiReviewPacketPath } else { $null }
+$preparedPacketMatchesCurrent = Test-PreparedPacketMatchesCurrent -Packet $preparedPacket -Current $manifest
+$reusePreparedManifest = (-not [string]::IsNullOrWhiteSpace($AiVisualReviewResult) -and
+    (Test-Path -LiteralPath $manifestPath) -and (Test-Path -LiteralPath $aiReviewPacketPath) -and $preparedManifestMatchesCurrent -and $preparedPacketMatchesCurrent)
+if (-not [string]::IsNullOrWhiteSpace($AiVisualReviewResult) -and
+    (Test-Path -LiteralPath $manifestPath) -and (Test-Path -LiteralPath $aiReviewPacketPath) -and
+    (-not $preparedManifestMatchesCurrent -or -not $preparedPacketMatchesCurrent)) {
+    throw 'The existing prepared AI packet does not match the current input/output or page-image evidence; generate a new packet and review result for this delivery.'
+}
+if (-not $reusePreparedManifest) {
+    Write-Utf8BomText -Text ($manifest | ConvertTo-Json -Depth 8) -Path $manifestPath
 }
 if (-not [string]::IsNullOrWhiteSpace($AiVisualReviewResult)) {
-    $aiReviewPacketPath = Join-Path $OutputRoot 'ai-visual-review-request.json'
     if (-not (Test-Path -LiteralPath $aiReviewPacketPath)) {
         & (Join-Path $PSScriptRoot 'Export-PptxAiReviewPacket.ps1') -ManifestPath $manifestPath -OutputPath $aiReviewPacketPath | Out-Null
-        $manifest | Add-Member -NotePropertyName aiVisualReviewPrepared -NotePropertyValue $true -Force
-        $manifest | Add-Member -NotePropertyName aiVisualReviewPacket -NotePropertyValue $aiReviewPacketPath -Force
-        $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
     }
     & (Join-Path $PSScriptRoot 'Import-PptxAiReviewResult.ps1') -ManifestPath $manifestPath -ResultPath $AiVisualReviewResult -PacketPath $aiReviewPacketPath | Out-Null
-    $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $importedManifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $manifest = $currentManifest
+    $manifest | Add-Member -NotePropertyName aiVisualReview -NotePropertyValue (Get-ObjectPropertyValue -Object $importedManifest -PropertyName 'aiVisualReview' -DefaultValue $null) -Force
 }
 $aiVisualReviewGate = Get-ObjectPropertyValue -Object $manifest -PropertyName 'aiVisualReview' -DefaultValue $null
 $invariantDeliveryBlocked = [bool]((Get-ObjectPropertyValue -Object $manifest -PropertyName 'invariantGate' -DefaultValue $null).status -eq 'Blocked')
 $aiDeliveryBlocked = [bool](Get-ObjectPropertyValue -Object $aiVisualReviewGate -PropertyName 'deliveryBlocked' -DefaultValue $false)
 $aiVisualReviewStatus = [string](Get-ObjectPropertyValue -Object $aiVisualReviewGate -PropertyName 'status' -DefaultValue 'NotPrepared')
+$deliveryAssessment = Get-DeliveryGateAssessment -Manifest $manifest -Mode $Mode -IncludeReviewArtifacts ([bool]$IncludeReviewArtifacts) -IncludeVisualAudit ([bool]$IncludeVisualAudit)
+$manifest | Add-Member -NotePropertyName deliveryFailures -NotePropertyValue $deliveryAssessment.blocked -Force
+$manifest | Add-Member -NotePropertyName deliveryReviews -NotePropertyValue $deliveryAssessment.review -Force
 $deliveryStatus = if ($invariantDeliveryBlocked) {
     'BlockedInvariantGate'
 } elseif ($aiDeliveryBlocked) {
     'BlockedAiVisualReview'
+} elseif ($deliveryAssessment.blocked.Count -gt 0) {
+    'BlockedDeliveryArtifacts'
 } elseif ($aiVisualReviewStatus -eq 'Passed') {
-    'Ready'
+    if ($deliveryAssessment.review.Count -gt 0) { 'Pending' } else { 'Ready' }
 } else {
     'Pending'
 }
-$manifest | Add-Member -NotePropertyName deliveryBlocked -NotePropertyValue ([bool]($invariantDeliveryBlocked -or $aiDeliveryBlocked)) -Force
+$manifest | Add-Member -NotePropertyName deliveryBlocked -NotePropertyValue ([bool]($invariantDeliveryBlocked -or $aiDeliveryBlocked -or $deliveryAssessment.blocked.Count -gt 0)) -Force
 $manifest | Add-Member -NotePropertyName deliveryStatus -NotePropertyValue $deliveryStatus -Force
-$manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+Write-Utf8BomText -Text ($manifest | ConvertTo-Json -Depth 8) -Path $manifestPath
 Write-Summary -Path $summaryPath -Mode $Mode -InputFullPath $inputFullPath -OutputRoot $OutputRoot -ReportPath $finalReportPath -ManifestPath $manifestPath -Files $files -IncludeReviewArtifacts ([bool]$IncludeReviewArtifacts) -Rows $rows -Manifest $manifest
 
-if ($invariantDeliveryBlocked -or $aiDeliveryBlocked) {
-    $blockReason = if ($invariantDeliveryBlocked) { 'Invariant gate is Blocked.' } else { "Host-AI visual review is Blocked. Result: $($aiVisualReviewGate.result)" }
+# With no supplied result, create the packet only after the final manifest
+# write. This keeps its manifestSha256 bound to the immutable final metadata.
+if ($PrepareAiVisualReview -and [string]::IsNullOrWhiteSpace($AiVisualReviewResult)) {
+    & (Join-Path $PSScriptRoot 'Export-PptxAiReviewPacket.ps1') -ManifestPath $manifestPath -OutputPath $aiReviewPacketPath | Out-Null
+}
+
+if ($invariantDeliveryBlocked -or $aiDeliveryBlocked -or $deliveryAssessment.blocked.Count -gt 0) {
+$blockReason = if ($invariantDeliveryBlocked) {
+    'Invariant gate is Blocked.'
+} else {
+    if ($aiDeliveryBlocked) {
+        "Host-AI visual review is Blocked. Result: {0}" -f (Get-ObjectPropertyValue -Object $aiVisualReviewGate -PropertyName 'result' -DefaultValue 'unknown')
+    } else {
+        "Required delivery artifact validation failed: {0}" -f (($deliveryAssessment.blocked) -join '; ')
+    }
+}
     throw "$blockReason Keep the generated files for investigation; do not deliver the normalized PPTX."
 }
 
@@ -2397,5 +2780,5 @@ if ($OpenGeneratedPptx) {
 }
 
 if ($OpenOutput) {
-    Invoke-Item -LiteralPath $OutputRoot
+    Open-PathForReview -Path $OutputRoot
 }

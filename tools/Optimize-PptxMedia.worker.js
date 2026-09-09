@@ -10,7 +10,10 @@ async function main() {
   const raw = fs.readFileSync(argsPath, 'utf8').replace(/^\uFEFF/, '');
   const args = JSON.parse(raw);
 
-  let pipeline = sharp(args.input, { failOn: 'none' }).rotate();
+  // Preserves EXIF orientation: pixels stay as encoded and the orientation tag
+  // is kept, so viewers render the optimized copy exactly like the original.
+  // .rotate() would auto-orient pixels and swap width/height instead.
+  let pipeline = sharp(args.input, { failOn: 'none' }).withMetadata();
   if (args.sharpen) {
     pipeline = pipeline.sharpen();
   }
@@ -33,5 +36,6 @@ async function main() {
 
 main().catch((error) => {
   process.stderr.write(error && error.stack ? error.stack : String(error));
-  process.exit(1);
+  // exitCode instead of exit(1) so pending stderr writes drain before exit.
+  process.exitCode = 1;
 });

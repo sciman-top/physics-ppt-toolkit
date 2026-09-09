@@ -86,77 +86,165 @@ function Get-FileSha256 {
 }
 
 function Get-SnapshotText {
-    param($Shape)
+    param($Shape, [ref]$ReadFailed)
     try {
         if ($Shape.TextFrame2.HasText -eq -1) { return [string]$Shape.TextFrame2.TextRange.Text }
-    } catch { }
+    } catch { $ReadFailed.Value = $true }
     return ''
 }
 
 function Get-SafeComProperty {
-    param($Object, [string]$Name, $Default = $null)
-    try { return $Object.$Name } catch { return $Default }
+    param($Object, [string]$Name, $Default = $null, [ref]$ReadFailed)
+    try {
+        if ($null -eq $Object) { throw "COM object is null while reading '$Name'." }
+        return $Object.$Name
+    } catch {
+        if ($PSBoundParameters.ContainsKey('ReadFailed')) { $ReadFailed.Value = $true }
+        return $Default
+    }
 }
 
 function Get-ShapeSnapshot {
     param($Shape)
+    $readFailed = $false
     $autoSize = $null
     $wordWrap = $null
-    try { $autoSize = [int]$Shape.TextFrame2.AutoSize } catch { }
-    try { $wordWrap = [int]$Shape.TextFrame2.WordWrap } catch { }
+    try { $autoSize = [int](Get-SafeComProperty $Shape.TextFrame2 'AutoSize' $null ([ref]$readFailed)) } catch { $readFailed = $true }
+    try { $wordWrap = [int](Get-SafeComProperty $Shape.TextFrame2 'WordWrap' $null ([ref]$readFailed)) } catch { $readFailed = $true }
+    # Picture crops are protected by the same invariant as geometry; capture
+    # them so a future write path that touches srcRect cannot slip the gate.
+    $cropLeft = $null
+    $cropRight = $null
+    $cropTop = $null
+    $cropBottom = $null
+    try {
+        if ([int](Get-SafeComProperty $Shape 'Type' 0 ([ref]$readFailed)) -eq 13) {
+            $cropLeft = [double](Get-SafeComProperty $Shape.PictureFormat 'CropLeft' $null ([ref]$readFailed))
+            $cropRight = [double](Get-SafeComProperty $Shape.PictureFormat 'CropRight' $null ([ref]$readFailed))
+            $cropTop = [double](Get-SafeComProperty $Shape.PictureFormat 'CropTop' $null ([ref]$readFailed))
+            $cropBottom = [double](Get-SafeComProperty $Shape.PictureFormat 'CropBottom' $null ([ref]$readFailed))
+        }
+    } catch { $readFailed = $true }
     [pscustomobject]@{
-        id = [int](Get-SafeComProperty $Shape 'Id' 0)
-        name = [string](Get-SafeComProperty $Shape 'Name' '')
-        type = [int](Get-SafeComProperty $Shape 'Type' 0)
-        left = [double](Get-SafeComProperty $Shape 'Left' 0)
-        top = [double](Get-SafeComProperty $Shape 'Top' 0)
-        width = [double](Get-SafeComProperty $Shape 'Width' 0)
-        height = [double](Get-SafeComProperty $Shape 'Height' 0)
-        rotation = [double](Get-SafeComProperty $Shape 'Rotation' 0)
-        zOrder = [int](Get-SafeComProperty $Shape 'ZOrderPosition' 0)
+        id = [int](Get-SafeComProperty $Shape 'Id' 0 ([ref]$readFailed))
+        name = [string](Get-SafeComProperty $Shape 'Name' '' ([ref]$readFailed))
+        type = [int](Get-SafeComProperty $Shape 'Type' 0 ([ref]$readFailed))
+        left = [double](Get-SafeComProperty $Shape 'Left' 0 ([ref]$readFailed))
+        top = [double](Get-SafeComProperty $Shape 'Top' 0 ([ref]$readFailed))
+        width = [double](Get-SafeComProperty $Shape 'Width' 0 ([ref]$readFailed))
+        height = [double](Get-SafeComProperty $Shape 'Height' 0 ([ref]$readFailed))
+        rotation = [double](Get-SafeComProperty $Shape 'Rotation' 0 ([ref]$readFailed))
+        zOrder = [int](Get-SafeComProperty $Shape 'ZOrderPosition' 0 ([ref]$readFailed))
         autoSize = $autoSize
         wordWrap = $wordWrap
-        text = Get-SnapshotText $Shape
+        cropLeft = $cropLeft
+        cropRight = $cropRight
+        cropTop = $cropTop
+        cropBottom = $cropBottom
+        text = Get-SnapshotText $Shape ([ref]$readFailed)
+        readStatus = if ($readFailed) { 'Unreadable' } else { 'Readable' }
+    }
+}
+
+function Add-ShapeSnapshotRows {
+    param(
+        $Shape,
+        [int]$ParentGroupId,
+        [System.Collections.Generic.List[object]]$Rows,
+        [ref]$UnreadableCount
+    )
+
+    try {
+        $row = Get-ShapeSnapshot $Shape
+        if ($ParentGroupId -gt 0) {
+            $row | Add-Member -NotePropertyName groupId -NotePropertyValue $ParentGroupId -Force
+        }
+        $Rows.Add($row) | Out-Null
+        if ([string]$row.readStatus -eq 'Unreadable') { $UnreadableCount.Value++ }
+
+        # Grouped shapes are skipped by all write paths, so recurse through the
+        # complete group tree to ensure nested child mutations remain visible to
+        # the invariant comparator.
+        if ([int]$row.type -eq 6) {
+            $groupId = [int]$row.id
+            foreach ($child in $Shape.GroupItems) {
+                Add-ShapeSnapshotRows -Shape $child -ParentGroupId $groupId -Rows $Rows -UnreadableCount $UnreadableCount
+            }
+        }
+    } catch {
+        $UnreadableCount.Value++
     }
 }
 
 function Get-SlideSnapshot {
     param($Slide, [int]$Index)
-    $shapeRows = @()
-    foreach ($shape in $Slide.Shapes) {
-        try { $shapeRows += Get-ShapeSnapshot $shape } catch { }
+    $shapeRows = New-Object System.Collections.Generic.List[object]
+    $unreadableShapeCount = 0
+    try {
+        foreach ($shape in $Slide.Shapes) {
+            Add-ShapeSnapshotRows -Shape $shape -ParentGroupId 0 -Rows $shapeRows -UnreadableCount ([ref]$unreadableShapeCount)
+        }
+    } catch {
+        $unreadableShapeCount++
     }
 
-    $animationRows = @()
+    $animationRows = New-Object System.Collections.Generic.List[object]
+    $animationReadFailed = $false
     try {
         $sequence = $Slide.TimeLine.MainSequence
-        for ($i = 1; $i -le $sequence.Count; $i++) {
+        $sequenceCount = [int]$sequence.Count
+        for ($i = 1; $i -le $sequenceCount; $i++) {
             $effect = $sequence.Item($i)
-            $animationRows += [pscustomobject]@{
-                index = $i
-                shapeId = [int](Get-SafeComProperty $effect.Shape 'Id' 0)
-                effectType = [int](Get-SafeComProperty $effect 'EffectType' 0)
-                triggerType = [int](Get-SafeComProperty $effect.Timing 'TriggerType' 0)
-                triggerShapeId = [int](Get-SafeComProperty (Get-SafeComProperty (Get-SafeComProperty $effect 'Timing' $null) 'TriggerShape' $null) 'Id' 0)
-                duration = [double](Get-SafeComProperty $effect.Timing 'Duration' 0)
-                triggerDelayTime = [double](Get-SafeComProperty $effect.Timing 'TriggerDelayTime' 0)
+            $timing = Get-SafeComProperty $effect 'Timing' $null ([ref]$animationReadFailed)
+            $effectShape = Get-SafeComProperty $effect 'Shape' $null ([ref]$animationReadFailed)
+            # TriggerShape is legitimately null for ordinary click/timing
+            # animations; its absence is not a read failure.
+            $triggerShape = Get-SafeComProperty $timing 'TriggerShape' $null
+            $triggerShapeId = 0
+            if ($null -ne $triggerShape) {
+                $triggerShapeId = [int](Get-SafeComProperty $triggerShape 'Id' 0 ([ref]$animationReadFailed))
             }
+            $animationRows.Add([pscustomobject]@{
+                index = $i
+                shapeId = [int](Get-SafeComProperty $effectShape 'Id' 0 ([ref]$animationReadFailed))
+                effectType = [int](Get-SafeComProperty $effect 'EffectType' 0 ([ref]$animationReadFailed))
+                triggerType = [int](Get-SafeComProperty $timing 'TriggerType' 0 ([ref]$animationReadFailed))
+                triggerShapeId = $triggerShapeId
+                # Rounded so SaveAs float jitter in timing fields cannot become a
+                # false blocker; millisecond precision is far below perception.
+                duration = [Math]::Round([double](Get-SafeComProperty $timing 'Duration' 0 ([ref]$animationReadFailed)), 3)
+                triggerDelayTime = [Math]::Round([double](Get-SafeComProperty $timing 'TriggerDelayTime' 0 ([ref]$animationReadFailed)), 3)
+            }) | Out-Null
         }
-    } catch { }
+    } catch {
+        $animationReadFailed = $true
+    }
+    if ($animationReadFailed) { $animationRows.Clear() }
 
+    $slideReadFailed = $false
+    $transitionReadFailed = $false
+    $transition = $null
+    try { $transition = $Slide.SlideShowTransition } catch { $transitionReadFailed = $true }
+    $transitionSnapshot = [pscustomobject]@{
+        advanceOnClick = Get-SafeComProperty $transition 'AdvanceOnClick' $null ([ref]$transitionReadFailed)
+        advanceOnTime = Get-SafeComProperty $transition 'AdvanceOnTime' $null ([ref]$transitionReadFailed)
+        advanceTime = Get-SafeComProperty $transition 'AdvanceTime' $null ([ref]$transitionReadFailed)
+        entryEffect = Get-SafeComProperty $transition 'EntryEffect' $null ([ref]$transitionReadFailed)
+        speed = Get-SafeComProperty $transition 'Speed' $null ([ref]$transitionReadFailed)
+    }
     [pscustomobject]@{
         index = $Index
-        slideId = [int](Get-SafeComProperty $Slide 'SlideID' 0)
-        hidden = [bool](Get-SafeComProperty $Slide 'Hidden' $false)
-        transition = [pscustomobject]@{
-            advanceOnClick = Get-SafeComProperty $Slide.SlideShowTransition 'AdvanceOnClick' $null
-            advanceOnTime = Get-SafeComProperty $Slide.SlideShowTransition 'AdvanceOnTime' $null
-            advanceTime = Get-SafeComProperty $Slide.SlideShowTransition 'AdvanceTime' $null
-            entryEffect = Get-SafeComProperty $Slide.SlideShowTransition 'EntryEffect' $null
-            speed = Get-SafeComProperty $Slide.SlideShowTransition 'Speed' $null
-        }
-        shapes = @($shapeRows)
-        animations = @($animationRows)
+        slideId = [int](Get-SafeComProperty $Slide 'SlideID' 0 ([ref]$slideReadFailed))
+        # PowerPoint exposes the hidden-slide flag on SlideShowTransition, not
+        # consistently as Slide.Hidden across desktop versions.
+        hidden = [bool](Get-SafeComProperty $transition 'Hidden' $false ([ref]$transitionReadFailed))
+        unreadableShapeCount = $unreadableShapeCount
+        slideReadStatus = if ($slideReadFailed) { 'Unreadable' } else { 'Readable' }
+        animationReadStatus = if ($animationReadFailed) { 'Unreadable' } else { 'Readable' }
+        transitionReadStatus = if ($transitionReadFailed) { 'Unreadable' } else { 'Readable' }
+        transition = $transitionSnapshot
+        shapes = @($shapeRows.ToArray())
+        animations = @($animationRows.ToArray())
     }
 }
 

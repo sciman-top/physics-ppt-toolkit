@@ -44,18 +44,8 @@ $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'PhysicsPpt.Common.ps1')
 
-function Convert-ToSafePathSegment {
-    param([string]$Name)
-    $safe = $Name
-    foreach ($ch in [System.IO.Path]::GetInvalidFileNameChars()) {
-        $safe = $safe.Replace([string]$ch, '_')
-    }
-    $safe = $safe -replace '\s+', '_'
-    $safe = $safe -replace '[^\p{L}\p{Nd}_-]+', '_'
-    $safe = $safe.Trim('_')
-    if ([string]::IsNullOrWhiteSpace($safe)) { return 'formula-image' }
-    return $safe
-}
+# Convert-ToSafePathSegment comes from PhysicsPpt.Common.ps1; the shared version
+# preserves dots (deliverable convention, e.g. "13.2内能") instead of collapsing them.
 
 function Convert-ToDouble {
     param([object]$Value)
@@ -196,21 +186,21 @@ function Export-PptxMediaEntry {
     if (-not (Test-Path -LiteralPath $DeckPath)) { return $false }
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $zip = $null
-    $input = $null
-    $output = $null
+    $entryStream = $null
+    $fileStream = $null
     try {
         $zip = [System.IO.Compression.ZipFile]::OpenRead($DeckPath)
         $entry = $zip.GetEntry($MediaPath)
         if ($null -eq $entry) { return $false }
         $outDir = Split-Path -Parent $OutputPath
         if (-not (Test-Path -LiteralPath $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
-        $input = $entry.Open()
-        $output = [System.IO.File]::Create($OutputPath)
-        $input.CopyTo($output)
+        $entryStream = $entry.Open()
+        $fileStream = [System.IO.File]::Create($OutputPath)
+        $entryStream.CopyTo($fileStream)
         return $true
     } finally {
-        if ($null -ne $output) { $output.Dispose() }
-        if ($null -ne $input) { $input.Dispose() }
+        if ($null -ne $fileStream) { $fileStream.Dispose() }
+        if ($null -ne $entryStream) { $entryStream.Dispose() }
         if ($null -ne $zip) { $zip.Dispose() }
     }
 }

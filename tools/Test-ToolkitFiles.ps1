@@ -78,10 +78,10 @@ $required = @(
     'tools\Test-PhysicsPptPolicy.ps1',
     'tools\Apply-PptxBrandVisualRefresh.ps1',
     'tools\generate_brand_assets.py',
-    'assetsrand\sciman-icon.png',
-    'assetsrand\sciman-icon-shadow.png',
-    'assetsrand\sciman-icon-watermark.png',
-    'assetsrandg-16x9.jpg',
+    'assets\brand\sciman-icon.png',
+    'assets\brand\sciman-icon-shadow.png',
+    'assets\brand\sciman-icon-watermark.png',
+    'assets\brand\bg-16x9.jpg',
     'vba\PhysicsPptCommon.bas',
     'vba\PhysicsPptNormalize.bas',
     'vba\PhysicsPptReportOnly.bas',
@@ -337,6 +337,7 @@ $syncChecks = @(
     @{ VbaConst = 'FONT_MATH';            JsonCat = 'fonts';     JsonKey = 'math';       Type = 'String' },
     @{ VbaConst = 'SIZE_TITLE';           JsonCat = 'fontSizes'; JsonKey = 'title1';     Type = 'Numeric' },
     @{ VbaConst = 'SIZE_BODY';            JsonCat = 'fontSizes'; JsonKey = 'body';       Type = 'Numeric' },
+    @{ VbaConst = 'SIZE_BODY_MAX';        JsonCat = 'fontSizes'; JsonKey = 'bodyMax';    Type = 'Numeric' },
     @{ VbaConst = 'SIZE_TABLE_HEADER';    JsonCat = 'fontSizes'; JsonKey = 'tableHeader'; Type = 'Numeric' },
     @{ VbaConst = 'SIZE_TABLE_BODY';      JsonCat = 'fontSizes'; JsonKey = 'tableBody';  Type = 'Numeric' },
     @{ VbaConst = 'SIZE_MINIMUM';         JsonCat = 'fontSizes'; JsonKey = 'minimum';    Type = 'Numeric' }
@@ -361,7 +362,35 @@ foreach ($check in $syncChecks) {
             throw "JSON <-> VBA mismatch: $($check.VbaConst) = $vbaRaw in VBA but config $($check.JsonCat).$($check.JsonKey) = $jsonVal"
         }
     } else {
-        Write-Warning "Sync check: could not find VBA constant $($check.VbaConst) in PhysicsPptCommon.bas"
+        # A renamed or deleted constant must fail the gate, not silently drop
+        # the sync guarantee.
+        throw "Sync check: could not find VBA constant $($check.VbaConst) in PhysicsPptCommon.bas"
+    }
+}
+
+# Highlight-box colors: the VBA constants carry precomputed RGB Long values
+# (R + G*256 + B*65536). Verify them against the configured hex values.
+$colorSyncChecks = @(
+    @{ VbaConst = 'COLOR_WHITE';         JsonKey = 'white' },
+    @{ VbaConst = 'COLOR_BODY';          JsonKey = 'body' },
+    @{ VbaConst = 'COLOR_YELLOW_FILL';   JsonKey = 'yellowFill' },
+    @{ VbaConst = 'COLOR_YELLOW_BORDER'; JsonKey = 'yellowBorder' }
+)
+foreach ($colorCheck in $colorSyncChecks) {
+    $jsonHex = [string]$config.colors.($colorCheck.JsonKey)
+    if ($jsonHex -notmatch '^#[0-9A-Fa-f]{6}$') { throw "Config color colors.$($colorCheck.JsonKey) is not a six-digit #RRGGBB value." }
+    $hexDigits = $jsonHex.TrimStart('#')
+    # VBA RGB Long layout: R + G*256 + B*65536 (e.g. #FFF2CC -> 0x00CCF2FF).
+    $expected = ([int]::Parse($hexDigits.Substring(0, 2), [System.Globalization.NumberStyles]::HexNumber)) +
+        ([int]::Parse($hexDigits.Substring(2, 2), [System.Globalization.NumberStyles]::HexNumber) * 256) +
+        ([int]::Parse($hexDigits.Substring(4, 2), [System.Globalization.NumberStyles]::HexNumber) * 65536)
+    $pattern = '(?m)Public\s+Const\s+' + [regex]::Escape($colorCheck.VbaConst) + '\s+As\s+Long\s*=\s*(\d+)'
+    if ($vbaContent -match $pattern) {
+        if ([int64]$Matches[1] -ne [int64]$expected) {
+            throw "JSON <-> VBA color mismatch: $($colorCheck.VbaConst) = $($Matches[1]) in VBA but config colors.$($colorCheck.JsonKey) ($jsonHex) = $expected"
+        }
+    } else {
+        throw "Sync check: could not find VBA color constant $($colorCheck.VbaConst) in PhysicsPptCommon.bas"
     }
 }
 
@@ -481,10 +510,24 @@ $aiImportContent = Get-Content -LiteralPath (Join-Path $root 'tools\Import-PptxA
 if ($aiImportContent -match 'PowerPoint\.Application|Presentations\.Open|SaveAs|Normalize-PhysicsPpt') { throw 'AI review import must remain read-only and must not access PPTX automation.' }
 
 $workflowContent = Get-Content -LiteralPath (Join-Path $root 'tools\Invoke-PhysicsPptWorkflow.ps1') -Raw -Encoding UTF8
-foreach ($requiredWorkflowMarker in @('BlockedMissingNormalizedPptx', 'deliveryBlocked', 'deliveryStatus', 'invariantDeliveryBlocked', "'Ready'", "'BlockedAiVisualReview'", 'Get-VersionedDeliveryRoot', 'VersionedDelivery')) {
+foreach ($requiredWorkflowMarker in @('BlockedMissingNormalizedPptx', 'deliveryBlocked', 'deliveryStatus', 'invariantDeliveryBlocked', "'Ready'", "'BlockedAiVisualReview'", 'New-VersionedDeliveryRoot', 'Get-ExistingPreparedAiEvidence', 'VersionedDelivery')) {
     if ($workflowContent -notmatch [regex]::Escape($requiredWorkflowMarker)) { throw "Workflow delivery gate marker is missing: $requiredWorkflowMarker" }
 }
-foreach ($requiredAiDeliveryMarker in @('deliveryStatus', "'Ready'", '交付状态')) {
+foreach ($requiredAiReuseMarker in @('Test-PreparedManifestMatchesCurrent', 'Test-PreparedPacketMatchesCurrent', 'preparedManifestMatchesCurrent', 'preparedPacketMatchesCurrent', 'existing prepared AI packet does not match')) {
+    if ($workflowContent -notmatch [regex]::Escape($requiredAiReuseMarker)) { throw "Workflow AI-reuse integrity marker is missing: $requiredAiReuseMarker" }
+}
+foreach ($requiredArtifactMarker in @('inputSha256', 'normalizedPptxSha256', 'pdfSha256', 'Test-PageImageSet', 'Test-UsablePageImage')) {
+    if ($workflowContent -notmatch [regex]::Escape($requiredArtifactMarker)) { throw "Workflow artifact-integrity marker is missing: $requiredArtifactMarker" }
+}
+$visualAuditContent = Get-Content -LiteralPath (Join-Path $root 'tools\Export-PptxVisualAudit.ps1') -Raw -Encoding UTF8
+foreach ($requiredVisualExportMarker in @('did not create a non-empty PDF', 'PdfExportedBySaveAsFallback', 'Get-ImageVisualMetrics', 'SlidePngExportFailed')) {
+    if ($visualAuditContent -notmatch [regex]::Escape($requiredVisualExportMarker)) { throw "Visual export-integrity marker is missing: $requiredVisualExportMarker" }
+}
+foreach ($requiredPngDecodeMarker in @('Get-BasicImageInfo -Path $target', 'undecodable PNG')) {
+    if ($normalizeContent -notmatch [regex]::Escape($requiredPngDecodeMarker)) { throw "Normalize PNG-integrity marker is missing: $requiredPngDecodeMarker" }
+    if ($workflowContent -notmatch [regex]::Escape($requiredPngDecodeMarker)) { throw "Workflow PNG-integrity marker is missing: $requiredPngDecodeMarker" }
+}
+foreach ($requiredAiDeliveryMarker in @('deliveryStatus', "'Ready'", 'preparedManifestSha256', '交付状态')) {
     if ($aiImportContent -notmatch [regex]::Escape($requiredAiDeliveryMarker)) { throw "AI import delivery marker is missing: $requiredAiDeliveryMarker" }
 }
 foreach ($summaryCheckMarker in @('configuredFontsMissingCount', 'slideAspectMismatchCount', '字体回退风险', '非 16:9')) {

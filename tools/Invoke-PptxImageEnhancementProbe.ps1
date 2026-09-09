@@ -149,7 +149,16 @@ function Invoke-Oxipng {
         [string]$OxipngPath
     )
     if ([string]::IsNullOrWhiteSpace($OxipngPath)) { return $false }
-    $raw = & $OxipngPath -o 4 --strip safe --out $OutputPath $InputPath 2>&1
+    # Lower EAP around the native call: on Windows PowerShell 5.1 stderr from
+    # `2>&1` would become a terminating NativeCommandError before $LASTEXITCODE
+    # could be judged.
+    $previousEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $raw = & $OxipngPath -o 4 --strip safe --out $OutputPath $InputPath 2>&1
+    } finally {
+        $ErrorActionPreference = $previousEap
+    }
     if ($LASTEXITCODE -ne 0) {
         Write-Warning ("oxipng failed: " + (($raw | Out-String).Trim()))
         return $false
@@ -238,6 +247,9 @@ $ToolRoot = if ([string]::IsNullOrWhiteSpace($ToolRoot)) { '' } else { [System.I
 if (-not (Test-Path -LiteralPath $CandidateCsv)) { throw "CandidateCsv not found: $CandidateCsv" }
 if (-not (Test-Path -LiteralPath $RealesrganPath)) { throw "RealesrganPath not found: $RealesrganPath" }
 if (-not (Test-Path -LiteralPath $OutputDir)) { New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null }
+# Probe output file names are fixed; clear stale copies from earlier runs so a
+# failed rerun cannot report paths that point at old artifacts.
+Get-ChildItem -LiteralPath $OutputDir -Filter 'probe-*' -File -ErrorAction SilentlyContinue | Remove-Item -Force
 
 $modelDir = Join-Path (Split-Path -Parent $RealesrganPath) 'models'
 if (-not (Test-Path -LiteralPath $modelDir)) { throw "Real-ESRGAN model directory not found: $modelDir" }

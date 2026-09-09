@@ -90,6 +90,54 @@ function Get-FormulaRuleValue {
     return [string]$property.Value
 }
 
+function Get-PhysicsPptFormulaWhitelist {
+    <#
+      Load the configured formula whitelist from the repo style config.
+      Write-back scripts must re-validate every candidate against this at
+      apply time; an empty result means nothing may be written.
+    #>
+    $configPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'config\physics-ppt-style.config.json'
+    if (-not (Test-Path -LiteralPath $configPath)) {
+        Write-Warning "Formula whitelist config not found: $configPath"
+        return @()
+    }
+    try {
+        $config = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($null -eq $config.formulaWhitelist) { return @() }
+        return @($config.formulaWhitelist)
+    } catch {
+        Write-Warning "Formula config could not be loaded: $($_.Exception.Message)"
+        return @()
+    }
+}
+
+function Test-FormulaWhitelistMatch {
+    <#
+      Case-sensitive whitelist resolution. Physics formulas carry meaning in
+      letter case (P=W/t is power, p=F/S is pressure), so this must never use
+      PowerShell's case-insensitive -match. Returns the matched rule or $null.
+    #>
+    param(
+        [string]$Text,
+        [AllowNull()]
+        [object[]]$Whitelist
+    )
+    $normalized = Get-NormalizedFormulaText -Text $Text
+    if ([string]::IsNullOrWhiteSpace($normalized)) { return $null }
+    if ($null -eq $Whitelist -or @($Whitelist).Count -eq 0) { return $null }
+    foreach ($rule in @($Whitelist)) {
+        $pattern = Get-FormulaRuleValue -Rule $rule -Name 'sourcePattern'
+        if ([string]::IsNullOrWhiteSpace($pattern)) { continue }
+        try {
+            if ($normalized -cmatch $pattern) { return $rule }
+        } catch {
+            Write-Warning "Invalid formula whitelist pattern skipped: $pattern"
+            continue
+        }
+    }
+    return $null
+}
+
 function Release-ComObjectSafe {
     param($ComObject)
     if ($null -eq $ComObject) { return }
@@ -100,6 +148,44 @@ function Release-ComObjectSafe {
     } catch {
         # Cleanup must not hide the processing error that led to this boundary.
     }
+}
+
+function Invoke-WithComRetry {
+    <#
+      Retry wrapper for Office COM operations that fail transiently while
+      another automation instance is starting or releasing (RPC_E_CALL_REJECTED
+      0x80010001, RPC_E_SERVERCALL_RETRYLATER 0x8001010A, VBA_E_IGNORE
+      0x800AC472) or when the target file is briefly locked (0x80070020).
+      MaxRetries is the total number of attempts.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$Action,
+        [ValidateRange(1, 10)]
+        [int]$MaxRetries = 3,
+        [int]$DelayMs = 500
+    )
+    $lastError = $null
+    for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
+        try {
+            return & $Action
+        } catch {
+            $lastError = $_
+            $hrHex = ''
+            try { $hrHex = ('{0:X8}' -f [int]$_.Exception.HResult) } catch { }
+            $message = ''
+            try { $message = [string]$_.Exception.Message } catch { }
+            $retryable = $hrHex -in @('80010001', '8001010A', '800AC472', '80070020')
+            if (-not $retryable) {
+                $retryable = $message -match '0x80010001|0x8001010A|0x800AC472|0x80070020|RPC_E_CALL_REJECTED'
+            }
+            if ($attempt -ge $MaxRetries -or -not $retryable) {
+                throw
+            }
+            Start-Sleep -Milliseconds $DelayMs
+        }
+    }
+    throw $lastError
 }
 
 function Get-PowerShellHostInfo {
@@ -224,6 +310,82 @@ function Get-BasicImageInfo {
             Bytes = [int64](Get-Item -LiteralPath $Path).Length
         }
     } finally {
+        if ($null -ne $image) { $image.Dispose() }
+    }
+}
+
+function Get-ImageDeltaPercent {
+    <#
+      Single shared metric for before/after page-image deltas. The thumbnail
+      resolution must stay identical everywhere this is used (the visual
+      confirmation gate compares against MaxAllowedVisualDeltaPercent with the
+      same resolution), so scripts must consume this helper instead of keeping
+      private copies.
+    #>
+    param(
+        [string]$BeforePath,
+        [string]$AfterPath
+    )
+
+    if ([string]::IsNullOrWhiteSpace($BeforePath) -or [string]::IsNullOrWhiteSpace($AfterPath)) { return $null }
+    if (-not (Test-Path -LiteralPath $BeforePath) -or -not (Test-Path -LiteralPath $AfterPath)) { return $null }
+
+    Add-Type -AssemblyName System.Drawing
+    $before = $null
+    $after = $null
+    $beforeThumb = $null
+    $afterThumb = $null
+    try {
+        $before = [System.Drawing.Image]::FromFile($BeforePath)
+        $after = [System.Drawing.Image]::FromFile($AfterPath)
+        $width = 160
+        $height = 90
+        $beforeThumb = New-Object System.Drawing.Bitmap $before, $width, $height
+        $afterThumb = New-Object System.Drawing.Bitmap $after, $width, $height
+        [double]$sum = 0
+        for ($y = 0; $y -lt $height; $y++) {
+            for ($x = 0; $x -lt $width; $x++) {
+                $a = $beforeThumb.GetPixel($x, $y)
+                $b = $afterThumb.GetPixel($x, $y)
+                $sum += ([Math]::Abs($a.R - $b.R) + [Math]::Abs($a.G - $b.G) + [Math]::Abs($a.B - $b.B)) / (3 * 255)
+            }
+        }
+        return [Math]::Round(($sum / ($width * $height)) * 100, 2)
+    } catch {
+        return $null
+    } finally {
+        if ($null -ne $afterThumb) { $afterThumb.Dispose() }
+        if ($null -ne $beforeThumb) { $beforeThumb.Dispose() }
+        if ($null -ne $after) { $after.Dispose() }
+        if ($null -ne $before) { $before.Dispose() }
+    }
+}
+
+function Get-ImageWhitePercent {
+    param([string]$ImagePath)
+
+    if ([string]::IsNullOrWhiteSpace($ImagePath) -or -not (Test-Path -LiteralPath $ImagePath)) { return $null }
+
+    Add-Type -AssemblyName System.Drawing
+    $image = $null
+    $thumb = $null
+    try {
+        $image = [System.Drawing.Image]::FromFile($ImagePath)
+        $width = 160
+        $height = 90
+        $thumb = New-Object System.Drawing.Bitmap $image, $width, $height
+        $white = 0
+        for ($y = 0; $y -lt $height; $y++) {
+            for ($x = 0; $x -lt $width; $x++) {
+                $pixel = $thumb.GetPixel($x, $y)
+                if ($pixel.R -ge 245 -and $pixel.G -ge 245 -and $pixel.B -ge 245) { $white++ }
+            }
+        }
+        return [Math]::Round(($white / ($width * $height)) * 100, 2)
+    } catch {
+        return $null
+    } finally {
+        if ($null -ne $thumb) { $thumb.Dispose() }
         if ($null -ne $image) { $image.Dispose() }
     }
 }
@@ -461,7 +623,57 @@ function Get-RelativePathSafeStem {
     }
 
     $parts.Add((Convert-ToSafePathSegment -Name ([System.IO.Path]::GetFileNameWithoutExtension($targetItem.Name)))) | Out-Null
-    return ($parts -join '__')
+    $baseStem = ($parts -join '__')
+
+    # Sanitizing names and removing extensions is not injective: e.g. a:b.pptx
+    # and a?b.pptm can collapse to the same artifact stem. Keep the readable
+    # relative stem, then append a stable short identity derived from the
+    # source-relative path and extension so PDFs, backups, page images, and
+    # recursive same-name decks cannot overwrite one another.
+    $identityKey = $targetFull.ToLowerInvariant()
+    if (-not $targetItem.PSIsContainer -and (Test-PathInsideDirectory -ChildPath $baseDir -ParentPath $rootFull)) {
+        $relativeFile = $targetFull.Substring($rootFull.Length).TrimStart([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+        $identityKey = ($relativeFile -replace '\\', '/').ToLowerInvariant()
+    }
+    $identityBytes = [System.Text.Encoding]::UTF8.GetBytes($identityKey)
+    $identityHasher = [System.Security.Cryptography.SHA256]::Create()
+    try { $identityHash = ($identityHasher.ComputeHash($identityBytes) | ForEach-Object { $_.ToString('x2') }) -join '' } finally { $identityHasher.Dispose() }
+    return ($baseStem + '__' + $identityHash.Substring(0, 10))
+}
+
+function Get-PresentationOrderSlidePartMap {
+    <#
+      Return a 1-based presentation-order map to physical slide part names.
+      The slideN.xml number is creation order and is not a reliable page number
+      after a user reorders slides in PowerPoint.
+    #>
+    param([System.IO.Compression.ZipArchive]$Zip)
+    $map = @{}
+    $presText = Read-ZipEntryText -Zip $Zip -EntryName 'ppt/presentation.xml'
+    $relsText = Read-ZipEntryText -Zip $Zip -EntryName 'ppt/_rels/presentation.xml.rels'
+    if ([string]::IsNullOrWhiteSpace($presText) -or [string]::IsNullOrWhiteSpace($relsText)) { return $map }
+
+    $presDoc = New-Object System.Xml.XmlDocument
+    $presDoc.PreserveWhitespace = $false
+    $presDoc.LoadXml($presText)
+    $relsDoc = New-Object System.Xml.XmlDocument
+    $relsDoc.PreserveWhitespace = $false
+    $relsDoc.LoadXml($relsText)
+    $relTargets = @{}
+    foreach ($rel in $relsDoc.GetElementsByTagName('Relationship')) {
+        $id = [string]$rel.GetAttribute('Id')
+        if (-not [string]::IsNullOrWhiteSpace($id)) { $relTargets[$id] = [string]$rel.GetAttribute('Target') }
+    }
+    $relationshipNamespace = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+    $index = 0
+    foreach ($sldId in $presDoc.SelectNodes('//*[local-name()="sldId"]')) {
+        $index++
+        $rid = [string]$sldId.GetAttribute('id', $relationshipNamespace)
+        if ([string]::IsNullOrWhiteSpace($rid) -or -not $relTargets.ContainsKey($rid)) { continue }
+        $target = Resolve-PackageTarget -SourcePart 'ppt/presentation.xml' -Target $relTargets[$rid]
+        if (-not [string]::IsNullOrWhiteSpace($target)) { $map[$index] = $target }
+    }
+    return $map
 }
 
 function Get-VideoPosterImageMap {
@@ -473,12 +685,11 @@ function Get-VideoPosterImageMap {
     $zip = $null
     try {
         $zip = [System.IO.Compression.ZipFile]::OpenRead($PptxFile.FullName)
-        $slideEntries = @($zip.Entries | Where-Object { $_.FullName -match '^ppt/slides/slide(\d+)\.xml$' })
-        foreach ($slideEntry in $slideEntries) {
-            if ($slideEntry.FullName -notmatch '^ppt/slides/slide(\d+)\.xml$') { continue }
-            $slideNumber = [int]$Matches[1]
-            $sourcePart = "ppt/slides/slide$slideNumber.xml"
-            $relEntryName = "ppt/slides/_rels/slide$slideNumber.xml.rels"
+        $slidePartMap = Get-PresentationOrderSlidePartMap -Zip $zip
+        foreach ($slidePair in @($slidePartMap.GetEnumerator() | Sort-Object Key)) {
+            $slideNumber = [int]$slidePair.Key
+            $sourcePart = [string]$slidePair.Value
+            $relEntryName = $sourcePart -replace '^ppt/slides/(slide\d+\.xml)$', 'ppt/slides/_rels/$1.rels'
 
             $relText = Read-ZipEntryText -Zip $zip -EntryName $relEntryName
             if ([string]::IsNullOrWhiteSpace($relText)) { continue }
@@ -495,7 +706,7 @@ function Get-VideoPosterImageMap {
                 $relTargets[$id] = Resolve-PackageTarget -SourcePart $sourcePart -Target ([string]$rel.GetAttribute('Target'))
             }
 
-            $slideText = Read-ZipEntryText -Zip $zip -EntryName $slideEntry.FullName
+            $slideText = Read-ZipEntryText -Zip $zip -EntryName $sourcePart
             if ([string]::IsNullOrWhiteSpace($slideText)) { continue }
             $slideXml = New-Object System.Xml.XmlDocument
             $slideXml.PreserveWhitespace = $false

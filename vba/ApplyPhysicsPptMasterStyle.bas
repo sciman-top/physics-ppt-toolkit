@@ -12,13 +12,19 @@ Public Sub ApplyPhysicsMasterStyleToActivePresentation()
     Dim master As Master
     Dim layout As CustomLayout
     Dim shp As Shape
+    Dim masterTextSize As Single
 
     Set pres = ActivePresentation
     Set master = pres.SlideMaster
 
     On Error Resume Next
-    master.Background.Fill.Solid
-    master.Background.Fill.ForeColor.RGB = RGB(255, 255, 255)
+    ' Opt-in like the slide background: config keeps SLIDE.BACKGROUND disabled by
+    ' default, so the master background is only whitened when the operator has
+    ' deliberately enabled background normalization in PhysicsPptCommon.
+    If NORMALIZE_SLIDE_BACKGROUND Then
+        master.Background.Fill.Solid
+        master.Background.Fill.ForeColor.RGB = COLOR_WHITE
+    End If
     On Error GoTo 0
 
     For Each shp In master.Shapes
@@ -40,12 +46,13 @@ Private Sub NormalizeMasterShape(ByVal shp As Shape)
         With shp.TextFrame2.TextRange.Font
             .Name = FONT_LATIN
             .NameFarEast = FONT_CN
-            .Fill.ForeColor.RGB = RGB(0, 0, 0)
+            .Fill.ForeColor.RGB = COLOR_BODY
+            masterTextSize = GetSafeMasterTextSize(shp)
             If shp.Top < 90 Then
-                .Size = SIZE_TITLE
+                If masterTextSize >= 0 And masterTextSize < SIZE_TITLE Then .Size = SIZE_TITLE
                 .Bold = msoTrue
             Else
-                .Size = SIZE_BODY
+                If masterTextSize > SIZE_BODY_MAX Then .Size = SIZE_BODY_MAX
                 .Bold = msoFalse
             End If
         End With
@@ -54,3 +61,12 @@ Private Sub NormalizeMasterShape(ByVal shp As Shape)
 Failed:
     Err.Clear
 End Sub
+
+Private Function GetSafeMasterTextSize(ByVal shp As Shape) As Single
+    Dim size As Single
+    If TryGetTextSize(shp, size) Then
+        GetSafeMasterTextSize = size
+    Else
+        GetSafeMasterTextSize = -1
+    End If
+End Function
