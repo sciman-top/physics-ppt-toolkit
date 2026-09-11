@@ -38,6 +38,9 @@ ICON_OUT = ASSET_DIR / "sciman-icon.png"
 ICON_SHADOW_OUT = ASSET_DIR / "sciman-icon-shadow.png"
 ICON_WATERMARK_OUT = ASSET_DIR / "sciman-icon-watermark.png"
 BG_OUT = ASSET_DIR / "bg-16x9.jpg"
+# Lossless PNG copy of the final background (with the composited icon) placed
+# next to the source samples for direct reuse in PowerPoint.
+BG_PNG_COPY_OUT = REPO_ROOT / "PPTX" / "背景图-成品.png"
 
 ICON_SIZE = 1024
 SHADOW_CANVAS = 1280
@@ -206,12 +209,12 @@ def main() -> int:
 
     if args.check:
         missing = [
-            p for p in (ICON_OUT, ICON_SHADOW_OUT, ICON_WATERMARK_OUT, BG_OUT)
+            p for p in (ICON_OUT, ICON_SHADOW_OUT, ICON_WATERMARK_OUT, BG_OUT, BG_PNG_COPY_OUT)
             if not p.is_file()
         ]
         for path in missing:
             print(f"MISSING {path}")
-        for path in (ICON_OUT, ICON_SHADOW_OUT, ICON_WATERMARK_OUT, BG_OUT):
+        for path in (ICON_OUT, ICON_SHADOW_OUT, ICON_WATERMARK_OUT, BG_OUT, BG_PNG_COPY_OUT):
             if path.is_file():
                 with Image.open(path) as image:
                     image.verify()
@@ -236,8 +239,9 @@ def main() -> int:
 
     background = make_background(icon_shadow)
     background.save(BG_OUT, quality=92, optimize=True)
+    background.save(BG_PNG_COPY_OUT, optimize=True)
 
-    for path in (ICON_OUT, ICON_SHADOW_OUT, ICON_WATERMARK_OUT, BG_OUT):
+    for path in (ICON_OUT, ICON_SHADOW_OUT, ICON_WATERMARK_OUT, BG_OUT, BG_PNG_COPY_OUT):
         print(f"{path} {path.stat().st_size} bytes sha256={sha256(path)}")
     return 0
 
