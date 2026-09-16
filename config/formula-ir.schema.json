@@ -1,0 +1,355 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://physics-ppt-toolkit.local/schema/formula-ir.schema.json",
+  "title": "Physics PPT FormulaIR",
+  "description": "Versioned, evidence-bound internal representation for formula detection and safe conversion.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "recordId",
+    "source",
+    "detection",
+    "canonical",
+    "decision",
+    "evidence"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "recordId": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "source": {
+      "$ref": "#/definitions/source"
+    },
+    "detection": {
+      "$ref": "#/definitions/detection"
+    },
+    "canonical": {
+      "$ref": "#/definitions/canonical"
+    },
+    "decision": {
+      "$ref": "#/definitions/decision"
+    },
+    "evidence": {
+      "$ref": "#/definitions/evidence"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "decision": {
+            "properties": {
+              "status": {
+                "enum": ["Converted", "FallbackSvg"]
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "canonical": {
+            "properties": {
+              "status": {
+                "const": "Resolved"
+              },
+              "source": {
+                "properties": {
+                  "kind": {
+                    "enum": ["Whitelist", "GoldSet", "MathTypeExport", "Manual"]
+                  }
+                },
+                "required": ["kind", "id", "sha256"]
+              },
+              "unicodeMath": {
+                "minLength": 1
+              },
+              "tex": {
+                "minLength": 1
+              },
+              "mathml": {
+                "minLength": 1
+              },
+              "tokens": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "decision": {
+            "properties": {
+              "status": {
+                "const": "Converted"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "decision": {
+            "properties": {
+              "targetCarrier": {
+                "const": "OfficeMath"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "decision": {
+            "properties": {
+              "status": {
+                "const": "FallbackSvg"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "decision": {
+            "properties": {
+              "targetCarrier": {
+                "const": "Svg"
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "definitions": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[A-Fa-f0-9]{64}$"
+    },
+    "carrier": {
+      "type": "string",
+      "enum": [
+        "OfficeMath",
+        "MathTypeOle",
+        "TextFormula",
+        "FormulaImage",
+        "MixedImage",
+        "GroupFormula",
+        "Unknown"
+      ]
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "filePath",
+        "fileSha256",
+        "sourceSha256",
+        "carrier",
+        "slide",
+        "shapeId",
+        "shapeName",
+        "bbox"
+      ],
+      "properties": {
+        "filePath": {
+          "type": "string",
+          "minLength": 1
+        },
+        "fileSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "sourceSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "carrier": {
+          "$ref": "#/definitions/carrier"
+        },
+        "slide": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "shapeId": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "shapeName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "bbox": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["left", "top", "width", "height"],
+          "properties": {
+            "left": { "type": "number" },
+            "top": { "type": "number" },
+            "width": { "type": "number", "minimum": 0 },
+            "height": { "type": "number", "minimum": 0 }
+          }
+        },
+        "previewPath": {
+          "type": ["string", "null"]
+        },
+        "shapeType": {
+          "type": "string"
+        },
+        "rotation": {
+          "type": "number"
+        },
+        "packagePart": {
+          "type": "string"
+        },
+        "mediaPaths": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "mediaSha256": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/sha256" }
+        },
+        "oleProgId": {
+          "type": "string"
+        },
+        "fallbackCarrier": {
+          "type": "string",
+          "enum": ["", "MathTypeOle"]
+        },
+        "originalText": {
+          "type": "string"
+        }
+      }
+    },
+    "detection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "status", "confidence", "rawCandidates"],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": ["OpenXml", "PowerPointCom", "RapidOcr", "FormulaModel", "MathTypeSource", "Manual"]
+        },
+        "status": {
+          "type": "string",
+          "enum": ["Observed", "Candidate", "Resolved", "Unavailable", "Failed"]
+        },
+        "confidence": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "rawCandidates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["value", "source"],
+            "properties": {
+              "value": { "type": "string" },
+              "source": { "type": "string" },
+              "score": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+              "warnings": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        }
+      }
+    },
+    "canonical": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "source", "unicodeMath", "tex", "mathml", "tokens"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["Resolved", "Unresolved"]
+        },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["Whitelist", "GoldSet", "MathTypeExport", "Manual", "None"]
+            },
+            "id": { "type": "string" },
+            "sha256": { "type": ["string", "null"] }
+          }
+        },
+        "unicodeMath": { "type": "string" },
+        "tex": { "type": "string" },
+        "mathml": { "type": "string" },
+        "tokens": {
+          "type": "array",
+          "items": { "type": "object" }
+        }
+      }
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "status", "targetCarrier", "reason"],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["ReportOnly", "CandidateOnly", "ReviewRequired", "ClosedWorldUnattended", "ExplicitMigration"]
+        },
+        "status": {
+          "type": "string",
+          "enum": ["NativeKept", "Converted", "FallbackSvg", "OriginalKept", "ManualRequired", "Skipped", "Failed"]
+        },
+        "targetCarrier": {
+          "type": "string",
+          "enum": ["OfficeMath", "Svg", "Original", "None"]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["paths", "rollbackPath"],
+      "properties": {
+        "paths": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "rollbackPath": {
+          "type": "string",
+          "minLength": 1
+        },
+        "validatorPaths": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "sourcePreviewSha256": {
+          "type": ["string", "null"],
+          "pattern": "^[A-Fa-f0-9]{64}$"
+        },
+        "targetPreviewSha256": {
+          "type": ["string", "null"],
+          "pattern": "^[A-Fa-f0-9]{64}$"
+        }
+      }
+    }
+  }
+}

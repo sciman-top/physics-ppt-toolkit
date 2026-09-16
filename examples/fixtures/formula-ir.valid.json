@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "recordId": "fixture-formula-001",
+  "source": {
+    "filePath": "fixture/lesson.pptx",
+    "fileSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "sourceSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "carrier": "TextFormula",
+    "slide": 1,
+    "shapeId": 2,
+    "shapeName": "正文",
+    "bbox": { "left": 10, "top": 20, "width": 200, "height": 50 },
+    "previewPath": "fixture/slide-001.png"
+  },
+  "detection": {
+    "method": "PowerPointCom",
+    "status": "Observed",
+    "confidence": 1,
+    "rawCandidates": [
+      { "value": "速度 v=s/t", "source": "TextFrame2" }
+    ]
+  },
+  "canonical": {
+    "status": "Unresolved",
+    "source": { "kind": "None", "id": "none", "sha256": null },
+    "unicodeMath": "",
+    "tex": "",
+    "mathml": "",
+    "tokens": []
+  },
+  "decision": {
+    "mode": "ReportOnly",
+    "status": "OriginalKept",
+    "targetCarrier": "None",
+    "reason": "Report-only fixture; no canonical source was authorized."
+  },
+  "evidence": {
+    "paths": ["fixture/report.json"],
+    "rollbackPath": "fixture/original.pptx"
+  }
+}

@@ -1,0 +1,117 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://physics-ppt-toolkit.local/schema/formula-evidence-manifest.schema.json",
+  "title": "Physics PPT formula evidence manifest",
+  "description": "A relative-path, hash-bound manifest for formula carrier analysis and safe conversion decisions.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "generatedAt", "policy", "input", "inventory", "counts", "records"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "generatedAt": { "type": "string", "minLength": 1 },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "writeBackAllowed", "canonicalSources", "pathBase", "hashAlgorithm"],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["ReportOnly", "CandidateOnly", "ReviewRequired", "ClosedWorldUnattended", "ExplicitMigration"]
+        },
+        "writeBackAllowed": { "const": false },
+        "canonicalSources": { "type": "array", "items": { "type": "string" } },
+        "pathBase": { "const": "manifest-directory" },
+        "hashAlgorithm": { "const": "SHA-256" },
+        "note": { "type": "string" }
+      }
+    },
+    "input": { "$ref": "#/definitions/fileEvidence" },
+    "inventory": { "$ref": "#/definitions/fileEvidence" },
+    "recognition": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["path", "sha256", "status"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/definitions/sha256" },
+        "status": { "type": "string", "enum": ["Attached", "NotAttached"] }
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["recordCount", "byCarrier", "byDecision"],
+      "properties": {
+        "recordCount": { "type": "integer", "minimum": 0 },
+        "byCarrier": { "type": "object" },
+        "byDecision": { "type": "object" }
+      }
+    },
+    "evidenceSetSha256": { "$ref": "#/definitions/sha256" },
+    "records": { "type": "array", "items": { "$ref": "#/definitions/record" } }
+  },
+  "definitions": {
+    "sha256": { "type": "string", "pattern": "^[A-Fa-f0-9]{64}$" },
+    "fileEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "bytes", "kind"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/definitions/sha256" },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "kind": { "type": "string", "minLength": 1 }
+      }
+    },
+    "packageEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "bytes", "kind", "sourceArchive"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/definitions/sha256" },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "kind": { "const": "PptxPackageEntry" },
+        "sourceArchive": { "type": "string", "minLength": 1 }
+      }
+    },
+    "record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["recordId", "source", "detection", "canonical", "decision", "evidence"],
+      "properties": {
+        "recordId": { "type": "string", "minLength": 1 },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256", "packagePart", "sourceSha256", "carrier", "slide", "shapeId", "shapeName", "bbox"],
+          "properties": {
+            "path": { "type": "string", "minLength": 1 },
+            "sha256": { "$ref": "#/definitions/sha256" },
+            "packagePart": { "type": "string", "minLength": 1 },
+            "sourceSha256": { "$ref": "#/definitions/sha256" },
+            "carrier": { "type": "string", "minLength": 1 },
+            "slide": { "type": "integer", "minimum": 1 },
+            "shapeId": { "type": ["integer", "null"], "minimum": 0 },
+            "shapeName": { "type": "string", "minLength": 1 },
+            "bbox": { "type": "object" }
+          }
+        },
+        "detection": { "type": "object" },
+        "canonical": { "type": "object" },
+        "decision": { "type": "object" },
+        "evidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["paths", "files", "packageEntries", "rollbackPath"],
+          "properties": {
+            "paths": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+            "files": { "type": "array", "items": { "$ref": "#/definitions/fileEvidence" } },
+            "packageEntries": { "type": "array", "items": { "$ref": "#/definitions/packageEntry" } },
+            "rollbackPath": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    }
+  }
+}

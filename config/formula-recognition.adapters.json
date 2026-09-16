@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "defaultAdapter": "None",
+  "writeBackAllowed": false,
+  "adapters": [
+    {
+      "id": "PP-FormulaNet_plus-M",
+      "family": "PaddleOCR",
+      "status": "OptionalNotInstalled",
+      "entrypoint": "FormulaRecognitionAdapter",
+      "outputContract": "formula-recognition-result.schema.json",
+      "licenseStatus": "VerifyBeforeInstall",
+      "modelSource": "OfficialPaddleOCRDocumentationRequired",
+      "disabledReason": "No local model/runtime evidence in the current workspace; do not download implicitly."
+    },
+    {
+      "id": "PP-FormulaNet_plus-L",
+      "family": "PaddleOCR",
+      "status": "OptionalNotInstalled",
+      "entrypoint": "FormulaRecognitionAdapter",
+      "outputContract": "formula-recognition-result.schema.json",
+      "licenseStatus": "VerifyBeforeInstall",
+      "modelSource": "OfficialPaddleOCRDocumentationRequired",
+      "disabledReason": "Large model resource cost and no local runtime evidence; return Unavailable until explicitly provisioned."
+    },
+    {
+      "id": "UniMERNet",
+      "family": "OpenDataLab",
+      "status": "OptionalNotInstalled",
+      "entrypoint": "FormulaRecognitionAdapter",
+      "outputContract": "formula-recognition-result.schema.json",
+      "licenseStatus": "VerifyBeforeInstall",
+      "modelSource": "OfficialUniMERNetRepositoryRequired",
+      "disabledReason": "No local model/runtime evidence; preserve image and use GoldSet only."
+    },
+    {
+      "id": "pix2tex",
+      "family": "LaTeX-OCR",
+      "status": "OptionalNotInstalled",
+      "entrypoint": "FormulaRecognitionAdapter",
+      "outputContract": "formula-recognition-result.schema.json",
+      "licenseStatus": "VerifyBeforeInstall",
+      "modelSource": "OfficialLaTeX-OCRRepositoryRequired",
+      "disabledReason": "Latin-oriented baseline is not trusted for Chinese subscripts/units without local benchmark evidence."
+    }
+  ]
+}

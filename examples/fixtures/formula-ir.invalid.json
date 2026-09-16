@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "recordId": "fixture-formula-invalid",
+  "source": {
+    "filePath": "fixture/lesson.pptx",
+    "sourceSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "carrier": "FormulaImage",
+    "slide": 1,
+    "shapeId": 2,
+    "shapeName": "图片 1",
+    "bbox": { "left": 0, "top": 0, "width": 100, "height": 50 }
+  },
+  "detection": {
+    "method": "FormulaModel",
+    "status": "Candidate",
+    "confidence": 0.4,
+    "rawCandidates": []
+  },
+  "canonical": {
+    "status": "Unresolved",
+    "source": { "kind": "None" },
+    "unicodeMath": "",
+    "tex": "",
+    "mathml": "",
+    "tokens": []
+  },
+  "decision": {
+    "mode": "CandidateOnly",
+    "status": "ManualRequired",
+    "targetCarrier": "None",
+    "reason": "Missing file hash and evidence path"
+  },
+  "evidence": {
+    "paths": [],
+    "rollbackPath": ""
+  }
+}

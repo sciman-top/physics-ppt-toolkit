@@ -1,0 +1,50 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://physics-ppt-toolkit.local/schema/formula-recognition-result.schema.json",
+  "title": "Physics PPT formula recognition adapter result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "adapter", "status", "writeBackAllowed", "input", "candidates", "diagnostics"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "adapter": { "type": "string", "minLength": 1 },
+    "status": { "enum": ["Passed", "Unavailable", "Failed", "InvalidOutput", "Timeout"] },
+    "writeBackAllowed": { "const": false },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "bytes"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "type": "string", "pattern": "^[A-Fa-f0-9]{64}$" },
+        "bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["raw", "score", "status"],
+        "properties": {
+          "raw": { "type": "string" },
+          "score": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+          "status": { "enum": ["Candidate", "Resolved", "Rejected"] },
+          "warnings": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runtime", "reason"],
+      "properties": {
+        "runtime": { "type": "string" },
+        "reason": { "type": "string", "minLength": 1 },
+        "elapsedMs": { "type": ["integer", "null"], "minimum": 0 },
+        "modelPath": { "type": ["string", "null"] },
+        "runnerPath": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

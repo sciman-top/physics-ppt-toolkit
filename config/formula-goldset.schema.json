@@ -1,0 +1,83 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://physics-ppt-toolkit.local/schema/formula-goldset.schema.json",
+  "title": "Physics PPT formula recognition gold set",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "generatedAt", "input", "policy", "counts", "evidenceSetSha256", "records"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "generatedAt": { "type": "string", "minLength": 1 },
+    "input": { "type": "object" },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["writeBackAllowed", "reviewRequirement", "canonicalSourceRule"],
+      "properties": {
+        "writeBackAllowed": { "const": false },
+        "reviewRequirement": { "const": "HumanReviewed" },
+        "canonicalSourceRule": { "type": "string", "minLength": 1 }
+      }
+    },
+    "counts": { "type": "object" },
+    "evidenceSetSha256": { "type": "string", "pattern": "^[A-Fa-f0-9]{64}$" },
+    "records": { "type": "array", "items": { "$ref": "#/definitions/record" } }
+  },
+  "definitions": {
+    "sha256": { "type": "string", "pattern": "^[A-Fa-f0-9]{64}$" },
+    "record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["goldSetId", "source", "groundTruth", "canonical", "evidence"],
+      "properties": {
+        "goldSetId": { "type": "string", "minLength": 1 },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["carrier", "slide", "sourceId", "sourceSha256"],
+          "properties": {
+            "carrier": { "type": "string", "minLength": 1 },
+            "slide": { "type": "integer", "minimum": 1 },
+            "sourceId": { "type": "string", "minLength": 1 },
+            "sourceSha256": { "$ref": "#/definitions/sha256" }
+          }
+        },
+        "groundTruth": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["class", "difficulty", "reviewStatus", "reviewBasis"],
+          "properties": {
+            "class": { "enum": ["Formula", "NonFormula", "MixedNonIsolatable"] },
+            "difficulty": { "enum": ["Easy", "Medium", "Hard", "NotApplicable"] },
+            "reviewStatus": { "const": "HumanReviewed" },
+            "reviewBasis": { "type": "string", "minLength": 1 },
+            "highRiskTokens": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "canonical": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "unicodeMath", "tex"],
+          "properties": {
+            "status": { "enum": ["Resolved", "NotApplicable"] },
+            "formulaName": { "type": "string" },
+            "unicodeMath": { "type": "string" },
+            "tex": { "type": "string" },
+            "tokens": { "type": "array" }
+          }
+        },
+        "evidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256", "kind", "rollbackPath"],
+          "properties": {
+            "path": { "type": "string", "minLength": 1 },
+            "sha256": { "$ref": "#/definitions/sha256" },
+            "kind": { "enum": ["FormulaCrop", "OleVisualEvidence", "OriginalMedia"] },
+            "rollbackPath": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    }
+  }
+}
