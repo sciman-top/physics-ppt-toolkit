@@ -74,6 +74,23 @@ if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'Export-FormulaOleCrop
 function Get-FileSha256 {
     param([string]$Path)
     if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) { return '' }
+    # Directories (e.g. the pre-rendered -PagesDir tree) are hashed as a
+    # deterministic sorted manifest of relative path + file hash, so any
+    # content change still changes the step signature.
+    if (Test-Path -LiteralPath $Path -PathType Container) {
+        $dirFullPath = [System.IO.Path]::GetFullPath($Path)
+        $entries = @(Get-ChildItem -LiteralPath $dirFullPath -Recurse -File | Sort-Object FullName | ForEach-Object {
+            $relative = $_.FullName.Substring($dirFullPath.Length).TrimStart('\', '/')
+            '{0}:{1}' -f $relative, (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        })
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes(($entries -join "`n"))
+            return ([System.BitConverter]::ToString($sha.ComputeHash($bytes)) -replace '-', '').ToLowerInvariant()
+        } finally {
+            $sha.Dispose()
+        }
+    }
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
@@ -117,13 +134,23 @@ if (-not [string]::IsNullOrWhiteSpace($DeliveryRoot)) {
     $stem = [System.IO.Path]::GetFileNameWithoutExtension($inputFullPath)
     if (-not (Test-Path -LiteralPath $reportsRoot)) { New-Item -ItemType Directory -Path $reportsRoot -Force | Out-Null }
     $maxVersion = 0
+    $resumableVersion = 0
     foreach ($dir in @(Get-ChildItem -LiteralPath $reportsRoot -Directory -ErrorAction SilentlyContinue)) {
         if ($dir.Name -match ('^' + [regex]::Escape($stem) + '_v(\d+)$')) {
             $maxVersion = [Math]::Max($maxVersion, [int]$Matches[1])
+            # -Resume must target the latest existing batch manifest; a fresh
+            # max+1 dir would never contain the manifest to resume from.
+            if ($Resume -and (Test-Path -LiteralPath (Get-BatchManifestPath -Root $dir.FullName))) {
+                $resumableVersion = [Math]::Max($resumableVersion, [int]$Matches[1])
+            }
         }
     }
-    $deliveryFullPath = Join-Path $reportsRoot ('{0}_v{1}' -f $stem, ($maxVersion + 1))
-    New-Item -ItemType Directory -Path $deliveryFullPath | Out-Null
+    if ($resumableVersion -gt 0) {
+        $deliveryFullPath = Join-Path $reportsRoot ('{0}_v{1}' -f $stem, $resumableVersion)
+    } else {
+        $deliveryFullPath = Join-Path $reportsRoot ('{0}_v{1}' -f $stem, ($maxVersion + 1))
+        New-Item -ItemType Directory -Path $deliveryFullPath | Out-Null
+    }
 }
 $reportDir = Join-Path $deliveryFullPath '00_检查报告'
 $deliveryDir = Join-Path $deliveryFullPath '01_交付物'
@@ -273,21 +300,32 @@ try {
     }
     Write-Utf8BomText -Text ($manifest | ConvertTo-Json -Depth 10) -Path $manifestPath
     Write-Output ("Batch passed: {0}" -f $deliveryFullPath)
-    Write-Output ("Output: {0} (replaced={1}; refused={2})" -f $outputPptx, $manifest.applySummary.replaced.Value, $manifest.applySummary.refused.Value)
+    Write-Output ("Output: {0} (replaced={1}; refused={2})" -f $outputPptx, $manifest.applySummary.replaced, $manifest.applySummary.refused)
 } catch {
-    $manifest = [ordered]@{
-        schemaVersion = 1
-        generatedAt = Get-Date -Format 'yyyy-MM-dd hh:mm:ss'
-        status = 'Failed'
-        error = $_.Exception.Message
-        input = [ordered]@{ path = $inputFullPath; sha256 = $inputSha256 }
-        goldSet = [ordered]@{ path = $goldSetPath; sha256 = $goldSetSha256 }
-        deliveryRoot = $deliveryFullPath
-        steps = $batchSteps.ToArray()
-        writeBackAllowed = $false
-        note = 'Batch failed; completed prefix recorded. Delete the delivery dir to rerun from scratch or use -Resume.'
+    # A failure after the Passed manifest was written (e.g. a reporting crash)
+    # must not clobber the completed batch record with a Failed status.
+    $completedManifestOnDisk = $false
+    if (Test-Path -LiteralPath $manifestPath) {
+        try {
+            $existingManifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $completedManifestOnDisk = ([string]$existingManifest.status -eq 'Passed')
+        } catch { $completedManifestOnDisk = $false }
     }
-    Write-Utf8BomText -Text ($manifest | ConvertTo-Json -Depth 10) -Path $manifestPath
+    if (-not $completedManifestOnDisk) {
+        $manifest = [ordered]@{
+            schemaVersion = 1
+            generatedAt = Get-Date -Format 'yyyy-MM-dd hh:mm:ss'
+            status = 'Failed'
+            error = $_.Exception.Message
+            input = [ordered]@{ path = $inputFullPath; sha256 = $inputSha256 }
+            goldSet = [ordered]@{ path = $goldSetPath; sha256 = $goldSetSha256 }
+            deliveryRoot = $deliveryFullPath
+            steps = $batchSteps.ToArray()
+            writeBackAllowed = $false
+            note = 'Batch failed; completed prefix recorded. Delete the delivery dir to rerun from scratch or use -Resume.'
+        }
+        Write-Utf8BomText -Text ($manifest | ConvertTo-Json -Depth 10) -Path $manifestPath
+    }
     Write-Output ("Batch FAILED at: {0}" -f $_.Exception.Message)
     throw
 }

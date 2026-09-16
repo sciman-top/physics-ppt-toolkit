@@ -290,7 +290,8 @@ if (@($parserParseErrors).Count -gt 0) { throw "OMML candidate exporter failed t
 $requiredParserFunctions = @(
     'Convert-SuperscriptSubscriptCharsToAscii', 'Get-FormulaTokens', 'Parse-FormulaAtom',
     'Parse-FormulaSequence', 'Parse-FormulaExpression', 'Parse-FormulaAst',
-    'Get-FormulaTokenRole', 'Convert-FormulaTokenToTex', 'Convert-AstToUnicodeMath'
+    'Get-FormulaTokenRole', 'Convert-FormulaTokenToTex', 'Convert-AstToUnicodeMath',
+    'New-OmmlFragment', 'New-Element', 'Add-TextElement', 'Add-OmmlRun', 'New-RunProperties', 'Add-OmmlNode'
 )
 $parserFunctions = @{}
 foreach ($functionAst in @($ommlCandidatesParserAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true))) {
@@ -329,6 +330,22 @@ foreach ($invalidCase in @($unicodeMathInvalid.cases)) {
     try { $null = Test-UnicodeMathRoundTrip -Text ([string]$invalidCase.unicodeMath) } catch { $threw = $true }
     if (-not $threw) { throw "UnicodeMath invalid case was accepted: $($invalidCase.name)" }
 }
+
+# Structural OMML regression guard: superscript groups must render as raised
+# scripts without visible parentheses, and the escaped linear slash must stay
+# a division run instead of becoming a stacked fraction.
+$script:NsA14 = 'http://schemas.microsoft.com/office/drawing/2010/main'
+$script:NsA = 'http://schemas.openxmlformats.org/drawingml/2006/main'
+$script:NsM = 'http://schemas.openxmlformats.org/officeDocument/2006/math'
+$script:FormulaColorHex = '000000'
+$script:FormulaSizeHundredths = 3800
+$script:FormulaEastAsianFontName = '宋体'
+$supFragmentXml = (New-OmmlFragment -UnicodeMath '10^(-3)').OuterXml
+if ($supFragmentXml -notmatch ':sSup') { throw 'Superscript OMML regression: 10^(-3) no longer produces m:sSup.' }
+if ($supFragmentXml -match '\(|\)') { throw 'Superscript OMML regression: parentheses leaked into the m:sup script runs.' }
+$slashFragmentXml = (New-OmmlFragment -UnicodeMath 'J\/(kg·℃)').OuterXml
+if ($slashFragmentXml -match '<m:f>') { throw 'Linear slash OMML regression: J\/(kg·℃) produced a stacked fraction.' }
+if ($slashFragmentXml -notmatch '>/<') { throw 'Linear slash OMML regression: escaped slash run text is missing.' }
 
 # --- 2c. Formula recognition gold set / adapter transport contract ---
 $goldSetSchemaPath = Join-Path $root 'config\formula-goldset.schema.json'

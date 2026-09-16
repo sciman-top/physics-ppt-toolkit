@@ -125,6 +125,14 @@ function Get-FormulaTokens {
             continue
         }
 
+        if ([string]$ch -eq '\' -and $i + 1 -lt $Text.Length -and [string]$Text[$i + 1] -eq '/') {
+            # Escaped linear slash: unit notation like J\/(kg·℃) must stay a
+            # linear division run instead of becoming a stacked fraction.
+            $tokens.Add([pscustomobject]@{ Kind = 'Char'; Text = '\/' }) | Out-Null
+            $i += 2
+            continue
+        }
+
         $tokens.Add([pscustomobject]@{ Kind = 'Char'; Text = [string]$ch }) | Out-Null
         $i++
     }
@@ -189,7 +197,7 @@ function Parse-FormulaAtom {
         $Index.Value++
         $node = [pscustomobject]@{ Kind = 'Group'; Inner = $inner }
     } else {
-        if ([string]$token.Text -in @(')', '=', '/', '_', '^')) {
+        if ([string]$token.Text -in @(')', '=', '/', '_', '^', '\/')) {
             throw "Unexpected formula token '$($token.Text)'."
         }
         $Index.Value++
@@ -203,6 +211,11 @@ function Parse-FormulaAtom {
             throw "Sub/superscript must not begin with operator '$($Tokens[$Index.Value].Text)'; parenthesize it (10^(-3)) instead."
         }
         $scriptNode = Parse-FormulaAtom -Tokens $Tokens -Index $Index
+        # A parenthesized script group is grouping syntax, not visible
+        # content: 10^(-3) must render as a raised -3 without parentheses.
+        # The canonical UnicodeMath emitter re-adds ^(...) so round-trips
+        # stay stable; only the structural renderers see the bare script.
+        if ($scriptNode.Kind -eq 'Group') { $scriptNode = $scriptNode.Inner }
         if ($marker -eq '_') {
             $node = [pscustomobject]@{ Kind = 'Subscript'; Base = $node; Script = $scriptNode }
         } else {
@@ -221,6 +234,12 @@ function Parse-FormulaSequence {
     while ($Index.Value -lt $Tokens.Count) {
         $text = [string]$Tokens[$Index.Value].Text
         if ($text -in @('=', ')')) { break }
+        if ($text -eq '\/') {
+            # Linear slash escape: an ordinary division run, never a fraction.
+            $items.Add([pscustomobject]@{ Kind = 'Token'; Text = '\/'; TokenKind = 'Operator' }) | Out-Null
+            $Index.Value++
+            continue
+        }
         if ($text -eq '/') {
             if ($items.Count -eq 0) { throw 'Fraction has no numerator.' }
             $Index.Value++
@@ -297,7 +316,7 @@ function Get-FormulaTokenRole {
         if ($Token -in @('J', 'kg', 'Pa', 'N', 'W', 'Hz', '℃')) { return 'Unit' }
         return 'Variable'
     }
-    if ($Token -in @('+', '-', '−', '×', '⋅', '∙', '*', '=', ',', '.', '(', ')', '<', '>', '≤', '≥')) { return 'Operator' }
+    if ($Token -in @('+', '-', '−', '×', '⋅', '∙', '*', '=', ',', '.', '(', ')', '<', '>', '≤', '≥', '\/')) { return 'Operator' }
     return 'Text'
 }
 
@@ -306,6 +325,8 @@ function Convert-AstToFormulaIrToken {
     switch ([string]$Node.Kind) {
         'Token' {
             $text = [string]$Node.Text
+            # The escaped linear slash renders as a plain division slash.
+            if ($text -eq '\/') { $text = '/' }
             $role = Get-FormulaTokenRole -Token $text
             # In the controlled physics grammar, adjacent Latin letters are
             # implicit multiplication (cm, qm, ...), not one opaque symbol.
@@ -402,10 +423,19 @@ function Convert-AstToUnicodeMath {
             return ((Convert-AstToUnicodeMath -Node $Node.Numerator) + '/' + (Convert-AstToUnicodeMath -Node $Node.Denominator))
         }
         'Subscript' {
-            return ((Convert-AstToUnicodeMath -Node $Node.Base) + '_' + (Convert-AstToUnicodeMath -Node $Node.Script))
+            $scriptText = Convert-AstToUnicodeMath -Node $Node.Script
+            if ($Node.Script.Kind -eq 'Token' -and $scriptText.Length -eq 1) {
+                return ((Convert-AstToUnicodeMath -Node $Node.Base) + '_' + $scriptText)
+            }
+            # Multi-token or multi-character scripts need the parentheses to
+            # re-parse unambiguously (R_(12), Q_(吸放)).
+            return ((Convert-AstToUnicodeMath -Node $Node.Base) + '_(' + $scriptText + ')')
         }
         'Superscript' {
-            return ((Convert-AstToUnicodeMath -Node $Node.Base) + '^' + (Convert-AstToUnicodeMath -Node $Node.Script))
+            # The script group is unwrapped at parse time, so the canonical
+            # form always re-parenthesizes (10^(3), 10^(-3)); a bare 10^-3
+            # would not re-parse and is banned by the writing rules.
+            return ((Convert-AstToUnicodeMath -Node $Node.Base) + '^(' + (Convert-AstToUnicodeMath -Node $Node.Script) + ')')
         }
         default { throw "Unsupported FormulaIR UnicodeMath node kind: $($Node.Kind)" }
     }
@@ -417,6 +447,7 @@ function Convert-FormulaTokenToTex {
         [string]$Role
     )
     switch ($Text) {
+        '\/' { return '/' }
         'Δ' { return '\Delta' }
         'η' { return '\eta' }
         'θ' { return '\theta' }
@@ -525,6 +556,7 @@ function Add-OmmlNode {
     switch ([string]$Node.Kind) {
         'Token' {
             $tokenText = [string]$Node.Text
+            if ($tokenText -eq '\/') { $tokenText = '/' }
             $tokenRole = Get-FormulaTokenRole -Token $tokenText
             if ($Node.TokenKind -eq 'Word' -and $tokenText.Length -gt 1 -and $tokenRole -ne 'Unit') {
                 foreach ($part in $tokenText.ToCharArray()) {
@@ -624,6 +656,7 @@ function Add-MathMlNode {
     switch ([string]$Node.Kind) {
         'Token' {
             $tokenText = [string]$Node.Text
+            if ($tokenText -eq '\/') { $tokenText = '/' }
             $role = Get-FormulaTokenRole -Token $tokenText
             if ($Node.TokenKind -eq 'Word' -and $tokenText.Length -gt 1 -and $role -ne 'Unit') {
                 foreach ($part in $tokenText.ToCharArray()) {

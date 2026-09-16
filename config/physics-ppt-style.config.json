@@ -354,6 +354,41 @@
       "targetUnicodeMath": "cmΔt",
       "targetTex": "cm\\Delta t",
       "note": "cmΔt 乘积式 OLE；来源：14.1燃料 OLE 清单 slide6。"
+    },
+    {
+      "name": "放热代入链460J",
+      "sourcePattern": "^Q放=cmΔt=0\\.46×10³J/\\(kg·℃\\)×2×10⁻³kg×500℃=460J$",
+      "targetUnicodeMath": "Q_放=cmΔt=0.46×10^(3)J\\/(kg·℃)×2×10^(-3)kg×500℃=460J",
+      "targetTex": "Q_{\\text{放}}=cm\\Delta t=0.46\\times10^{3}\\text{J}/(\\text{kg}\\cdot℃)\\times2\\times10^{-3}\\text{kg}\\times500℃=460\\text{J}",
+      "note": "铝块放热数值代入链；来源：13.3 v17 遗留 OLE 清单 idx6（slide13 裁剪图，judge 定稿）。"
+    },
+    {
+      "name": "温差代入链500℃",
+      "sourcePattern": "^Δt=520℃[-−]20℃=500℃$",
+      "targetUnicodeMath": "Δt=520℃-20℃=500℃",
+      "targetTex": "\\Delta t=520℃-20℃=500℃",
+      "note": "温差数值代入链；来源：13.3 v17 遗留 OLE 清单 idx7（slide13 裁剪图，judge 定稿）。"
+    },
+    {
+      "name": "质量代入链2g",
+      "sourcePattern": "^m=2g=2×10⁻³kg$",
+      "targetUnicodeMath": "m=2g=2×10^(-3)kg",
+      "targetTex": "m=2g=2\\times10^{-3}\\text{kg}",
+      "note": "质量单位变换单位代入链；来源：13.3 v17 遗留 OLE 清单 idx8（slide13 裁剪图，judge 定稿）。"
+    },
+    {
+      "name": "吸热代入链4.2×10⁶J",
+      "sourcePattern": "^Q吸=cmΔt=4\\.2×10³J/\\(kg[·•]℃\\)×50kg×20℃=4\\.2×10⁶J$",
+      "targetUnicodeMath": "Q_吸=cmΔt=4.2×10^(3)J\\/(kg·℃)×50kg×20℃=4.2×10^(6)J",
+      "targetTex": "Q_{\\text{吸}}=cm\\Delta t=4.2\\times10^{3}\\text{J}/(\\text{kg}\\cdot℃)\\times50\\text{kg}\\times20℃=4.2\\times10^{6}\\text{J}",
+      "note": "水吸热数值代入链；来源：13.3 v17 遗留 OLE 清单 idx16（slide29 裁剪图，judge 定稿；源图乘点为 •，canonical 归一为 ·）。"
+    },
+    {
+      "name": "温差代入链20℃",
+      "sourcePattern": "^Δt=40℃[-−]20℃=20℃$",
+      "targetUnicodeMath": "Δt=40℃-20℃=20℃",
+      "targetTex": "\\Delta t=40℃-20℃=20℃",
+      "note": "温差数值代入链；来源：13.3 v17 遗留 OLE 清单 idx17（slide29 裁剪图，judge 定稿）。"
     }
   ],
   "rules": {

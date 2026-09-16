@@ -50,6 +50,18 @@
       "name": "work-formula-implicit-multiplication",
       "unicodeMath": "W=Fs",
       "expectedCanonicalUnicodeMath": "W=Fs"
+    },
+    {
+      "name": "linear-unit-slash-escape",
+      "unicodeMath": "J\\/(kg·℃)",
+      "expectedCanonicalUnicodeMath": "J\\/(kg·℃)",
+      "note": "线性除号转义：单位斜杠保持线性除号，不产生上下分式。"
+    },
+    {
+      "name": "numeric-chain-linear-unit-slash",
+      "unicodeMath": "Q_吸=cmΔt=4.2×10^(3)J\\/(kg·℃)×50kg×20℃=4.2×10^(6)J",
+      "expectedCanonicalUnicodeMath": "Q_吸=cmΔt=4.2×10^(3)J\\/(kg·℃)×50kg×20℃=4.2×10^(6)J",
+      "note": "代入链端到端：线性单位斜杠 + 括号指数 + 多重等号。"
     }
   ]
 }

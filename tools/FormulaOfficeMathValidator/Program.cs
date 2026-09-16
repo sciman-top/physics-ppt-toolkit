@@ -9,12 +9,13 @@ const string Drawing2010Namespace = "http://schemas.microsoft.com/office/drawing
 
 if (args.Length == 0 || args.Contains("--help", StringComparer.OrdinalIgnoreCase))
 {
-    Console.Error.WriteLine("Usage: FormulaOfficeMathValidator <pptx> [--max-errors 20]");
+    Console.Error.WriteLine("Usage: FormulaOfficeMathValidator <pptx> [--max-errors 20] [--json <path>]");
     return args.Length == 0 ? 2 : 0;
 }
 
 var pptxPath = args[0];
 var maxErrors = 20;
+string? jsonOutputPath = null;
 for (var i = 1; i < args.Length - 1; i++)
 {
     if (args[i].Equals("--max-errors", StringComparison.OrdinalIgnoreCase) &&
@@ -22,6 +23,19 @@ for (var i = 1; i < args.Length - 1; i++)
         parsed > 0)
     {
         maxErrors = parsed;
+    }
+    else if (args[i].Equals("--json", StringComparison.OrdinalIgnoreCase))
+    {
+        jsonOutputPath = args[i + 1];
+    }
+}
+
+void WriteValidatorJson(string json)
+{
+    Console.WriteLine(json);
+    if (!string.IsNullOrEmpty(jsonOutputPath))
+    {
+        File.WriteAllText(jsonOutputPath, json);
     }
 }
 
@@ -51,10 +65,14 @@ catch (Exception ex)
         0,
         new List<ValidationIssue>());
     Console.WriteLine(JsonSerializer.Serialize(failure, new JsonSerializerOptions { WriteIndented = true }));
+    if (!string.IsNullOrEmpty(jsonOutputPath))
+    {
+        File.WriteAllText(jsonOutputPath, JsonSerializer.Serialize(failure, new JsonSerializerOptions { WriteIndented = true }));
+    }
     return 1;
 }
 var json = JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true });
-Console.WriteLine(json);
+WriteValidatorJson(json);
 return result.OpenXmlErrorCount == 0 ? 0 : 1;
 
 static ValidationResult ValidatePresentation(string pptxPath, int maxErrors)
