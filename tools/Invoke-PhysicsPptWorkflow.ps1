@@ -14,15 +14,14 @@
   Path to a .pptx/.pptm file or a directory containing PPT files.
 
 .PARAMETER OutputRoot
-  Optional output root. Defaults to a source-identity directory under reports;
-  file inputs include the extension and generated artifacts include a stable
-  short identity suffix.
+  Advanced escape hatch. Must point OUTSIDE reports/ — reports/ is reserved
+  for versioned deliveries (<deck>_v<N>) and the toolkit refuses ad-hoc
+  output roots inside it. Omit this switch for normal deliveries.
 
 .PARAMETER VersionedDelivery
-  Resolve the output root to the next unused reports/<source>_v<N> folder so each
-  delivered generation keeps its own directory; the highest _vN is the newest.
-  An unversioned delivery folder counts as generation 1, so the first versioned
-  delivery becomes _v2. Cannot be combined with -OutputRoot.
+  Accepted for compatibility; versioned delivery (reports/<source>_v<N>, the
+  highest _vN is the newest) is always the default now. Cannot be combined
+  with -OutputRoot.
 
 .PARAMETER Mode
   CheckOnly: only generate report.
@@ -72,7 +71,12 @@
   the source presentation's click behavior.
 
 .PARAMETER FormulaOmmlMaxItems
-  Maximum formula whitelist rows to convert per run.
+Maximum formula whitelist rows to convert per run.
+
+.PARAMETER FormulaProcessingMode
+Formula processing policy recorded in the manifest.  The configured default
+is ReportOnly.  Passing -ApplyFormulaOmmlWhitelist without an explicit mode
+selects ExplicitMigration for backward-compatible explicit write-back.
 #>
 [CmdletBinding()]
 param(
@@ -99,6 +103,8 @@ param(
     [switch]$ApplyVisualAuditFixes,
     [switch]$ApplyFormulaOmmlWhitelist,
     [switch]$FormulaOmmlVisualAudit,
+    [ValidateSet('ReportOnly', 'CandidateOnly', 'ReviewRequired', 'ClosedWorldUnattended', 'ExplicitMigration')]
+    [string]$FormulaProcessingMode = '',
     [switch]$SkipPreflightReport,
     [switch]$DisableAdvanceOnClick,
 
@@ -110,6 +116,39 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'PhysicsPpt.Common.ps1')
+
+function Read-FormulaProcessingConfig {
+    $configPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'config\physics-ppt-style.config.json'
+    if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { throw "Formula processing config not found: $configPath" }
+    $config = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $section = $config.PSObject.Properties['formulaProcessing']
+    if ($null -eq $section -or $null -eq $section.Value) { throw 'Config formulaProcessing section is missing.' }
+    return $section.Value
+}
+
+$script:FormulaProcessingConfig = Read-FormulaProcessingConfig
+$script:FormulaProcessingModeExplicit = -not [string]::IsNullOrWhiteSpace($FormulaProcessingMode)
+$script:FormulaProcessingMode = if ($script:FormulaProcessingModeExplicit) {
+    $FormulaProcessingMode
+} elseif ($ApplyFormulaOmmlWhitelist) {
+    # The legacy switch is itself an explicit user action.  Preserve existing
+    # command lines while making the safety mode visible in the receipt.
+    'ExplicitMigration'
+} else {
+    [string]$script:FormulaProcessingConfig.defaultMode
+}
+$allowedFormulaModes = @($script:FormulaProcessingConfig.allowedModes | ForEach-Object { [string]$_ })
+if ($script:FormulaProcessingMode -notin $allowedFormulaModes) {
+    throw "Formula processing mode is not allowed by config: $($script:FormulaProcessingMode)"
+}
+if ($script:FormulaProcessingModeExplicit -and
+    $script:FormulaProcessingMode -in @('ReportOnly', 'CandidateOnly', 'ReviewRequired') -and
+    $ApplyFormulaOmmlWhitelist) {
+    throw "Formula processing mode $($script:FormulaProcessingMode) forbids PPTX write-back; use ExplicitMigration or remove -ApplyFormulaOmmlWhitelist."
+}
+if ($script:FormulaProcessingMode -eq 'ClosedWorldUnattended' -and $ApplyFormulaOmmlWhitelist -and -not $FormulaOmmlVisualAudit) {
+    throw 'ClosedWorldUnattended write-back requires -FormulaOmmlVisualAudit so the rendered visual gate is present.'
+}
 
 if ($ApplyVisualAuditFixes -and -not $IncludeVisualAudit) {
     $IncludeVisualAudit = [System.Management.Automation.SwitchParameter]::Present
@@ -165,16 +204,19 @@ function Get-DefaultOutputRoot {
 
 function New-VersionedDeliveryRoot {
     # Versioned delivery layout: reports/<source>_v<N>/ keeps every delivered
-    # generation in its own directory; the highest _vN is the newest. An
-    # unversioned delivery folder counts as generation 1, so the first
-    # versioned delivery becomes _v2.
+    # generation in its own directory; the highest _vN is the newest. The
+    # directory name is exactly the source file stem (no __pptx style
+    # extension suffix) so deliveries match the <deck>_v<N> convention.
     param([System.IO.FileSystemInfo]$InputItem)
-    $baseDir = Get-DefaultOutputRoot -InputItem $InputItem
-    $parent = Split-Path -Parent $baseDir
-    $stem = Split-Path -Leaf $baseDir
+    $stem = if ($InputItem.PSIsContainer) {
+        $InputItem.Name
+    } else {
+        [System.IO.Path]::GetFileNameWithoutExtension($InputItem.Name)
+    }
+    $parent = Join-Path (Split-Path -Parent $PSScriptRoot) 'reports'
     if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
     for ($attempt = 0; $attempt -lt 100; $attempt++) {
-        $maxVersion = if (Test-Path -LiteralPath $baseDir) { 1 } else { 0 }
+        $maxVersion = if (Test-Path -LiteralPath (Join-Path $parent $stem)) { 1 } else { 0 }
         foreach ($dir in @(Get-ChildItem -LiteralPath $parent -Directory -ErrorAction SilentlyContinue)) {
             if ($dir.Name -match ('^' + [regex]::Escape($stem) + '_v(\d+)$')) {
                 $maxVersion = [Math]::Max($maxVersion, [int]$Matches[1])
@@ -1462,6 +1504,9 @@ function New-Manifest {
         [string]$OutputRoot,
         [string]$ReportPath,
         [string]$Mode,
+        [string]$FormulaProcessingMode,
+        [bool]$FormulaProcessingModeExplicit,
+        [bool]$FormulaWriteBackRequested,
         [bool]$IncludeReviewArtifacts,
         $ReportRows,
         $ContactSheets,
@@ -1552,6 +1597,19 @@ function New-Manifest {
     [pscustomobject]@{
         generatedAt = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
         mode = $Mode
+        formulaProcessing = [ordered]@{
+            schemaVersion = [int]$script:FormulaProcessingConfig.schemaVersion
+            requestedMode = if ($FormulaProcessingModeExplicit) { $FormulaProcessingMode } else { $null }
+            effectiveMode = $FormulaProcessingMode
+            defaultMode = [string]$script:FormulaProcessingConfig.defaultMode
+            writeBackRequested = $FormulaWriteBackRequested
+            writeBackAllowedByDefault = [bool]$script:FormulaProcessingConfig.writeBackEnabled
+            imageFormulaWriteBackAllowedByDefault = [bool]$script:FormulaProcessingConfig.imageFormulaWriteBackEnabled
+            modelInferenceAllowedByDefault = [bool]$script:FormulaProcessingConfig.modelInferenceEnabled
+            actualWriteBack = $false
+            scope = if ($FormulaWriteBackRequested) { 'ExplicitFormulaWhitelistPathOnly' } else { 'NoFormulaWriteBack' }
+            note = 'Mode selection is a policy receipt. Formula writes still require the separate explicit switch and downstream gates.'
+        }
         source = $InputFullPath
         output = $OutputRoot
         report = $ReportPath
@@ -1662,6 +1720,12 @@ function Write-Summary {
     $lines.Add('')
     $lines.Add("- 生成时间：$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
     $lines.Add("- 模式：$Mode")
+    $formulaProcessing = Get-ObjectPropertyValue -Object $Manifest -PropertyName 'formulaProcessing' -DefaultValue $null
+    if ($null -ne $formulaProcessing) {
+        $lines.Add("- 公式处理模式：$(Get-ObjectPropertyValue -Object $formulaProcessing -PropertyName 'effectiveMode' -DefaultValue 'Unknown')")
+        $lines.Add("- 公式写回请求：$(Get-ObjectPropertyValue -Object $formulaProcessing -PropertyName 'writeBackRequested' -DefaultValue $false)")
+        $lines.Add("- 公式写回范围：$(Get-ObjectPropertyValue -Object $formulaProcessing -PropertyName 'scope' -DefaultValue 'Unknown')")
+    }
     $lines.Add("- 输入：$InputFullPath")
     $lines.Add("- 输出目录：$OutputRoot")
     $lines.Add("- 报告：$ReportPath")
@@ -2485,18 +2549,25 @@ function Invoke-InvariantGate {
 $root = Split-Path -Parent $PSScriptRoot
 $inputItem = Get-Item -LiteralPath $InputPath
 $inputFullPath = $inputItem.FullName
-if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
-    if ($VersionedDelivery) {
-        # Re-check the computed version right before adoption so two concurrent
-        # runs cannot claim the same _vN directory.
-        $OutputRoot = New-VersionedDeliveryRoot -InputItem $inputItem
-    } else {
-        $OutputRoot = Get-DefaultOutputRoot -InputItem $inputItem
-    }
+$explicitOutputRoot = -not [string]::IsNullOrWhiteSpace($OutputRoot)
+if (-not $explicitOutputRoot) {
+    # Strong layout constraint: versioned delivery is the ONLY path into
+    # reports/. Re-check the computed version right before adoption so two
+    # concurrent runs cannot claim the same _vN directory.
+    $OutputRoot = New-VersionedDeliveryRoot -InputItem $inputItem
 } elseif ($VersionedDelivery) {
     throw 'Specify either -OutputRoot or -VersionedDelivery, not both.'
 }
 $OutputRoot = [System.IO.Path]::GetFullPath($OutputRoot)
+if ($explicitOutputRoot) {
+    # Strong layout constraint: reports/ is reserved for <deck>_v<N> versioned
+    # deliveries; an explicit OutputRoot must live somewhere else entirely.
+    $reportsRoot = [System.IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $PSScriptRoot) 'reports'))
+    $reportsPrefix = $reportsRoot.TrimEnd('\') + '\'
+    if ($OutputRoot.StartsWith($reportsPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw ("reports/ is reserved for <deck>_v<N> versioned deliveries. Drop -OutputRoot to auto-version, or point -OutputRoot outside reports/ (got: {0})" -f $OutputRoot)
+    }
+}
 $files = @(Get-PresentationFiles -Path $inputFullPath -Pattern $FilePattern -Recurse:$Recurse -SupportedExtensions @('.pptx', '.pptm') -ExcludedRoots @($OutputRoot))
 if ($files.Count -eq 0) { throw "No .pptx/.pptm files found in $inputFullPath" }
 $identityMap = Get-IdentityMap -InputRoot $inputFullPath -Files $files
@@ -2652,7 +2723,7 @@ $reviewIndexes = if ($Mode -eq 'CheckOnly' -or -not $IncludeReviewArtifacts) { @
 $formulaReviewIndex = New-FormulaReviewIndex -Rows $rows -OutputRoot $OutputRoot -IdentityMap $identityMap
 $manifestPath = Join-Path $OutputRoot 'review-manifest.json'
 $summaryPath = Join-Path $OutputRoot 'summary.md'
-$manifest = New-Manifest -Files $files -InputFullPath $inputFullPath -OutputRoot $OutputRoot -ReportPath $finalReportPath -Mode $Mode -IncludeReviewArtifacts ([bool]$IncludeReviewArtifacts) -ReportRows $rows -ContactSheets $contactSheets -ReviewSheets $reviewSheets -SourceImageDirs $sourceImageDirs -BeforeAfterSheets $beforeAfterSheets -ReviewPagePackages $reviewPagePackages -ReviewIndexes $reviewIndexes -FormulaReviewIndex $formulaReviewIndex -IdentityMap $identityMap
+$manifest = New-Manifest -Files $files -InputFullPath $inputFullPath -OutputRoot $OutputRoot -ReportPath $finalReportPath -Mode $Mode -FormulaProcessingMode $script:FormulaProcessingMode -FormulaProcessingModeExplicit $script:FormulaProcessingModeExplicit -FormulaWriteBackRequested ([bool]$ApplyFormulaOmmlWhitelist) -IncludeReviewArtifacts ([bool]$IncludeReviewArtifacts) -ReportRows $rows -ContactSheets $contactSheets -ReviewSheets $reviewSheets -SourceImageDirs $sourceImageDirs -BeforeAfterSheets $beforeAfterSheets -ReviewPagePackages $reviewPagePackages -ReviewIndexes $reviewIndexes -FormulaReviewIndex $formulaReviewIndex -IdentityMap $identityMap
 
 $invariantGate = Invoke-InvariantGate -Files $files -OutputRoot $OutputRoot -NormalizedDir $normalizedDir -IdentityMap $identityMap -Mode $Mode -AllowAdvanceOnClickDisable ([bool]$DisableAdvanceOnClick)
 $manifest | Add-Member -NotePropertyName invariantGate -NotePropertyValue $invariantGate -Force
@@ -2702,6 +2773,14 @@ if ($ApplyFormulaOmmlWhitelist) {
     $manifest | Add-Member -NotePropertyName formulaOmmlVisualAuditEnabled -NotePropertyValue ([bool]$FormulaOmmlVisualAudit) -Force
     $manifest | Add-Member -NotePropertyName formulaOmmlArtifacts -NotePropertyValue $null -Force
 }
+$actualFormulaWriteCount = 0
+if ($ApplyFormulaOmmlWhitelist -and $null -ne $manifest.formulaOmmlArtifacts) {
+    foreach ($formulaFile in @(Get-FormulaOmmlFiles -FormulaOmmlArtifacts $manifest.formulaOmmlArtifacts)) {
+        $actualFormulaWriteCount += [int](Get-ObjectPropertyValue -Object $formulaFile -PropertyName 'insertedCount' -DefaultValue 0)
+    }
+}
+$manifest.formulaProcessing.actualWriteBack = ($actualFormulaWriteCount -gt 0)
+$manifest.formulaProcessing.actualWriteCount = $actualFormulaWriteCount
 
 Write-Host "Step ${stepCount}/${stepCount}: write summary and manifest"
 $currentManifest = $manifest

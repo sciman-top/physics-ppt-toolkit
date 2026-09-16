@@ -7,7 +7,8 @@ param(
     [Parameter(Mandatory = $true)][string]$BeforePath,
     [Parameter(Mandatory = $true)][string]$AfterPath,
     [string]$OutputPath,
-    [switch]$AllowAdvanceOnClickDisable
+    [switch]$AllowAdvanceOnClickDisable,
+    [switch]$AllowReviewedFormulaConversion
 )
 
 Set-StrictMode -Version Latest
@@ -46,6 +47,20 @@ function Get-SnapshotProperty { param($Row, [string]$Name)
     $property = $Row.PSObject.Properties[$Name]
     if ($null -eq $property) { return $null }
     return $property.Value
+}
+
+function Test-ReviewedFormulaConversion {
+    param($BeforeShape, $AfterShape)
+    if (-not $AllowReviewedFormulaConversion) { return $false }
+    # This is deliberately narrow: only an Equation.* OLE (type 7) replaced
+    # by the generated FormulaOmml text shape (type 1) may use the opt-in
+    # allowance. Geometry, z-order, group membership, animation and package
+    # media are still compared as blockers below.
+    return ([int]$BeforeShape.type -eq 7 -and
+        [int]$AfterShape.type -eq 1 -and
+        [string]$AfterShape.name -like 'FormulaOmml*' -and
+        [string]::IsNullOrWhiteSpace([string]$BeforeShape.text) -and
+        -not [string]::IsNullOrWhiteSpace([string]$AfterShape.text))
 }
 
 $before = Read-Snapshot $BeforePath
@@ -96,8 +111,15 @@ for ($i = 0; $i -lt $slideCount; $i++) {
         if (-not $shapeMapBefore.ContainsKey($id)) { Add-Difference $rows "$prefix.shapes[$id]" '' 'present' 'Blocker'; continue }
         if (-not $shapeMapAfter.ContainsKey($id)) { Add-Difference $rows "$prefix.shapes[$id]" 'present' '' 'Blocker'; continue }
         $b = $shapeMapBefore[$id]; $a = $shapeMapAfter[$id]
+        $isReviewedFormulaConversion = Test-ReviewedFormulaConversion -BeforeShape $b -AfterShape $a
         foreach ($property in @('name','type','zOrder','autoSize','wordWrap','text')) {
-            Compare-Value $rows "$prefix.shapes[$id].$property" $b.$property $a.$property 'Blocker'
+            if ($isReviewedFormulaConversion -and $property -in @('name', 'type', 'autoSize', 'wordWrap', 'text')) {
+                if ("$($b.$property)" -ne "$($a.$property)") {
+                    Add-Difference $rows "$prefix.shapes[$id].$property" "$($b.$property)" "$($a.$property)" 'AllowedChange'
+                }
+            } else {
+                Compare-Value $rows "$prefix.shapes[$id].$property" $b.$property $a.$property 'Blocker'
+            }
         }
         $beforeShapeReadStatus = [string](Get-SnapshotProperty $b 'readStatus')
         $afterShapeReadStatus = [string](Get-SnapshotProperty $a 'readStatus')

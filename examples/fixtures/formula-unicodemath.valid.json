@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "description": "Valid canonical UnicodeMath cases for the OMML candidate parser. expectedCanonicalUnicodeMath is optional; when present the canonical round-trip must equal it exactly (case-sensitive). Every case must parse and re-render stably.",
+  "cases": [
+    {
+      "name": "efficiency-fraction-single-atom-denominator",
+      "unicodeMath": "η=Q_吸/Q_放",
+      "expectedCanonicalUnicodeMath": "η=Q_吸/Q_放"
+    },
+    {
+      "name": "specific-heat-juxtaposed-denominator",
+      "unicodeMath": "c=Q/mΔt",
+      "expectedCanonicalUnicodeMath": "c=Q/mΔt"
+    },
+    {
+      "name": "numeric-substitution-chain-parenthesized-denominator",
+      "unicodeMath": "Q_吸=cmΔt=4.2×10^(3)J/(kg·℃)×50kg×20℃=4.2×10^(6)J"
+    },
+    {
+      "name": "superscript-chars-normalized",
+      "unicodeMath": "4.2×10³J/(kg·℃)",
+      "expectedCanonicalUnicodeMath": "4.2×10^(3)J/(kg·℃)"
+    },
+    {
+      "name": "superscript-negative-exponent-chars",
+      "unicodeMath": "10⁻³",
+      "expectedCanonicalUnicodeMath": "10^(-3)"
+    },
+    {
+      "name": "parenthesized-negative-exponent",
+      "unicodeMath": "10^(-3)",
+      "expectedCanonicalUnicodeMath": "10^(-3)"
+    },
+    {
+      "name": "subscript-digit-chars-normalized",
+      "unicodeMath": "R₁₂",
+      "expectedCanonicalUnicodeMath": "R_(12)"
+    },
+    {
+      "name": "explicit-operator-ends-denominator",
+      "unicodeMath": "J/(kg·℃)×50kg×20℃",
+      "expectedCanonicalUnicodeMath": "J/(kg·℃)×50kg×20℃"
+    },
+    {
+      "name": "chained-equality",
+      "unicodeMath": "Q_放=Q_吸=cmΔt",
+      "expectedCanonicalUnicodeMath": "Q_放=Q_吸=cmΔt"
+    },
+    {
+      "name": "work-formula-implicit-multiplication",
+      "unicodeMath": "W=Fs",
+      "expectedCanonicalUnicodeMath": "W=Fs"
+    }
+  ]
+}

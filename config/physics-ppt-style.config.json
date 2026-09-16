@@ -1,10 +1,11 @@
 ﻿{
   "schemaVersion": 1,
   "fonts": {
-    "chinese": "微软雅黑",
-    "compactChinese": "微软雅黑 UI",
-    "latin": "Arial",
-    "math": "Cambria Math"
+  "chinese": "微软雅黑",
+  "compactChinese": "微软雅黑 UI",
+  "latin": "Arial",
+  "math": "Cambria Math",
+  "mathEastAsian": "宋体"
   },
   "fontSizes": {
     "title1": 46,
@@ -55,6 +56,22 @@
       "riskLevel": "R1",
       "allowedProperties": ["FontName", "NameFarEast", "Size", "Bold", "Color", "ParagraphAlignment"],
       "scope": "FormulaText"
+    },
+    {
+      "id": "STYLE.HIGHLIGHT.BOX_SHAPE",
+      "enabled": true,
+      "riskLevel": "R1",
+      "allowedProperties": [
+        "Fill.ForeColor",
+        "Line.Visible",
+        "Line.ForeColor",
+        "Line.Weight",
+        "AutoShapeType",
+        "Adjustments"
+      ],
+      "scope": "HighlightBox",
+      "borderWeightPt": 2.0,
+      "cornerRadiusAdj": 0.1
     },
     {
       "id": "STYLE.HIGHLIGHT.TEXT_COLOR",
@@ -169,6 +186,174 @@
       "targetUnicodeMath": "ρ=m/V",
       "targetTex": "\\rho=\\frac{m}{V}",
       "note": "密度定义式，适合人工确认后转换为上下分式。"
+    },
+    {
+      "name": "比热容热量式",
+      "sourcePattern": "^Q=cmΔt$",
+      "targetUnicodeMath": "Q=cmΔt",
+      "targetTex": "Q=cm\\Delta t",
+      "note": "比热容基本公式；来源：13.3比热容 OLE 公式清单 idx11。"
+    },
+    {
+      "name": "吸热公式",
+      "sourcePattern": "^Q吸=cmΔt$",
+      "targetUnicodeMath": "Q_吸=cmΔt",
+      "targetTex": "Q_{\\text{吸}}=cm\\Delta t",
+      "note": "吸热量公式，中文角标按下标处理；来源：13.3比热容 OLE 清单 idx1。"
+    },
+    {
+      "name": "放热公式",
+      "sourcePattern": "^Q放=cmΔt$",
+      "targetUnicodeMath": "Q_放=cmΔt",
+      "targetTex": "Q_{\\text{放}}=cm\\Delta t",
+      "note": "放热量公式，中文角标按下标处理；来源：13.3比热容 OLE 清单 idx2。"
+    },
+    {
+      "name": "燃料与水的热量关系",
+      "sourcePattern": "^Q放=Q吸=cmΔt$",
+      "targetUnicodeMath": "Q_放=Q_吸=cmΔt",
+      "targetTex": "Q_{\\text{放}}=Q_{\\text{吸}}=cm\\Delta t",
+      "note": "14.1燃料实验页的 GoldSet 候选；只有 OLE 组合同步通过视觉与结构门禁后才允许转换。"
+    },
+    {
+      "name": "燃料放热量公式",
+      "sourcePattern": "^Q放=qm$",
+      "targetUnicodeMath": "Q_放=qm",
+      "targetTex": "Q_{\\text{放}}=qm",
+      "note": "燃料热值关系式；中文角标按下标处理，适用于 14.1 样本的审定 OLE。"
+    },
+    {
+      "name": "燃料燃烧效率",
+      "sourcePattern": "^η=Q吸/Q放$",
+      "targetUnicodeMath": "η=Q_吸/Q_放",
+      "targetTex": "\\eta=\\frac{Q_{\\text{吸}}}{Q_{\\text{放}}}",
+      "note": "燃烧效率定义式；分母分子必须保持教材语义，适用于审定 OLE。"
+    },
+    {
+      "name": "热机效率定义式",
+      "sourcePattern": "^η=W有/Q放$",
+      "targetUnicodeMath": "η=W_有/Q_放",
+      "targetTex": "\\eta=\\frac{W_{\\text{有}}}{Q_{\\text{放}}}",
+      "note": "热机效率定义式（有用功/燃料完全燃烧放出的热量）；来源：14.2热机 slide26 顶部主式 OLE（s26-sh3）。"
+    },
+    {
+      "name": "气体燃料放热量公式",
+      "sourcePattern": "^Q放=qV$",
+      "targetUnicodeMath": "Q_放=qV",
+      "targetTex": "Q_{\\text{放}}=qV",
+      "note": "气体燃料放热关系式（热值 q 按体积 J/m³）；来源：14.2热机 slide26 括号组 OLE（s26-sh9）。"
+    },
+    {
+      "name": "吸热关系括号式",
+      "sourcePattern": "^\\(Q吸=cmΔt\\)$",
+      "targetUnicodeMath": "(Q_吸=cmΔt)",
+      "targetTex": "(Q_{\\text{吸}}=cm\\Delta t)",
+      "note": "效率页括号说明式；括号属于公式内容，转换时必须保留。"
+    },
+    {
+      "name": "放热关系括号式",
+      "sourcePattern": "^\\(Q放=qm\\)$",
+      "targetUnicodeMath": "(Q_放=qm)",
+      "targetTex": "(Q_{\\text{放}}=qm)",
+      "note": "效率页括号说明式；括号属于公式内容，转换时必须保留。"
+    },
+    {
+      "name": "放热量符号",
+      "sourcePattern": "^Q放$",
+      "targetUnicodeMath": "Q_放",
+      "targetTex": "Q_{\\text{放}}",
+      "note": "图示中的放热量符号；仅在独立 OLE 且边界复核通过时转换。"
+    },
+    {
+      "name": "吸热量等号片段",
+      "sourcePattern": "^=Q吸$",
+      "targetUnicodeMath": "=Q_吸",
+      "targetTex": "=Q_{\\text{吸}}",
+      "note": "14.1第6页同一条等式中的第二个 Equation.DSMT4 分段；仅在对应 GoldSet 证据中转换。"
+    },
+    {
+      "name": "热量乘积等号片段",
+      "sourcePattern": "^=cmΔt$",
+      "targetUnicodeMath": "=cmΔt",
+      "targetTex": "=cm\\Delta t",
+      "note": "14.1第6页同一条等式中的第三个 Equation.DSMT4 分段；仅在对应 GoldSet 证据中转换。"
+    },
+    {
+      "name": "吸热公式左半段",
+      "sourcePattern": "^Q吸=$",
+      "targetUnicodeMath": "Q_吸=",
+      "targetTex": "Q_{\\text{吸}}=",
+      "note": "吸热公式接数值代入的左半段 OLE；来源：13.3比热容 OLE 清单 idx3（保留原形状 id 以延续动画）。"
+    },
+    {
+      "name": "乘积带等号右半段",
+      "sourcePattern": "^cmΔt=$",
+      "targetUnicodeMath": "cmΔt=",
+      "targetTex": "cm\\Delta t=",
+      "note": "吸热公式接数值代入的右半段 OLE；来源：13.3比热容 OLE 清单 idx4。"
+    },
+    {
+      "name": "比热容定义式",
+      "sourcePattern": "^c=Q/mΔt$",
+      "targetUnicodeMath": "c=Q/mΔt",
+      "targetTex": "c=\\frac{Q}{m\\Delta t}",
+      "note": "比热容定义式（分式）；来源：13.3比热容 OLE 清单 idx9。"
+    },
+    {
+      "name": "比热容吸热定义式",
+      "sourcePattern": "^c=Q吸/mΔt$",
+      "targetUnicodeMath": "c=Q_吸/mΔt",
+      "targetTex": "c=\\frac{Q_{\\text{吸}}}{m\\Delta t}",
+      "note": "吸热版比热容定义式（分式）；来源：13.3比热容 OLE 清单 idx15。"
+    },
+    {
+      "name": "质量变形式",
+      "sourcePattern": "^m=Q/cΔt$",
+      "targetUnicodeMath": "m=Q/cΔt",
+      "targetTex": "m=\\frac{Q}{c\\Delta t}",
+      "note": "质量变形式（分式）；来源：13.3比热容 OLE 清单 idx10。"
+    },
+    {
+      "name": "温差变形式",
+      "sourcePattern": "^Δt=Q/cm$",
+      "targetUnicodeMath": "Δt=Q/cm",
+      "targetTex": "\\Delta t=\\frac{Q}{cm}",
+      "note": "温差变形式（分式）；来源：13.3比热容 OLE 清单 idx12。"
+    },
+    {
+      "name": "吸热温差式",
+      "sourcePattern": "^Δt=Q吸/cm$",
+      "targetUnicodeMath": "Δt=Q_吸/cm",
+      "targetTex": "\\Delta t=\\frac{Q_{\\text{吸}}}{cm}",
+      "note": "吸热温差式（分式）；来源：13.3比热容 OLE 清单 idx13。"
+    },
+    {
+      "name": "放热温差式",
+      "sourcePattern": "^Δt=Q放/cm$",
+      "targetUnicodeMath": "Δt=Q_放/cm",
+      "targetTex": "\\Delta t=\\frac{Q_{\\text{放}}}{cm}",
+      "note": "放热温差式（分式）；本批 OLE 清单未命中，供文本链与后续批次复用。"
+    },
+    {
+      "name": "四分之一",
+      "sourcePattern": "^1/4$",
+      "targetUnicodeMath": "1/4",
+      "targetTex": "\\frac{1}{4}",
+      "note": "独立数值分式；来源：13.3比热容 OLE 清单 idx14（红色）。"
+    },
+    {
+      "name": "放热量符号带等号",
+      "sourcePattern": "^Q放=$",
+      "targetUnicodeMath": "Q_放=",
+      "targetTex": "Q_{\\text{放}}=",
+      "note": "放热量符号接等号的左半段 OLE；来源：14.1燃料 OLE 清单 slide6。"
+    },
+    {
+      "name": "乘积式",
+      "sourcePattern": "^cmΔt$",
+      "targetUnicodeMath": "cmΔt",
+      "targetTex": "cm\\Delta t",
+      "note": "cmΔt 乘积式 OLE；来源：14.1燃料 OLE 清单 slide6。"
     }
   ],
   "rules": {
@@ -183,5 +368,25 @@
     "formulaTextStyleDefault": true,
     "formulaConversionDefault": false,
     "videoSlideKeywords": ["视频", "播放", "观察视频"]
+  },
+  "formulaProcessing": {
+    "schemaVersion": 1,
+    "defaultMode": "ReportOnly",
+    "allowedModes": [
+      "ReportOnly",
+      "CandidateOnly",
+      "ReviewRequired",
+      "ClosedWorldUnattended",
+      "ExplicitMigration"
+    ],
+    "defaultTargetCarrier": "OfficeMath",
+    "writeBackEnabled": false,
+    "imageFormulaWriteBackEnabled": false,
+    "mathTypeMigrationEnabled": false,
+    "ocrEnabled": false,
+    "modelInferenceEnabled": false,
+    "unattendedCanonicalSources": ["Whitelist", "GoldSet"],
+    "unattendedRequiresPowerPointGate": true,
+    "unattendedRequiresVisualGate": true
   }
 }

@@ -129,6 +129,9 @@ function Test-IsFormulaText {
     param([string]$Text)
     $t = ($Text -replace '\s+', '')
     if ([string]::IsNullOrWhiteSpace($t) -or $t.Length -gt 80) { return $false }
+    # A URL/path is not a formula.  Without this guard, the slash in a
+    # hyperlink produces a false FormulaTextVisualReview warning.
+    if ($t -match '(?i)(https?://|www\.|[A-Za-z]:[\\/])') { return $false }
     if ($t -match '[=ηΩρ]|[/÷×∙·√]|(W有|W总|W额|G物|G动|R[12]|U[12]|I[12]|P[12])') { return $true }
     return $false
 }
@@ -419,8 +422,26 @@ try {
 
                 if ($hasText) {
                     $bounds = Get-TextBounds -Shape $shape
-                    if ($null -ne $bounds -and ($bounds.Width -gt ($width + 6) -or $bounds.Height -gt ($height + 6))) {
-                        Add-AuditRow -Rows $auditRows -File $fileName -Slide $slideNo -Shape $shapeName -Issue 'TextMayOverflowShape' -Severity 'Warning' -Details ("textBounds={0:N1}x{1:N1}; shape={2:N1}x{3:N1}; text={4}" -f $bounds.Width, $bounds.Height, $width, $height, (($text -replace '\s+', ' ').Trim()))
+                    if ($null -ne $bounds) {
+                        # PowerPoint reports the OMML text advance box, which can
+                        # exceed the original MathType tight box by a few points
+                        # even when the exported glyph ink is fully visible. Keep
+                        # the ordinary text rule strict, but record this bounded
+                        # native-formula allowance explicitly; the PNG review
+                        # remains the decisive clipping check.
+                        $standardTextTolerance = 6
+                        $formulaTextTolerance = 10
+                        $isNativeFormulaShape = $shapeName -like 'FormulaOmml*'
+                        $textTolerance = if ($isNativeFormulaShape) { $formulaTextTolerance } else { $standardTextTolerance }
+                        $exceeds = $bounds.Width -gt ($width + $textTolerance) -or $bounds.Height -gt ($height + $textTolerance)
+                        $withinNativeFormulaAllowance = $isNativeFormulaShape -and
+                            ($bounds.Width -gt ($width + $standardTextTolerance) -or $bounds.Height -gt ($height + $standardTextTolerance)) -and
+                            -not $exceeds
+                        if ($withinNativeFormulaAllowance) {
+                            Add-AuditRow -Rows $auditRows -File $fileName -Slide $slideNo -Shape $shapeName -Issue 'FormulaOmmlTightBoxAllowance' -Severity 'Info' -Details ("textBounds={0:N1}x{1:N1}; shape={2:N1}x{3:N1}; allowance={4:N1}pt; text={5}" -f $bounds.Width, $bounds.Height, $width, $height, $formulaTextTolerance, (($text -replace '\s+', ' ').Trim()))
+                        } elseif ($exceeds) {
+                            Add-AuditRow -Rows $auditRows -File $fileName -Slide $slideNo -Shape $shapeName -Issue 'TextMayOverflowShape' -Severity 'Warning' -Details ("textBounds={0:N1}x{1:N1}; shape={2:N1}x{3:N1}; tolerance={4:N1}pt; text={5}" -f $bounds.Width, $bounds.Height, $width, $height, $textTolerance, (($text -replace '\s+', ' ').Trim()))
+                        }
                     }
                 }
 

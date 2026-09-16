@@ -19,6 +19,15 @@ try {
     $afterPath = Join-Path $testRoot 'after.json'
     $blockedPath = Join-Path $testRoot 'blocked.json'
     $comparePath = Join-Path $testRoot 'compare.json'
+    $formulaBeforePath = Join-Path $testRoot 'formula-before.json'
+    $formulaAfterPath = Join-Path $testRoot 'formula-after.json'
+    $formulaGeometryPath = Join-Path $testRoot 'formula-geometry.json'
+    # Keep the manifest base on the same volume as the fixture PPTX.  The
+    # exporter must fail closed rather than leak an absolute path across
+    # Windows volumes.
+    $evidenceOutputDir = Join-Path $toolRoot ('__policy-evidence-' + [Guid]::NewGuid().ToString('N'))
+    $evidenceInventoryPath = Join-Path $evidenceOutputDir 'formula-carrier-inventory.json'
+    New-Item -ItemType Directory -Path $evidenceOutputDir -Force | Out-Null
     $manifestPath = Join-Path $testRoot 'review-manifest.json'
     $packetPath = Join-Path $testRoot 'ai-visual-review-request.json'
     $resultPath = Join-Path $testRoot 'ai-visual-review-result.json'
@@ -77,6 +86,66 @@ try {
     $textChangedResult = & (Join-Path $toolRoot 'Compare-PptxInvariantSnapshot.ps1') -BeforePath $beforePath -AfterPath $blockedPath
     $textChangedComparison = $textChangedResult | ConvertFrom-Json
     if ($textChangedComparison.passed -or $textChangedComparison.blockerCount -lt 1) { throw 'Invariant comparison did not block a text content change.' }
+
+    # Formula conversion has an explicit, narrow allowance: only a type-7 OLE
+    # with empty COM text may become a generated FormulaOmml type-1 shape. The
+    # allowance must not hide geometry changes or become a default bypass.
+    $formulaBeforeObject = $baseSnapshot | ConvertTo-Json -Depth 12 | ConvertFrom-Json
+    $formulaBeforeShape = $formulaBeforeObject.slides[0].shapes[0]
+    $formulaBeforeShape.name = 'Object 1'
+    $formulaBeforeShape.type = 7
+    $formulaBeforeShape.autoSize = 0
+    $formulaBeforeShape.wordWrap = 0
+    $formulaBeforeShape.text = ''
+    [System.IO.File]::WriteAllText($formulaBeforePath, ($formulaBeforeObject | ConvertTo-Json -Depth 12), (New-Object System.Text.UTF8Encoding -ArgumentList $false))
+    $formulaAfterObject = $formulaBeforeObject | ConvertTo-Json -Depth 12 | ConvertFrom-Json
+    $formulaAfterShape = $formulaAfterObject.slides[0].shapes[0]
+    $formulaAfterShape.name = 'FormulaOmml 测试'
+    $formulaAfterShape.type = 1
+    $formulaAfterShape.autoSize = 2
+    $formulaAfterShape.wordWrap = -1
+    $formulaAfterShape.text = ' Q 吸 '
+    [System.IO.File]::WriteAllText($formulaAfterPath, ($formulaAfterObject | ConvertTo-Json -Depth 12), (New-Object System.Text.UTF8Encoding -ArgumentList $false))
+    $formulaAllowed = & (Join-Path $toolRoot 'Compare-PptxInvariantSnapshot.ps1') -BeforePath $formulaBeforePath -AfterPath $formulaAfterPath -AllowReviewedFormulaConversion | ConvertFrom-Json
+    if (-not $formulaAllowed.passed -or $formulaAllowed.blockerCount -ne 0 -or $formulaAllowed.allowedChangeCount -ne 5) { throw 'Reviewed formula conversion allowance did not accept only the expected carrier-property changes.' }
+    $formulaDefault = & (Join-Path $toolRoot 'Compare-PptxInvariantSnapshot.ps1') -BeforePath $formulaBeforePath -AfterPath $formulaAfterPath | ConvertFrom-Json
+    if ($formulaDefault.passed -or $formulaDefault.blockerCount -lt 1 -or $formulaDefault.allowedChangeCount -ne 0) { throw 'Formula conversion was allowed without explicit authorization.' }
+    $formulaGeometryObject = $formulaAfterObject | ConvertTo-Json -Depth 12 | ConvertFrom-Json
+    $formulaGeometryObject.slides[0].shapes[0].width = 201
+    [System.IO.File]::WriteAllText($formulaGeometryPath, ($formulaGeometryObject | ConvertTo-Json -Depth 12), (New-Object System.Text.UTF8Encoding -ArgumentList $false))
+    $formulaGeometry = & (Join-Path $toolRoot 'Compare-PptxInvariantSnapshot.ps1') -BeforePath $formulaBeforePath -AfterPath $formulaGeometryPath -AllowReviewedFormulaConversion | ConvertFrom-Json
+    if ($formulaGeometry.passed -or $formulaGeometry.blockerCount -lt 1) { throw 'Reviewed formula conversion allowance hid a geometry change.' }
+
+    # F0-03: evidence paths are manifest-relative and every source hash is
+    # checked against the current archive before the manifest is emitted.
+    $fixturePptx = Join-Path (Split-Path -Parent $toolRoot) 'examples\fixtures\minimal-physics-sample.pptx'
+    $fixtureHash = (Get-FileHash -LiteralPath $fixturePptx -Algorithm SHA256).Hash.ToLowerInvariant()
+    $fixtureInventory = [ordered]@{
+        schemaVersion = 1
+        input = [ordered]@{ path = $fixturePptx; sha256 = $fixtureHash; bytes = (Get-Item -LiteralPath $fixturePptx).Length }
+        records = @([ordered]@{
+            recordId = 'fixture-evidence-001'
+            source = [ordered]@{
+                filePath = $fixturePptx; fileSha256 = $fixtureHash; sourceSha256 = ('c' * 64)
+                carrier = 'TextFormula'; slide = 1; shapeId = 2; shapeName = '正文'
+                bbox = [ordered]@{ left = 10; top = 20; width = 200; height = 50 }
+                packagePart = 'ppt/slides/slide1.xml'; mediaPaths = @()
+            }
+            detection = [ordered]@{ method = 'PowerPointCom'; status = 'Observed'; confidence = 1; rawCandidates = @() }
+            canonical = [ordered]@{ status = 'Unresolved'; source = [ordered]@{ kind = 'None'; id = ''; sha256 = $null }; unicodeMath = ''; tex = ''; mathml = ''; tokens = @() }
+            decision = [ordered]@{ mode = 'ReportOnly'; status = 'OriginalKept'; targetCarrier = 'None'; reason = 'fixture' }
+            evidence = [ordered]@{ paths = @($fixturePptx); rollbackPath = $fixturePptx }
+        })
+    }
+    [System.IO.File]::WriteAllText($evidenceInventoryPath, ($fixtureInventory | ConvertTo-Json -Depth 12), (New-Object System.Text.UTF8Encoding -ArgumentList $false))
+    & (Join-Path $toolRoot 'Export-FormulaEvidenceManifest.ps1') -CarrierInventoryJson $evidenceInventoryPath -OutputDir $evidenceOutputDir -Mode CandidateOnly | Out-Null
+    $evidenceManifestPath = Join-Path $evidenceOutputDir 'formula-evidence-manifest.json'
+    if (-not (Test-Path -LiteralPath $evidenceManifestPath)) { throw 'Formula evidence manifest was not produced.' }
+    $evidenceManifest = Get-Content -LiteralPath $evidenceManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($evidenceManifest.policy.writeBackAllowed -ne $false -or $evidenceManifest.policy.pathBase -ne 'manifest-directory') { throw 'Evidence manifest write-back/path policy is invalid.' }
+    if ($evidenceManifest.input.path -match '^[A-Za-z]:[\\/]' -or $evidenceManifest.records[0].evidence.paths[0] -match '^[A-Za-z]:[\\/]') { throw 'Evidence manifest leaked an absolute path.' }
+    if ($evidenceManifest.input.sha256 -ne $fixtureHash -or $evidenceManifest.records[0].source.sha256 -ne $fixtureHash) { throw 'Evidence manifest did not bind the current source hash.' }
+    if ($evidenceManifest.counts.recordCount -ne 1 -or $evidenceManifest.evidenceSetSha256 -notmatch '^[a-f0-9]{64}$') { throw 'Evidence manifest count/hash contract is invalid.' }
 
     $input = 'C:\fixture\lesson.pptx'
     $sourceImage = Join-Path $testRoot 'source-slide-1.png'
@@ -215,6 +284,7 @@ try {
     if ($zeroImageConfirmation.confirmationStatus -ne 'Failed' -or $zeroImageConfirmation.automationGateStatus -ne 'Failed') { throw 'Visual confirmation accepted a zero-byte page image.' }
 } finally {
     if (Test-Path -LiteralPath $testRoot) { Remove-Item -LiteralPath $testRoot -Recurse -Force }
+    if (Test-Path -LiteralPath $evidenceOutputDir) { Remove-Item -LiteralPath $evidenceOutputDir -Recurse -Force }
 }
 
 Write-Host 'Physics PPT policy fixture tests passed.'

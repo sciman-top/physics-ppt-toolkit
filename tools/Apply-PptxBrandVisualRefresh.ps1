@@ -49,6 +49,9 @@ if ([string]::IsNullOrWhiteSpace($PptxPath)) {
 if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
     $OutputRoot = Join-Path $root 'reports'
 }
+# PowerPoint COM resolves relative paths against its own process CWD, never
+# the caller's — every path handed to Presentations.Open must be absolute.
+$OutputRoot = [System.IO.Path]::GetFullPath($OutputRoot)
 if ([string]::IsNullOrWhiteSpace($AssetsDir)) {
     $AssetsDir = Join-Path $root 'assets\brand'
 }
@@ -67,6 +70,13 @@ if (-not (Test-Path -LiteralPath $PptxPath)) {
 }
 
 $stem = [System.IO.Path]::GetFileNameWithoutExtension($PptxPath)
+# Re-running on an already branded file keeps the canonical output name and
+# the same version lineage instead of compounding '.brand.brand'. The
+# normalized chain head is the primary input, so its '.normalized' suffix is
+# stripped as well: deliveries must keep the <deck>_v<N> directory convention
+# (a letter directly before _v<N> is a layout-gate violation).
+if ($stem.EndsWith('.brand')) { $stem = $stem.Substring(0, $stem.Length - '.brand'.Length) }
+if ($stem.EndsWith('.normalized')) { $stem = $stem.Substring(0, $stem.Length - '.normalized'.Length) }
 $existing = @(Get-ChildItem -LiteralPath $OutputRoot -Directory -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -like "$stem`_v*" })
 $nextVersion = 1
@@ -97,7 +107,7 @@ $script:Palette = @{
     Link       = '#9DC3E6'
     KeepYellow = '#FFD966'
     Gold       = '#FFD966'
-    InfoValue  = '#B8CCE4'
+    InfoValue  = '#F2F7FC'
     DividerRed   = '#C00000'
     DividerBlue  = '#1F4E79'
 }
@@ -132,22 +142,25 @@ function Get-SlidePlainText {
 }
 
 function Test-DividerSlide {
+    # Conservative divider detection: a divider may contain ONLY text shapes
+    # and empty autoshapes. Any picture (13), media (16), OLE (7), group (6),
+    # table (19) or chart (3) disqualifies the slide — content can never sit
+    # on a divider, and Update-DividerSlide never deletes shapes, so content
+    # loss by misclassification is structurally impossible.
     param($Slide, [string]$SlideText)
-    if ($SlideText.Length -gt 12) { return $false }
-    $hasDividerText = $false
+    if ([string]::IsNullOrWhiteSpace($SlideText) -or $SlideText.Length -gt 12) { return $false }
+    $hasTitle = $false
     foreach ($shape in @($Slide.Shapes)) {
         try {
-            if ($shape.Type -eq 13) { return $false }  # msoPicture: content page, never a divider
+            if ($shape.Name -eq 'sciman-brand-icon') { continue }
+            if ($shape.Type -in @(3, 6, 7, 13, 16, 19)) { return $false }
         } catch { }
         try {
             if ($shape.HasTextFrame -ne -1 -or $shape.TextFrame.HasText -ne -1) { continue }
-            $trimmed = ([string]$shape.TextFrame.TextRange.Text).Trim()
-            if ($trimmed -match '^(第[0-9０-９]+课时|拓展|比热容公式|比热容[（(][0-9０-９]+[)）])$') {
-                $hasDividerText = $true
-            }
+            if (([string]$shape.TextFrame.TextRange.Text).Trim().Length -gt 0) { $hasTitle = $true }
         } catch { }
     }
-    return $hasDividerText
+    return $hasTitle
 }
 
 function Get-SlideRole {
@@ -267,6 +280,9 @@ function Update-SpecialSlideText {
     )
     $styled = 0
     $slideWidth = $Slide.Parent.PageSetup.SlideWidth
+    $slideHeight = $Slide.Parent.PageSetup.SlideHeight
+    $coverTitleShapes = New-Object System.Collections.Generic.List[object]
+    $styledBlocks = New-Object System.Collections.Generic.List[object]
     foreach ($shape in @($Slide.Shapes)) {
         try {
             if ($shape.HasTextFrame -ne -1 -or $shape.TextFrame.HasText -ne -1) { continue }
@@ -285,6 +301,18 @@ function Update-SpecialSlideText {
                             $styled++
                         } elseif ($trimmed -eq '广州番禺王耀强') {
                             Set-ParagraphLook $paragraph 'Subtitle' -FarEastFont '' -LatinFont ''
+                            $styled++
+                        } elseif ($trimmed.Length -le 16 -and $trimmed -notmatch '知乎|公众号|Q群|http|群号') {
+                            # Generic cover title (e.g. 燃料的热值、效率): gold,
+                            # enlarged and bold; fonts are kept so a calligraphy
+                            # title survives.  The shape is centred near the top
+                            # right after the switch.  The size adapts to the
+                            # character count so short titles keep the same top
+                            # band presence as long ones (8+ chars stay at the
+                            # series-standard 52pt).
+                            $titleSize = [Math]::Min(68, [Math]::Max(52, [Math]::Round(0.36 * $slideWidth / [Math]::Max(1, $trimmed.Length))))
+                            Set-ParagraphLook $paragraph 'Gold' $titleSize -Bold -1 -FarEastFont '' -LatinFont ''
+                            $coverTitleShapes.Add($shape) | Out-Null
                             $styled++
                         } else {
                             # A leading fullwidth opening quote (U+201C)
@@ -306,7 +334,10 @@ function Update-SpecialSlideText {
                                     }
                                 } catch { }
                             }
-                            Set-ParagraphLook $paragraph 'Secondary' 22 '微软雅黑' 'Consolas'
+                            # Contact lines: 华文行楷 labels/values with the
+                            # monospace Latin kept for URLs and numbers — the
+                            # elegant special-page voice, distinct from body.
+                            Set-ParagraphLook $paragraph 'Secondary' 22 '华文行楷' 'Consolas'
                             Set-InfoLabelSplit $paragraph 'Gold' 'InfoValue'
                             # LineRuleAfter must be off, otherwise SpaceAfter is
                             # counted in LINES and pushes the next paragraphs
@@ -322,41 +353,58 @@ function Update-SpecialSlideText {
                     }
                     'End' {
                         if ($trimmed -eq 'END') {
-                            Set-ParagraphLook $paragraph 'Gold' -Bold -1
+                            # Display serif for the show-title Latin word; the
+                            # ea slot is cleared of legacy 等线 Light.
+                            Set-ParagraphLook $paragraph 'Gold' -Bold -1 -FarEastFont 'Georgia' -LatinFont 'Georgia'
                         } elseif ($trimmed -match '^http') {
-                            Set-ParagraphLook $paragraph 'Link' 18 -Bold 0
+                            # Lines stay LEFT-aligned; the whole block is hugged
+                            # to its longest line and centred as one unit by
+                            # the SpecialBlocksCentred pass (same as the
+                            # resource page). 24/18pt matches the resource
+                            # page's declaration/link family so the centred
+                            # block reads the same.
+                            Set-ParagraphLook $paragraph 'Link' 18 -Bold 0 -FarEastFont '楷体' -LatinFont 'Consolas'
+                            try { $paragraph.ParagraphFormat.Alignment = 1 } catch { }  # ppAlignLeft
                         } else {
-                            Set-ParagraphLook $paragraph 'Body' -Bold 0
+                            # Declaration lines use 楷体 for the elegant
+                            # special-page voice (body stays 微软雅黑).
+                            Set-ParagraphLook $paragraph 'Body' 24 -FarEastFont '楷体' -Bold -1
                             Protect-KeptRuns $paragraph '禁止' 'KeepYellow'
+                            try { $paragraph.ParagraphFormat.Alignment = 1 } catch { }  # ppAlignLeft
                         }
                         $styled++
                     }
                     'Resource' {
                         if ($trimmed -match '^课件下载地址') {
-                            Set-ParagraphLook $paragraph 'Gold' -Bold -1
+                            Set-ParagraphLook $paragraph 'Gold' -Bold -1 -FarEastFont '华文行楷' -LatinFont ''
                         } elseif ($trimmed -match '^(百度网盘|阿里云盘|夸克网盘)') {
-                            Set-ParagraphLook $paragraph 'Title' -Bold -1
+                            Set-ParagraphLook $paragraph 'Title' 28 -Bold -1 -FarEastFont '华文行楷' -LatinFont ''
                         } elseif ($trimmed -match '^http') {
-                            Set-ParagraphLook $paragraph 'Link' 18 -Bold 0
+                            Set-ParagraphLook $paragraph 'Link' 18 -Bold 0 -FarEastFont '' -LatinFont 'Consolas'
                         } elseif ($trimmed -match '【|加群方法|知乎') {
-                            Set-ParagraphLook $paragraph 'Secondary' -Bold 0
+                            Set-ParagraphLook $paragraph 'Secondary' 24 '楷体' -Bold 0
                         } else {
-                            Set-ParagraphLook $paragraph 'Body' -Bold 0
+                            Set-ParagraphLook $paragraph 'Body' -Bold 0 -FarEastFont '楷体'
                         }
                         $styled++
                     }
                     'LinkHub' {
                         if ($trimmed -match '^网盘群') {
-                            Set-ParagraphLook $paragraph 'Gold' -Bold -1
+                            Set-ParagraphLook $paragraph 'Gold' -Bold -1 -FarEastFont '华文行楷' -LatinFont ''
                         } elseif ($trimmed -match '^[0-9０-９]{5,}') {
                             # Pure group-number lines go light blue for contrast
                             # against the white instruction lines.
-                            Set-ParagraphLook $paragraph 'Link' -Bold 0
+                            Set-ParagraphLook $paragraph 'Link' -Bold 0 -LatinFont 'Consolas'
                         } else {
-                            Set-ParagraphLook $paragraph 'Body' -Bold 0
+                            Set-ParagraphLook $paragraph 'Body' -FarEastFont '楷体' -Bold 0
                         }
                         $styled++
                     }
+                }
+                if ($Role -in @('End', 'Resource') -and ([string]$textRange.Text).Trim().Length -gt 40) {
+                    # Multi-line declaration/download blocks: hug their longest
+                    # line and centre horizontally (post-loop pass below).
+                    $styledBlocks.Add([pscustomobject]@{ Shape = $shape }) | Out-Null
                 }
             }
             if ($Role -eq 'Cover' -and $shape.HasTextFrame -eq -1 -and
@@ -382,6 +430,102 @@ function Update-SpecialSlideText {
             $Actions.Add("ShapeSkipped: $($_.Exception.Message)") | Out-Null
         }
     }
+    if ($coverTitleShapes.Count -gt 0) {
+        # Cover titles are centred near the top of the slide, hugging their
+        # own ink so the brand background carries the composition.
+        foreach ($titleShape in $coverTitleShapes) {
+            try {
+                $titleFrame = $titleShape.TextFrame
+                $titleFrame.WordWrap = 0
+                $titleFrame.AutoSize = 0  # ppAutoSizeNone
+                $titleFrame.VerticalAnchor = 3  # msoAnchorMiddle
+                $titleRange = $titleShape.TextFrame.TextRange
+                $titleWidth = [Math]::Max(100.0, [double]$titleRange.BoundWidth + $titleFrame.MarginLeft + $titleFrame.MarginRight)
+                $titleHeight = [Math]::Max(40.0, [double]$titleRange.BoundHeight + $titleFrame.MarginTop + $titleFrame.MarginBottom)
+                # COM geometry puts must marshal as VT_R4: always [single].
+                $titleShape.Width = [single][Math]::Round([double]$titleWidth, 1)
+                $titleShape.Height = [single][Math]::Round([double]$titleHeight, 1)
+                $titleShape.Left = [single][Math]::Round(([double]$slideWidth - [double]$titleShape.Width) / 2, 1)
+                $titleShape.Top = [single][Math]::Round([double]$slideHeight * 0.16, 1)
+            } catch {
+                $Actions.Add("CoverTitlePlaced: failed - $($_.Exception.Message)") | Out-Null
+            }
+        }
+        $Actions.Add('CoverTitleCentred(gold bold, adaptive 52-68pt by title length, top-centred)') | Out-Null
+    }
+    if ($styledBlocks.Count -gt 0) {
+        # END/Resource text blocks hug their longest line and are centred
+        # horizontally on the brand background (vertical position kept).
+        # Uses the whole-range BoundWidth: the legacy TextRange has no
+        # Count/Item members, so per-line iteration is not available here —
+        # with the 24pt END declaration the measured width is the true block
+        # ink width and centres visibly.
+        foreach ($block in $styledBlocks) {
+            try {
+                $blockShape = $block.Shape
+                $blockRange = $blockShape.TextFrame.TextRange
+                $blockFrame = $blockShape.TextFrame
+                $blockFrame.WordWrap = 0
+                $blockFrame.AutoSize = 0  # ppAutoSizeNone
+                $blockWidth = [Math]::Max(100.0, [double]$blockRange.BoundWidth + $blockFrame.MarginLeft + $blockFrame.MarginRight)
+                $blockHeight = [Math]::Max(40.0, [double]$blockRange.BoundHeight + $blockFrame.MarginTop + $blockFrame.MarginBottom)
+                $blockShape.Width = [single][Math]::Round([double]$blockWidth, 1)
+                $blockShape.Height = [single][Math]::Round([double]$blockHeight, 1)
+                $blockShape.Left = [single][Math]::Round(([double]$slideWidth - [double]$blockShape.Width) / 2, 1)
+            } catch {
+                $Actions.Add("BlockCentred: failed - $($_.Exception.Message)") | Out-Null
+            }
+        }
+        $Actions.Add('SpecialBlocksCentred') | Out-Null
+    }
+    if ($Role -eq 'LinkHub') {
+        # The 网盘群 text block is long: confine it to the slide safe area and
+        # shrink the font just enough that everything fits with margins.
+        foreach ($shape in @($Slide.Shapes)) {
+            try {
+                if ($shape.HasTextFrame -ne -1 -or $shape.TextFrame.HasText -ne -1) { continue }
+                $textRange = $shape.TextFrame.TextRange
+                if (([string]$textRange.Text).Trim().Length -le 40) { continue }
+                $margin = 26.0
+                $shape.TextFrame.WordWrap = -1  # msoTrue: wrap inside the safe width
+                $shape.TextFrame.AutoSize = 0  # ppAutoSizeNone
+                try {
+                    # Some text frames reject anchor changes; non-fatal.
+                    $shape.TextFrame.VerticalAnchor = 2  # msoAnchorTop
+                } catch {
+                    $Actions.Add('LinkHubAnchorSkipped') | Out-Null
+                }
+                $shape.Left = [single]$margin
+                $shape.Width = [single]([double]$slideWidth - 2 * $margin)
+                $shape.Top = [single]16
+                $shape.Height = [single]([double]$slideHeight - 32)
+                $available = [double]$slideHeight - 32
+                $fitSize = 20.0
+                try { $fitSize = [double]([string]$textRange.Font.Size) } catch { }
+                if ($fitSize -lt 12 -or $fitSize -gt 44) { $fitSize = 20.0 }
+                $shrunk = 0
+                for ($attemptFit = 0; $attemptFit -lt 8; $attemptFit++) {
+                    if ([double]$textRange.BoundHeight -le $available) { break }
+                    $fitSize = [Math]::Max(12.0, $fitSize - 2.0)
+                    try {
+                        $textRange.Font.Size = [single]$fitSize
+                        $shrunk++
+                    } catch {
+                        $Actions.Add("LinkHubFit: size $([string]$fitSize) rejected - $($_.Exception.Message)") | Out-Null
+                        break
+                    }
+                }
+                # Hug the widest wrapped line and centre the block horizontally:
+                # full-safe-area width makes the text visually left-stranded.
+                $hugWidth = [Math]::Max(200.0, [double]$textRange.BoundWidth + [double]$shape.TextFrame.MarginLeft + [double]$shape.TextFrame.MarginRight)
+                $shape.Width = [single][Math]::Round($hugWidth, 1)
+                $shape.Left = [single][Math]::Round(([double]$slideWidth - [double]$shape.Width) / 2, 1)
+                $Actions.Add("LinkHubFitted(centred, width $([int]$hugWidth)pt, font $([string]$fitSize)pt, shrink steps: $shrunk)") | Out-Null
+            } catch {
+                $Actions.Add("LinkHubFit: failed - $($_.Exception.Message)") | Out-Null
+            }
+        }
+    }
     if ($styled -gt 0) {
         $Actions.Add("TextRestyled($Role) x$styled") | Out-Null
     }
@@ -402,19 +546,25 @@ function Update-DividerSlide {
     $centered = 0
     foreach ($shape in @($Slide.Shapes)) {
         try {
+            if ($shape.Name -eq 'sciman-brand-icon') { continue }
             if ($shape.HasTextFrame -ne -1 -or $shape.TextFrame.HasText -ne -1) { continue }
             $trimmed = ([string]$shape.TextFrame.TextRange.Text).Trim()
             if ($trimmed.Length -eq 0) { continue }
             $textRange = $shape.TextFrame.TextRange
-            if ($trimmed -match '^(第[0-9０-９]+课时|拓展)$') {
+            $isSectionMark = ($trimmed -match '^(第[0-9０-９]+课时|拓展)$')
+            if ($isSectionMark) {
                 $textRange.Font.Color.RGB = Convert-HexToRgbLong 'DividerRed'
             } else {
                 $textRange.Font.Color.RGB = Convert-HexToRgbLong 'DividerBlue'
             }
-            $textRange.Font.NameFarEast = '微软雅黑'
-            $textRange.Font.Name = '微软雅黑'
+            # Decorative voice matching the special pages: 华文行楷 for the
+            # big standalone title, sized up from the old 54pt 雅黑 baseline.
+            $textRange.Font.NameFarEast = '华文行楷'
+            $textRange.Font.Name = '华文行楷'
             $textRange.Font.Bold = -1
-            $textRange.Font.Size = $FontSize
+            # 2026-09-15 用户定版：分隔页统一 80pt（课时/拓展红、课题名蓝，
+            # 拓展页与其他分隔页同字号，仅颜色按类型区分）。
+            $textRange.Font.Size = [single]80
             $shape.TextFrame.AutoSize = 0  # ppAutoSizeNone
             $shape.TextFrame.WordWrap = 0  # msoFalse so the box hugs the text
             $shape.TextFrame.VerticalAnchor = 3  # msoAnchorMiddle
@@ -435,7 +585,7 @@ function Update-DividerSlide {
         }
     }
     if ($centered -gt 0) {
-        $Actions.Add("DividerUnified x$centered (微软雅黑 ${FontSize}pt 规范色 双居中)") | Out-Null
+        $Actions.Add("DividerUnified x$centered (行楷 80pt 规范色 双居中)") | Out-Null
     }
 }
 
@@ -445,6 +595,10 @@ function Test-IconZoneOccupied {
     $slideArea = $pageSetup.SlideWidth * $pageSetup.SlideHeight
     foreach ($shape in @($Slide.Shapes)) {
         try {
+            # The brand's own icon is decoration, not content: on idempotent
+            # re-runs the stale icon from the previous generation must not
+            # count as a zone occupant (it is deleted and re-added below).
+            if ($shape.Name -eq 'sciman-brand-icon') { continue }
             if (($shape.Width * $shape.Height) -gt 0.7 * $slideArea) { continue }  # full-bleed media
             if ($shape.Left -ge $ZoneRight -or ($shape.Left + $shape.Width) -le $ZoneLeft) { continue }
             if ($shape.Top -ge $ZoneBottom -or ($shape.Top + $shape.Height) -le $ZoneTop) { continue }
@@ -650,10 +804,10 @@ $summaryLines = @(
     '- 仅封面/END/资源页/网盘群页替换品牌背景图（右上角已合成新公众号图标），其余页面保持白底',
     '- 删除蓝底特殊页上的旧公众号图标，避免与新背景重复',
     '- 封面：标题浅金（保留行楷）、副标题近白；三行联系信息 22pt 左对齐、文本块随最长行收窄后整体水平居中，"标签："浅金加粗 + 内容浅蓝灰，雅黑+Consolas',
-    '- END：END 浅金加粗、正文白色、"禁止"金色加粗（按字符定位保留高亮）、长链接天蓝 18pt 单行',
+    '- END：END 浅金加粗 Georgia 居中、声明行 24pt/链接 18pt 左对齐且整块贴最长行后水平居中（楷体/Consolas）、"禁止"金色加粗（按字符定位保留高亮）',
     '- 资源页：页标题浅金加粗、网盘名白色加粗、链接天蓝 18pt 单行、说明文字浅蓝灰',
     '- 网盘群页：标题浅金加粗、群号数字行天蓝、说明行白色（版式与字号保持原样）',
-    '- 分隔页（第N课时/比热容（N）/比热容公式/拓展）：不加背景图，白底 + 统一微软雅黑加粗 ${DividerFontSize}pt，课时/拓展用强调红、比热容标题用标题蓝，文字文本框内居中且文本框页面居中，右上角不透明图标',
+    '- 分隔页（第N课时/课题名/拓展等短标题页）：不加背景图，白底 + 华文行楷加粗 80pt（课题名标题蓝、课时/拓展强调红），双居中，右上角不透明图标',
     '- 正文等其余页面：右上角统一 45% 半透明水印图标（约 ${IconDiameterPt}pt，位置固定），保证每页品牌露出且不与正文抢读',
     '- 原空白页保持原样（不加背景、不加图标）',
     '',

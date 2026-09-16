@@ -297,6 +297,16 @@ $script:DisableAdvanceOnClick = [bool](Get-ConfigValue 'rules' 'disableAdvanceOn
 # Host font availability cannot change mid-run; the check result is cached so
 # large batches do not re-enumerate every installed family per file.
 $script:ConfiguredFontCheckCache = $null
+# Shapes whose geometry this run is allowed to change on purpose (width
+# expansion / answer alignment when config enables them), keyed
+# '<slideNumber>|<shapeId>'. Everything else is restored to the source xfrm
+# after SaveAs: PowerPoint re-runs AutoSize layout asynchronously and can
+# re-grow COM-restored bounds before the package is serialized, so the
+# file-level restore is the only deterministic conservation point.
+$script:IntentionalGeometryShapes = @{}
+# Per-file restore requests, executed after PowerPoint quits (the SaveAs
+# target stays locked by the PowerPoint process until then).
+$script:PendingGeometryRestores = New-Object System.Collections.Generic.List[object]
 
 # --- Yellow-ish RGB range for highlight-box detection ---
 # Tolerance band: R > 200, G > 200, B < 180 (covers most yellow/cream fills)
@@ -678,6 +688,9 @@ function Test-IsFormulaCandidateText {
     param([string]$Text)
     $t = ($Text -replace '\s+', '')
     if ([string]::IsNullOrWhiteSpace($t)) { return $false }
+    # URLs and local paths commonly contain slashes and must never enter the
+    # formula styling/conversion path merely because they look mathematical.
+    if ($t -match '(?i)(https?://|www\.|[A-Za-z]:[\\/])') { return $false }
     if ($t.Length -gt 80) { return $false }
     if ($t -match '[=ηΩ]') { return $true }
     if ($t -match '([PWUIRFSη]|W有|W总|W额|G物|G动)[=＝].*[/÷]') { return $true }
@@ -880,6 +893,48 @@ function Get-TextRangeFontSize {
         if ($size -gt 0) { return $size }
     } catch { }
     return $null
+}
+
+function Get-TextRangeBounds {
+    param($TextRange)
+    try {
+        $boundWidth = [double]$TextRange.BoundWidth
+        $boundHeight = [double]$TextRange.BoundHeight
+        if ($boundWidth -gt 0 -or $boundHeight -gt 0) {
+            return [pscustomobject]@{
+                Width = $boundWidth
+                Height = $boundHeight
+            }
+        }
+    } catch { }
+    return $null
+}
+
+function Test-TextRangeFitsShape {
+    param(
+        $Shape,
+        $TextRange,
+        [double]$ShapeWidth,
+        [double]$ShapeHeight,
+        [double]$TolerancePt = 6.0
+    )
+
+    $bounds = Get-TextRangeBounds -TextRange $TextRange
+    if ($null -eq $bounds) {
+        return [pscustomobject]@{
+            Available = $false
+            Fits = $true
+            Width = $null
+            Height = $null
+        }
+    }
+
+    return [pscustomobject]@{
+        Available = $true
+        Fits = ($bounds.Width -le ($ShapeWidth + $TolerancePt) -and $bounds.Height -le ($ShapeHeight + $TolerancePt))
+        Width = $bounds.Width
+        Height = $bounds.Height
+    }
 }
 
 function Resolve-SafeFontSize {
@@ -1168,9 +1223,31 @@ function Set-AutoSizeFontSizeCapSafely {
     )
     if ($MaxSize -le 0) { return }
     if (-not (Test-StyleRuleEnabled -RuleId 'STYLE.TEXT.FONT')) { return }
+
     $textRange = $Shape.TextFrame2.TextRange
     $beforeSize = Get-TextRangeFontSize $textRange
     if ($null -eq $beforeSize -or $beforeSize -le $MaxSize) { return }
+
+    # An AutoSize text box owns its final bounds.  PowerPoint recalculates those
+    # bounds during SaveAs from the effective font metrics, even when COM lets
+    # us assign the old Left/Top/Width/Height immediately after changing the
+    # size.  Capping the size here would therefore violate the repository
+    # invariant after the file is reopened.  Keep the original size and make
+    # the safety decision explicit in the report; callers can opt into a
+    # geometry-changing migration in a separate workflow instead.
+    try {
+        if ([int]$Shape.TextFrame2.AutoSize -ne 0) {
+            Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $ShapeName `
+                -Issue 'BodyFontSizeCapSkippedAutoSize' `
+                -Details "$beforeSize pt exceeds the configured body ceiling; size cap skipped because AutoSize geometry is protected." `
+                -RuleId 'STYLE.TEXT.FONT' -Property 'Size' -Before "$beforeSize" -After "$beforeSize" `
+                -RiskLevel 'R0' -Result 'Skipped'
+            return
+        }
+    } catch {
+        # Continue with the existing guarded path when the host cannot expose
+        # AutoSize.  The surrounding try/catch still prevents an unsafe write.
+    }
     try {
         $textRange.Font.Size = $MaxSize
         # Measure the AutoSize reflow first; restore the captured bounds only if
@@ -1217,6 +1294,252 @@ function Get-AutoSizeGeometryDrift {
         [Math]::Max([Math]::Abs(([double]$Shape.Width) - $Width), [Math]::Abs(([double]$Shape.Height) - $Height)))
 }
 
+function Add-IntentionalGeometryChange {
+    param([int]$SlideNumber, [int]$ShapeId, [string]$Reason)
+    if ($SlideNumber -le 0 -or $ShapeId -le 0) { return }
+    $script:IntentionalGeometryShapes["$SlideNumber|$ShapeId"] = $Reason
+}
+
+function Get-GeometrySlideXmlNames {
+    param([string]$PptxPath)
+    $names = New-Object System.Collections.Generic.List[string]
+    $zip = $null
+    $stream = $null
+    try {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        # Shared read/write co-exists with lingering antivirus/watcher handles
+        # that hold the freshly written package after PowerPoint exits.
+        $stream = [System.IO.File]::Open($PptxPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $zip = New-Object System.IO.Compression.ZipArchive($stream, [System.IO.Compression.ZipArchiveMode]::Read)
+        foreach ($entry in @($zip.Entries)) {
+            if ($entry.FullName -match '^ppt/slides/slide(\d+)\.xml$') { $names.Add($entry.FullName) | Out-Null }
+        }
+    } finally {
+        if ($null -ne $zip) { $zip.Dispose() }
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+    return $names
+}
+
+function Read-GeometrySlideXmlDocument {
+    param($Zip, [string]$EntryName)
+    $entry = $Zip.GetEntry($EntryName)
+    if ($null -eq $entry) { return $null }
+    $doc = New-Object System.Xml.XmlDocument
+    $stream = $entry.Open()
+    try {
+        $doc.Load($stream)
+    } finally {
+        $stream.Dispose()
+    }
+    return $doc
+}
+
+function Get-ShapeGeometryFromXfrm {
+    # Enumerates text-box families of transforms (sp/pic/cxnSp spPr and grpSp
+    # grpSpPr). graphicFrame p:xfrm is intentionally excluded: normalize never
+    # moves OLE/table frames and the OLE AlternateContent branches share ids.
+    param([System.Xml.XmlDocument]$Document)
+    $shapes = New-Object System.Collections.Generic.List[object]
+    foreach ($xfrm in @($Document.SelectNodes('//*[local-name()="xfrm" and namespace-uri()="http://schemas.openxmlformats.org/drawingml/2006/main"]'))) {
+        $owner = $xfrm.ParentNode.ParentNode
+        if ($null -eq $owner) { continue }
+        $ownerLocal = [string]$owner.LocalName
+        if ($ownerLocal -notin @('sp', 'pic', 'cxnSp', 'grpSp')) { continue }
+        $cNvPr = $null
+        foreach ($candidate in @($owner.SelectNodes('.//*[local-name()="cNvPr"]'))) {
+            $cNvPr = $candidate
+            break
+        }
+        if ($null -eq $cNvPr) { continue }
+        $shapeId = 0
+        if (-not [int]::TryParse([string]$cNvPr.GetAttribute('id'), [ref]$shapeId)) { continue }
+        $off = $xfrm.SelectSingleNode('./*[local-name()="off"]')
+        $ext = $xfrm.SelectSingleNode('./*[local-name()="ext"]')
+        if ($null -eq $off -or $null -eq $ext) { continue }
+        $shapes.Add([pscustomobject]@{
+            ShapeId = $shapeId
+            Xfrm = $xfrm
+            X = [string]$off.GetAttribute('x')
+            Y = [string]$off.GetAttribute('y')
+            Cx = [string]$ext.GetAttribute('cx')
+            Cy = [string]$ext.GetAttribute('cy')
+        }) | Out-Null
+    }
+    return $shapes
+}
+
+function Get-SourceShapeGeometryMap {
+    # Captures the exact source xfrm attribute strings per slide part. Values
+    # are kept as strings and written back verbatim so the restored geometry is
+    # byte-identical to the source (no EMU conversion rounding at all).
+    param([string]$SourcePath)
+    $map = @{}
+    if (-not (Test-Path -LiteralPath $SourcePath)) { return $map }
+    $zip = $null
+    $zipStream = $null
+    try {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $zipStream = [System.IO.File]::Open($SourcePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $zip = New-Object System.IO.Compression.ZipArchive($zipStream, [System.IO.Compression.ZipArchiveMode]::Read)
+        foreach ($entryName in @(Get-GeometrySlideXmlNames -PptxPath $SourcePath)) {
+            $slideNumber = 0
+            if ($entryName -notmatch '^ppt/slides/slide(\d+)\.xml$') { continue }
+            $slideNumber = [int]$Matches[1]
+            $doc = Read-GeometrySlideXmlDocument -Zip $zip -EntryName $entryName
+            if ($null -eq $doc) { continue }
+            foreach ($shape in @(Get-ShapeGeometryFromXfrm -Document $doc)) {
+                $key = "$slideNumber|$($shape.ShapeId)"
+                if ($map.ContainsKey($key)) {
+                    # Duplicate transform for one id (AlternateContent branches):
+                    # conservation cannot be attributed unambiguously, so the
+                    # shape is excluded from the restore instead of guessed.
+                    $map[$key] = $null
+                    continue
+                }
+                $map[$key] = [pscustomobject]@{ X = $shape.X; Y = $shape.Y; Cx = $shape.Cx; Cy = $shape.Cy }
+            }
+        }
+    } finally {
+        if ($null -ne $zip) { $zip.Dispose() }
+        if ($null -ne $zipStream) { $zipStream.Dispose() }
+    }
+    return $map
+}
+
+function Restore-SourceShapeGeometry {
+    # Deterministic geometry conservation. COM restores of AutoSize bounds are
+    # advisory: PowerPoint recomputes them from font metrics during SaveAs
+    # layout, so a re-grown box can reach the saved package even though COM
+    # reported the restored value. This pass rewrites the saved slide XML back
+    # to the source xfrm attribute strings unless the run recorded an explicit
+    # intentional geometry change for that shape.
+    # PowerPoint keeps a handle on the SaveAs target until the automation
+    # process actually exits, and Quit() completion is observed to lag one to
+    # a few minutes behind the call (async teardown of large decks). The pass
+    # is idempotent, so the lock is polled with a five-second probe and a six
+    # minute budget before the failure is allowed to surface.
+    param(
+        [string]$SourcePath,
+        [string]$OutputPath,
+        [string]$FileName
+    )
+    $attempts = 72
+    for ($attempt = 1; $attempt -le $attempts; $attempt++) {
+        try {
+            return Restore-SourceShapeGeometryOnce -SourcePath $SourcePath -OutputPath $OutputPath -FileName $FileName
+        } catch {
+            if ($attempt -ge $attempts) { throw }
+            if ($_.Exception.Message -notmatch 'being used by another process') { throw }
+            Start-Sleep -Seconds 5
+        }
+    }
+    return 0
+}
+
+function Restore-SourceShapeGeometryOnce {
+    param(
+        [string]$SourcePath,
+        [string]$OutputPath,
+        [string]$FileName
+    )
+    $sourceMap = Get-SourceShapeGeometryMap -SourcePath $SourcePath
+    if ($sourceMap.Count -eq 0) { return 0 }
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = $null
+    $zipStream = $null
+    $healedTotal = 0
+    try {
+        # Update mode on a shared stream: allows co-existing read/write-share
+        # handles (antivirus/watcher) that would reject an exclusive open.
+        $zipStream = [System.IO.File]::Open($OutputPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)
+        $zip = New-Object System.IO.Compression.ZipArchive($zipStream, [System.IO.Compression.ZipArchiveMode]::Update)
+        foreach ($entryName in @(Get-GeometrySlideXmlNames -PptxPath $OutputPath)) {
+            $slideNumber = 0
+            if ($entryName -notmatch '^ppt/slides/slide(\d+)\.xml$') { continue }
+            $slideNumber = [int]$Matches[1]
+            $doc = Read-GeometrySlideXmlDocument -Zip $zip -EntryName $entryName
+            if ($null -eq $doc) { continue }
+            $changed = $false
+            foreach ($shape in @(Get-ShapeGeometryFromXfrm -Document $doc)) {
+                $key = "$slideNumber|$($shape.ShapeId)"
+                if (-not $sourceMap.ContainsKey($key)) { continue }
+                $sourceGeometry = $sourceMap[$key]
+                if ($null -eq $sourceGeometry) { continue }
+                if ($script:IntentionalGeometryShapes.ContainsKey($key)) { continue }
+                $off = $shape.Xfrm.SelectSingleNode('./*[local-name()="off"]')
+                $ext = $shape.Xfrm.SelectSingleNode('./*[local-name()="ext"]')
+                if ($null -eq $off -or $null -eq $ext) { continue }
+                if ([string]$off.GetAttribute('x') -eq $sourceGeometry.X -and
+                    [string]$off.GetAttribute('y') -eq $sourceGeometry.Y -and
+                    [string]$ext.GetAttribute('cx') -eq $sourceGeometry.Cx -and
+                    [string]$ext.GetAttribute('cy') -eq $sourceGeometry.Cy) { continue }
+                $before = '{0}|{1}|{2}|{3}' -f $off.GetAttribute('x'), $off.GetAttribute('y'), $ext.GetAttribute('cx'), $ext.GetAttribute('cy')
+                $off.SetAttribute('x', $sourceGeometry.X)
+                $off.SetAttribute('y', $sourceGeometry.Y)
+                $ext.SetAttribute('cx', $sourceGeometry.Cx)
+                $ext.SetAttribute('cy', $sourceGeometry.Cy)
+                $after = '{0}|{1}|{2}|{3}' -f $sourceGeometry.X, $sourceGeometry.Y, $sourceGeometry.Cx, $sourceGeometry.Cy
+                Add-ReportRow -File $FileName -SlideNumber $slideNumber -ShapeName "shapeId=$($shape.ShapeId)" `
+                    -Issue 'AutoSizeDeferredReflowHealed' `
+                    -Details 'PowerPoint re-grew the AutoSize bounds during SaveAs layout; the saved slide XML was restored to the exact source xfrm values.' `
+                    -RuleId 'SAFETY.GEOMETRY.AUTOSIZE' -Property 'xfrm/off/ext' -Before $before -After $after `
+                    -RiskLevel 'R1' -Result 'Applied'
+                $healedTotal++
+                $changed = $true
+            }
+            if ($changed) {
+                $entry = $zip.GetEntry($entryName)
+                if ($null -eq $entry) { continue }
+                $settings = New-Object System.Xml.XmlWriterSettings
+                $settings.Indent = $false
+                $settings.OmitXmlDeclaration = $false
+                $settings.Encoding = New-Object System.Text.UTF8Encoding($false)
+                $stream = New-Object System.IO.MemoryStream
+                try {
+                    $writer = [System.Xml.XmlWriter]::Create($stream, $settings)
+                    try {
+                        $doc.Save($writer)
+                        $writer.Flush()
+                    } finally {
+                        $writer.Dispose()
+                    }
+                    $xmlBytes = $stream.ToArray()
+                } finally {
+                    $stream.Dispose()
+                }
+                $entry.Delete()
+                $newEntry = $zip.CreateEntry($entryName)
+                $entryStream = $newEntry.Open()
+                try {
+                    $entryStream.Write($xmlBytes, 0, $xmlBytes.Length)
+                } finally {
+                    $entryStream.Dispose()
+                }
+            }
+        }
+    } finally {
+        if ($null -ne $zip) { $zip.Dispose() }
+        if ($null -ne $zipStream) { $zipStream.Dispose() }
+    }
+    if ($healedTotal -gt 0) {
+        # Verify the patch landed: reopen the package and compare every
+        # recorded shape against the source xfrm values.
+        $verifyDoc = $null
+        $map2 = Get-SourceShapeGeometryMap -SourcePath $OutputPath
+        foreach ($key in @($sourceMap.Keys)) {
+            $expected = $sourceMap[$key]
+            if ($null -eq $expected -or -not $map2.ContainsKey($key) -or $null -eq $map2[$key]) { continue }
+            $actual = $map2[$key]
+            if ([string]$actual.X -ne [string]$expected.X -or [string]$actual.Y -ne [string]$expected.Y -or
+                [string]$actual.Cx -ne [string]$expected.Cx -or [string]$actual.Cy -ne [string]$expected.Cy) {
+                throw "Geometry restore verification failed for slide shape '$key': saved '$($actual.X)|$($actual.Y)|$($actual.Cx)|$($actual.Cy)' expected '$($expected.X)|$($expected.Y)|$($expected.Cx)|$($expected.Cy)'."
+            }
+        }
+    }
+    return $healedTotal
+}
+
 function Set-AutoSizeTextFontSafely {
     param(
         $Shape,
@@ -1237,21 +1560,104 @@ function Set-AutoSizeTextFontSafely {
     $width = [double]$Shape.Width
     $height = [double]$Shape.Height
     $autoSize = [int]$Shape.TextFrame2.AutoSize
+    $textRange = $Shape.TextFrame2.TextRange
     $font = $Shape.TextFrame2.TextRange.Font
     $beforeName = [string]$font.Name
     $beforeFarEast = [string]$font.NameFarEast
 
+    # A range whose runs mix families reports an empty font name. Resolve each
+    # run individually instead of skipping the shape: when every run states its
+    # own family, per-run writes are exactly as rollback-safe as the uniform
+    # single-write path, and the shape still receives the normalized family.
+    $perRunBefore = $null
+    $beforeSummary = "$beforeName|$beforeFarEast"
     if ([string]::IsNullOrWhiteSpace($beforeName) -or [string]::IsNullOrWhiteSpace($beforeFarEast)) {
-        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
-            -Issue 'TextStyleSkippedMixedFont' -Details 'Mixed or unresolved font runs were preserved because a lossless rollback cannot be guaranteed.' `
-            -RuleId 'STYLE.TEXT.FONT' -Property 'FontName/NameFarEast' -Before "$beforeName|$beforeFarEast" -After "$beforeName|$beforeFarEast" `
-            -RiskLevel 'R0' -Result 'Skipped'
-        return
+        $perRunBefore = New-Object System.Collections.Generic.List[object]
+        try {
+            $runs = $textRange.Runs()
+            for ($runIndex = 1; $runIndex -le $runs.Count; $runIndex++) {
+                $runRange = $runs.Item($runIndex)
+                $runName = [string]$runRange.Font.Name
+                $runFarEast = [string]$runRange.Font.NameFarEast
+                if ([string]::IsNullOrWhiteSpace($runName) -or [string]::IsNullOrWhiteSpace($runFarEast)) {
+                    $perRunBefore = $null
+                    break
+                }
+                $perRunBefore.Add([pscustomobject]@{ Range = $runRange; Name = $runName; FarEast = $runFarEast }) | Out-Null
+                if ($beforeSummary -ne '') { $beforeSummary += '; ' }
+                $beforeSummary += "$runName|$runFarEast"
+            }
+        } catch {
+            $perRunBefore = $null
+        }
+        if ($null -eq $perRunBefore -or $perRunBefore.Count -eq 0) {
+            Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
+                -Issue 'TextStyleSkippedMixedFont' -Details 'Mixed or unresolved font runs were preserved because a lossless rollback cannot be guaranteed.' `
+                -RuleId 'STYLE.TEXT.FONT' -Property 'FontName/NameFarEast' -Before $beforeSummary -After $beforeSummary `
+                -RiskLevel 'R0' -Result 'Skipped'
+            return
+        }
+    }
+
+    # Writes the target family either per resolved run (mixed range) or across
+    # the whole range (uniform range); -Rollback restores the captured state.
+    $setFontFamily = {
+        param([string]$Latin, [string]$FarEast, [switch]$Rollback)
+        if ($null -ne $perRunBefore) {
+            foreach ($entry in $perRunBefore) {
+                if ($Rollback) {
+                    $entry.Range.Font.Name = $entry.Name
+                    $entry.Range.Font.NameFarEast = $entry.FarEast
+                } else {
+                    $entry.Range.Font.Name = $Latin
+                    $entry.Range.Font.NameFarEast = $FarEast
+                }
+            }
+        } elseif ($Rollback) {
+            $font.Name = $beforeName
+            $font.NameFarEast = $beforeFarEast
+        } else {
+            $font.Name = $Latin
+            $font.NameFarEast = $FarEast
+        }
     }
 
     try {
-        $font.Name = $script:Style.FontLatin
-        $font.NameFarEast = $script:Style.FontChinese
+        $beforeFit = Test-TextRangeFitsShape -Shape $Shape -TextRange $textRange -ShapeWidth $width -ShapeHeight $height
+        & $setFontFamily $script:Style.FontLatin $script:Style.FontChinese
+
+        # AutoSize protects the outer shape bounds, but it does not guarantee
+        # that a newly selected font still fits inside those bounds after a
+        # SaveAs round trip.  This is especially important for mixed Chinese
+        # and Latin runs: changing only the Latin family can widen a line while
+        # leaving the original AutoSize geometry unchanged.  Never promote a
+        # font-only normalization that introduces a new content-fit risk.
+        $targetFit = Test-TextRangeFitsShape -Shape $Shape -TextRange $textRange -ShapeWidth $width -ShapeHeight $height
+        $targetOverflow = ($targetFit.Available -and -not $targetFit.Fits)
+        $beforeOverflow = ($beforeFit.Available -and -not $beforeFit.Fits)
+        $targetWorsensExistingOverflow = $false
+        if ($targetOverflow -and $beforeOverflow) {
+            $targetWorsensExistingOverflow = (
+                ($targetFit.Width - $beforeFit.Width) -gt 0.5 -or
+                ($targetFit.Height - $beforeFit.Height) -gt 0.5
+            )
+        }
+        $contentFitRisk = $targetOverflow -and ((-not $beforeFit.Available) -or (-not $beforeOverflow) -or $targetWorsensExistingOverflow)
+        if ($contentFitRisk) {
+            $beforeBoundsText = if ($beforeFit.Available) { "{0:N1}x{1:N1}" -f $beforeFit.Width, $beforeFit.Height } else { 'unavailable' }
+            $targetBoundsText = if ($targetFit.Available) { "{0:N1}x{1:N1}" -f $targetFit.Width, $targetFit.Height } else { 'unavailable' }
+            & $setFontFamily '' '' -Rollback
+            $Shape.Left = [single]$left
+            $Shape.Top = [single]$top
+            $Shape.Width = [single]$width
+            $Shape.Height = [single]$height
+            Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
+                -Issue 'TextStyleSkippedContentFitRisk' `
+                -Details ("Target font {0}/{1} produced text bounds {2} against protected shape {3:N1}x{4:N1}; original bounds were {5}. Font and geometry were rolled back." -f $script:Style.FontLatin, $script:Style.FontChinese, $targetBoundsText, $width, $height, $beforeBoundsText) `
+                -RuleId 'SAFETY.GEOMETRY.AUTOSIZE' -Property 'FontName/NameFarEast' -Before $beforeSummary -After $beforeSummary `
+                -RiskLevel 'R0' -Result 'Skipped'
+            return
+        }
 
         $drift = Get-AutoSizeGeometryDrift -Shape $Shape -Left $left -Top $top -Width $width -Height $height
 
@@ -1279,8 +1685,7 @@ function Set-AutoSizeTextFontSafely {
             }
             if (-not $SpecialSlide) {
                 $compactChineseFont = $script:Style.FontCompactChinese
-                $font.Name = $script:Style.FontLatin
-                $font.NameFarEast = $compactChineseFont
+                & $setFontFamily $script:Style.FontLatin $compactChineseFont
                 $fallbackDrift = Get-AutoSizeGeometryDrift -Shape $Shape -Left $left -Top $top -Width $width -Height $height
                 if ($fallbackDrift -gt 0.05) {
                     $Shape.Left = [single]$left
@@ -1291,7 +1696,7 @@ function Set-AutoSizeTextFontSafely {
                         Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
                             -Issue 'TextStyleNormalizedCompactFallbackGeometryRestored' `
                             -Details ("Microsoft YaHei UI reflowed the AutoSize shape by {0:N2} pt; the compatible fallback font was kept and the original geometry was restored." -f $fallbackDrift) `
-                            -RuleId 'STYLE.TEXT.FONT' -Property 'FontName/NameFarEast' -Before "$beforeName|$beforeFarEast" `
+                            -RuleId 'STYLE.TEXT.FONT' -Property 'FontName/NameFarEast' -Before $beforeSummary `
                             -After "$($script:Style.FontLatin)|$compactChineseFont" -RiskLevel 'R1' -Result 'Applied'
                         Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
                             -Issue 'AutoSizeGeometryRestored' -Details 'Compatible font fallback completed with AutoSize geometry restored to the original bounds.' `
@@ -1305,7 +1710,7 @@ function Set-AutoSizeTextFontSafely {
                     Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
                         -Issue 'TextStyleNormalizedCompactFallback' `
                         -Details 'Microsoft YaHei changed AutoSize geometry; Microsoft YaHei UI preserved geometry and was used as the compatible fallback.' `
-                        -RuleId 'STYLE.TEXT.FONT' -Property 'FontName/NameFarEast' -Before "$beforeName|$beforeFarEast" `
+                        -RuleId 'STYLE.TEXT.FONT' -Property 'FontName/NameFarEast' -Before $beforeSummary `
                         -After "$($script:Style.FontLatin)|$compactChineseFont" -RiskLevel 'R1' -Result 'Applied'
                     Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
                         -Issue 'AutoSizeGeometryRestored' -Details 'Compatible font fallback completed without changing AutoSize or object geometry.' `
@@ -1315,8 +1720,7 @@ function Set-AutoSizeTextFontSafely {
                         -RiskLevel 'R1' -Result 'Applied'
                     return
                 }
-                $font.Name = $beforeName
-                $font.NameFarEast = $beforeFarEast
+                & $setFontFamily '' '' -Rollback
                 $Shape.Left = [single]$left
                 $Shape.Top = [single]$top
                 $Shape.Width = [single]$width
@@ -1324,7 +1728,7 @@ function Set-AutoSizeTextFontSafely {
             }
             Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
                 -Issue 'TextStyleSkippedGeometryRisk' -Details 'Target font reflowed AutoSize geometry beyond the accepted tolerance; font and geometry were rolled back before save.' `
-                -RuleId 'STYLE.TEXT.FONT' -Property 'FontName/NameFarEast' -Before "$beforeName|$beforeFarEast" -After "$beforeName|$beforeFarEast" `
+                -RuleId 'STYLE.TEXT.FONT' -Property 'FontName/NameFarEast' -Before $beforeSummary -After $beforeSummary `
                 -RiskLevel 'R0' -Result 'Skipped'
             return
         }
@@ -1340,7 +1744,7 @@ function Set-AutoSizeTextFontSafely {
         Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
             -Issue 'TextStyleNormalized' `
             -Details $(if ($SpecialSlide) { 'Special slide font family normalized; original size, emphasis, color, AutoSize, and geometry were preserved.' } else { 'Font family normalized; original size, emphasis, color, AutoSize, and geometry were preserved.' }) `
-            -RuleId 'STYLE.TEXT.FONT' -Property 'FontName/NameFarEast' -Before "$beforeName|$beforeFarEast" `
+            -RuleId 'STYLE.TEXT.FONT' -Property 'FontName/NameFarEast' -Before $beforeSummary `
             -After "$($script:Style.FontLatin)|$($script:Style.FontChinese)" -RiskLevel 'R1' -Result 'Applied'
         Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
             -Issue $(if ($SpecialSlide) { 'SpecialSlideFontNormalized' } else { 'AutoSizeGeometryRestored' }) `
@@ -1351,8 +1755,7 @@ function Set-AutoSizeTextFontSafely {
             -RiskLevel 'R1' -Result 'Applied'
     } catch {
         try {
-            $font.Name = $beforeName
-            $font.NameFarEast = $beforeFarEast
+            & $setFontFamily '' '' -Rollback
             $Shape.Left = [single]$left
             $Shape.Top = [single]$top
             $Shape.Width = [single]$width
@@ -1480,6 +1883,7 @@ function Expand-TextBoxWidthIfNeeded {
         if ($script:DoNotResizeShapes) {
             return $false
         }
+        Add-IntentionalGeometryChange -SlideNumber $SlideNumber -ShapeId ([int]$Shape.Id) -Reason 'TextBoxWidthExpanded'
         $Shape.Left = [single]$newLeft
         $Shape.Width = [single]$targetWidth
         $step = 'word-wrap'
@@ -1511,6 +1915,13 @@ function Normalize-TextShape {
     }
 
     if (Test-ShapeUsesAutomaticSizing -Shape $Shape) {
+        if (Test-IsFormulaCandidateText -Text $Text) {
+            $autoFormulaProfile = Add-FormulaCandidateReport -FileName $FileName -SlideNumber $SlideNumber -ShapeName (Get-ShapeName $Shape) -Text $Text
+            Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName (Get-ShapeName $Shape) `
+                -Issue 'FormulaStyleSkippedAutoSize' `
+                -Details ("Formula-like text detected as {0}; automatic-size font normalization is kept geometry-safe and semantic formula styling is deferred to the reviewed OMML path." -f $autoFormulaProfile.Kind) `
+                -RuleId 'STYLE.FORMULA.TEXT' -Property 'FontName/NameFarEast/Size/Color/ParagraphAlignment' -RiskLevel 'R0' -Result 'Skipped'
+        }
         $capLeft = [double]$Shape.Left
         $capTop = [double]$Shape.Top
         $capWidth = [double]$Shape.Width
@@ -1694,6 +2105,7 @@ function Align-AnswerTextBoxes {
             $newTop = [double]($target.CenterY - ($answer.Height / 2))
             $delta = [Math]::Abs($newTop - $oldTop)
             if ($delta -ge 1 -and $delta -le 24) {
+                Add-IntentionalGeometryChange -SlideNumber $SlideNumber -ShapeId ([int]$answer.Shape.Id) -Reason 'AnswerTextAligned'
                 $answer.Shape.Top = [single]$newTop
                 Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName (Get-ShapeName $answer.Shape) -Issue 'AnswerTextAligned' -Details ("Top {0:N1} -> {1:N1} pt; aligned to {2}." -f $oldTop, $newTop, (Get-ShapeName $target.Shape))
             } else {
@@ -2121,6 +2533,17 @@ function Normalize-Presentation {
         [System.GC]::Collect()
         [System.GC]::WaitForPendingFinalizers()
     }
+
+    # Geometry conservation runs after the whole batch: PowerPoint keeps the
+    # SaveAs target locked until the application quits, so the restore cannot
+    # touch the package while COM work is still in flight. Register and defer.
+    if (-not $ReportOnly -and (Test-Path -LiteralPath $outFile)) {
+        $script:PendingGeometryRestores.Add([pscustomobject]@{
+            SourcePath = $File.FullName
+            OutputPath = $outFile
+            FileName = $File.Name
+        }) | Out-Null
+    }
 }
 
 # --- Main ---
@@ -2420,6 +2843,20 @@ if ($DegreeOfParallelism -gt 1 -and $files.Count -gt 1) {
     }
 }
 $sw.Stop()
+
+# Deferred geometry conservation: PowerPoint has quit, so the SaveAs targets
+# are lock-free. Restores run before the report write so healed shapes are
+# part of the same evidence CSV.
+foreach ($pending in $script:PendingGeometryRestores.ToArray()) {
+    try {
+        $healedCount = Restore-SourceShapeGeometry -SourcePath $pending.SourcePath -OutputPath $pending.OutputPath -FileName $pending.FileName
+        if ($healedCount -gt 0) {
+            Add-ReportRow -File $pending.FileName -FilePath $pending.SourcePath -SlideNumber 0 -ShapeName '(presentation)' -Issue 'GeometryConservedByXmlRestore' -Details "$healedCount shape(s) re-grown by deferred AutoSize layout at SaveAs were restored to the source geometry."
+        }
+    } catch {
+        Add-ReportRow -File $pending.FileName -FilePath $pending.SourcePath -SlideNumber 0 -ShapeName '(presentation)' -Issue 'GeometryRestoreFailed' -Details $_.Exception.Message
+    }
+}
 
 $reportPath = Join-Path $OutputDir 'physics-ppt-normalize-report.csv'
 try {
