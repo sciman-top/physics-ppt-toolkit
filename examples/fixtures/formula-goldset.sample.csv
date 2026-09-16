@@ -1,0 +1,3 @@
+﻿ReviewStatus,Slide,ShapeIds,WhitelistName,SourceFormulaText,SizePt,MainColorHex,SubColorHex,Note,EvidencePath
+Approved,9,42,机械效率,η=W_有/W_总,32,1A56B8,,示例：已定稿行（对照裁剪图与整页图核验后进入映射）,00_检查报告/crops/ole-09-42.png;00_检查报告/before-audit/pages/slide-009.png
+Draft,16,13,燃料放热量公式,Q_放=qm,28,C00000,,示例：草稿行（ReviewStatus=Draft 不会进入映射）,00_检查报告/crops/ole-16-13.png;00_检查报告/before-audit/pages/slide-016.png
