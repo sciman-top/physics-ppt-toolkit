@@ -886,6 +886,33 @@ foreach ($preflightMarker in @('Get-MissingConfiguredFonts', 'Get-SlideAspectRat
     if ($normalizeContent -notmatch [regex]::Escape($preflightMarker)) { throw "Preflight check marker is missing: $preflightMarker" }
 }
 
+# Geometry heal write-back re-serializes slide XML verbatim; a
+# PreserveWhitespace=$false Load drops whitespace-only <a:t> runs and the
+# normalized copy silently loses formula spacing (regression: 14.1 slide9
+# 'Q放 = qm' arrived as 'Q放= qm' in the v39 invariant gate).
+if ($normalizeContent -notmatch '(?s)function Read-GeometrySlideXmlDocument \{.*?PreserveWhitespace\s*=\s*\$true') {
+    throw 'Geometry slide XML loader must set PreserveWhitespace=$true before Load to keep whitespace-only a:t runs.'
+}
+$whitespaceRunDoc = New-Object System.Xml.XmlDocument
+$whitespaceRunDoc.PreserveWhitespace = $true
+$whitespaceRunDoc.LoadXml('<p:sp xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:txBody><a:p><a:r><a:t> </a:t></a:r><a:r><a:t>x</a:t></a:r></a:p></p:txBody></p:sp>')
+$whitespaceRunSettings = New-Object System.Xml.XmlWriterSettings
+$whitespaceRunSettings.Indent = $false
+$whitespaceRunStream = New-Object System.IO.MemoryStream
+try {
+    $whitespaceRunWriter = [System.Xml.XmlWriter]::Create($whitespaceRunStream, $whitespaceRunSettings)
+    try {
+        $whitespaceRunDoc.Save($whitespaceRunWriter)
+        $whitespaceRunWriter.Flush()
+    } finally {
+        $whitespaceRunWriter.Dispose()
+    }
+    $whitespaceRunXml = [System.Text.Encoding]::UTF8.GetString($whitespaceRunStream.ToArray())
+} finally {
+    $whitespaceRunStream.Dispose()
+}
+if ($whitespaceRunXml -notmatch '<a:t> </a:t>') { throw 'Whitespace-only a:t round trip failed; geometry heal write-back would erase formula spacing.' }
+
 $aiImportContent = Get-Content -LiteralPath (Join-Path $root 'tools\Import-PptxAiReviewResult.ps1') -Raw -Encoding UTF8
 if ($aiImportContent -match 'PowerPoint\.Application|Presentations\.Open|SaveAs|Normalize-PhysicsPpt') { throw 'AI review import must remain read-only and must not access PPTX automation.' }
 

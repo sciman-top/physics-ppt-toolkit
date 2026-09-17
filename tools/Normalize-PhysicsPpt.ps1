@@ -1326,6 +1326,10 @@ function Read-GeometrySlideXmlDocument {
     $entry = $Zip.GetEntry($EntryName)
     if ($null -eq $entry) { return $null }
     $doc = New-Object System.Xml.XmlDocument
+    # Slide XML is re-serialized verbatim when a geometry heal lands, so
+    # whitespace-only <a:t> runs must survive Load; without this flag .NET
+    # drops them and the normalized copy silently loses formula spacing.
+    $doc.PreserveWhitespace = $true
     $stream = $entry.Open()
     try {
         $doc.Load($stream)
