@@ -46,6 +46,7 @@ CSV 文件（UTF-8 BOM），列与 `Export-FormulaOleMapping.ps1` 校验一致�
 | SourceFormulaText 未命中指定白名单规则 | 行被拒 |
 | 页码/形状 id 不在盘点或非 MathTypeOle | 行被拒 |
 | 证据文件缺失 | 行被拒 |
+| OLE 内容指纹缺少 SourceFormulaText 声明的中文字符 | 行被拒（`OLE content fingerprint mismatch`；映射读取 MathType embedding 的 UTF-16LE 字符做交叉验证，防裁剪图-形状错标——2026-09-17 slide16 sh13/sh16 对调事故后加入） |
 | 多 OLE 合并且次形状有动画绑定 | 写回阶段 `OleTimingDangling` 拒绝，保留 MathType |
 | 任何一行被拒 | `Export-FormulaOleMapping.ps1` 整体 Failed（有 error 即 throw） |
 

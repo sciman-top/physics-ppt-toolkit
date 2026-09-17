@@ -174,6 +174,22 @@ foreach ($row in $goldRows) {
         $errors.Add("${rowLabel}: SourceFormulaText does not resolve to the named current whitelist rule") | Out-Null
         $rowValid = $false
     }
+    # Content fingerprint guard: the goldset's SourceFormulaText must agree
+    # with the MathType embedding's actual CJK characters. The v37-era goldset
+    # attributed slide16 sh13/sh16 to each other's formulas and passed every
+    # schema check — only the embedding bytes know what the OLE really holds.
+    $claimedCjkChars = @([regex]::Matches($sourceFormulaText, '[\u4E00-\u9FFF]') | ForEach-Object { $_.Value } | Sort-Object -Unique)
+    if ($claimedCjkChars.Count -gt 0) {
+        foreach ($shapeRecord in $shapeRecords) {
+            $foundChars = Get-OleEquationCjkFingerprint -PptxPath $inputPath -SlideNumber ([int]$shapeRecord.source.slide) -ShapeId ([int]$shapeRecord.source.shapeId)
+            $missingChars = @($claimedCjkChars | Where-Object { -not $foundChars.Contains($_) })
+            if ($missingChars.Count -gt 0) {
+                $foundPreview = if ($foundChars.Length -gt 24) { $foundChars.Substring(0, 24) + '…' } else { $foundChars }
+                $errors.Add("${rowLabel}: OLE content fingerprint mismatch on shape $($shapeRecord.source.shapeId): SourceFormulaText claims [$(($claimedCjkChars | Sort-Object) -join '')] but the MathType embedding fingerprint lacks [$(($missingChars | Sort-Object) -join '')] (found: $foundPreview); the crop-to-shape attribution is likely swapped or stale") | Out-Null
+                $rowValid = $false
+            }
+        }
+    }
     $evidencePathTexts = @([string](Get-RowValue -Row $row -Name 'EvidencePath') -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
     $fullEvidencePaths = @($evidencePathTexts | ForEach-Object { [System.IO.Path]::GetFullPath($_) })
     $missingEvidencePaths = @($fullEvidencePaths | Where-Object { -not (Test-Path -LiteralPath $_) })

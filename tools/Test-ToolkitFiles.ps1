@@ -913,6 +913,56 @@ try {
 }
 if ($whitespaceRunXml -notmatch '<a:t> </a:t>') { throw 'Whitespace-only a:t round trip failed; geometry heal write-back would erase formula spacing.' }
 
+# OLE content-fingerprint guard: GoldSet SourceFormulaText must agree with
+# the MathType embedding's actual CJK characters. The v37-era goldset
+# attributed slide16 sh13/sh16 to each other's formulas (Q吸=cmΔt vs Q放=qm)
+# and passed every schema check — only the embedding bytes know what the OLE
+# really holds, so the mapping must verify the fingerprint.
+$fingerprintMappingPath = Join-Path $root 'tools\Export-FormulaOleMapping.ps1'
+$fingerprintMappingContent = Get-Content -LiteralPath $fingerprintMappingPath -Raw -Encoding UTF8
+foreach ($fingerprintMarker in @('Get-OleEquationCjkFingerprint', 'OLE content fingerprint mismatch')) {
+    if ($fingerprintMappingContent -notmatch [regex]::Escape($fingerprintMarker)) { throw "Formula OLE mapping content-fingerprint guard marker is missing: $fingerprintMarker" }
+}
+$commonLibContent = Get-Content -LiteralPath (Join-Path $root 'tools\PhysicsPpt.Common.ps1') -Raw -Encoding UTF8
+if ($commonLibContent -notmatch [regex]::Escape('function Get-OleEquationCjkFingerprint')) { throw 'Common library is missing Get-OleEquationCjkFingerprint.' }
+$fingerprintCommonAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'tools\PhysicsPpt.Common.ps1'), [ref]$null, [ref]$null)
+$fingerprintFunctionAst = $fingerprintCommonAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-OleEquationCjkFingerprint' }, $true) | Select-Object -First 1
+if ($null -eq $fingerprintFunctionAst) { throw 'Get-OleEquationCjkFingerprint function definition not found for the behavioral probe.' }
+Invoke-Expression $fingerprintFunctionAst.Extent.Text
+$fingerprintProbeDir = Join-Path $env:TEMP ("fingerprint-probe-" + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $fingerprintProbeDir -Force | Out-Null
+try {
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $fingerprintProbeZip = Join-Path $fingerprintProbeDir 'probe.pptx'
+    $probeArchive = [System.IO.Compression.ZipFile]::Open($fingerprintProbeZip, [System.IO.Compression.ZipArchiveMode]::Create)
+    try {
+        $probeUtf8 = New-Object System.Text.UTF8Encoding($false)
+        $probeSlideEntry = $probeArchive.CreateEntry('ppt/slides/slide1.xml')
+        $probeSlideWriter = New-Object System.IO.StreamWriter($probeSlideEntry.Open(), $probeUtf8)
+        try {
+            $probeSlideWriter.Write('<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="7" name="probe"/></p:nvGraphicFramePr><p:graphicData><oleObj r:id="rId5"/></p:graphicData></p:graphicFrame>')
+        } finally { $probeSlideWriter.Dispose() }
+        $probeRelsEntry = $probeArchive.CreateEntry('ppt/slides/_rels/slide1.xml.rels')
+        $probeRelsWriter = New-Object System.IO.StreamWriter($probeRelsEntry.Open(), $probeUtf8)
+        try {
+            $probeRelsWriter.Write('<Relationships><Relationship Id="rId5" Type="http://p.invalid/ole" Target="../embeddings/ole1.bin"/></Relationships>')
+        } finally { $probeRelsWriter.Dispose() }
+        $probeBinEntry = $probeArchive.CreateEntry('ppt/embeddings/ole1.bin')
+        $probeBinStream = $probeBinEntry.Open()
+        try {
+            $probePayload = [System.Text.Encoding]::Unicode.GetBytes('Q放=qm')
+            $probeBinStream.Write($probePayload, 0, $probePayload.Length)
+        } finally { $probeBinStream.Dispose() }
+    } finally { $probeArchive.Dispose() }
+    $probeFingerprint = Get-OleEquationCjkFingerprint -PptxPath $fingerprintProbeZip -SlideNumber 1 -ShapeId 7
+    if ($probeFingerprint -cne '放') { throw "OLE fingerprint probe failed: expected 放, got '$probeFingerprint'." }
+    $probeMissing = @(@('放', '吸') | Where-Object { -not $probeFingerprint.Contains($_) })
+    if ($probeMissing.Count -ne 1 -or $probeMissing[0] -cne '吸') { throw 'OLE fingerprint subset probe failed: 吸 must be reported missing from a Q放=qm embedding.' }
+} finally {
+    if (Test-Path -LiteralPath $fingerprintProbeDir) { Remove-Item -LiteralPath $fingerprintProbeDir -Recurse -Force }
+}
+
 $aiImportContent = Get-Content -LiteralPath (Join-Path $root 'tools\Import-PptxAiReviewResult.ps1') -Raw -Encoding UTF8
 if ($aiImportContent -match 'PowerPoint\.Application|Presentations\.Open|SaveAs|Normalize-PhysicsPpt') { throw 'AI review import must remain read-only and must not access PPTX automation.' }
 

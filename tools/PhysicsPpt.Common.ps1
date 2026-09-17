@@ -772,3 +772,91 @@ function New-PptxPackageFromDirectory {
         if (Test-Path -LiteralPath $temporaryPath) { Remove-Item -LiteralPath $temporaryPath -Force }
     }
 }
+
+function Get-OleEquationCjkFingerprint {
+    <#
+      Extract the CJK character fingerprint of one MathType OLE embedding
+      from a PPTX package. MathType stores equation characters as UTF-16LE
+      records inside the OLE binary, so the Chinese subscripts (吸/放/…)
+      discriminate sibling equations that differ only by those glyphs.
+      Returns the sorted unique CJK characters found; both byte parities are
+      scanned so stream alignment cannot hide a character. The package is
+      opened with shared access because PowerPoint keeps packages locked
+      for a while after Quit().
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$PptxPath,
+        [Parameter(Mandatory = $true)][int]$SlideNumber,
+        [Parameter(Mandatory = $true)][int]$ShapeId
+    )
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $full = [System.IO.Path]::GetFullPath($PptxPath)
+    $stream = [System.IO.File]::Open($full, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    try {
+        $zip = New-Object System.IO.Compression.ZipArchive($stream, [System.IO.Compression.ZipArchiveMode]::Read)
+        try {
+            $slideEntryName = "ppt/slides/slide$SlideNumber.xml"
+            $slideEntry = $zip.GetEntry($slideEntryName)
+            if ($null -eq $slideEntry) { throw "Slide part not found: $slideEntryName" }
+            $slideText = Read-ZipEntryText -Zip $zip -EntryName $slideEntryName
+            $relsEntryName = "ppt/slides/_rels/slide$SlideNumber.xml.rels"
+            $relsEntry = $zip.GetEntry($relsEntryName)
+            if ($null -eq $relsEntry) { throw "Slide rels part not found: $relsEntryName" }
+            $relsText = Read-ZipEntryText -Zip $zip -EntryName $relsEntryName
+            $relTargets = @{}
+            foreach ($relMatch in [regex]::Matches($relsText, 'Id="([^"]+)"[^>]*Target="([^"]+)"')) {
+                $target = $relMatch.Groups[2].Value
+                if ($target -like '../*') { $target = 'ppt/' + $target.Substring(3) }
+                $relTargets[$relMatch.Groups[1].Value] = $target
+            }
+            $embeddingPart = ''
+            foreach ($frameMatch in [regex]::Matches($slideText, '<p:graphicFrame>.*?</p:graphicFrame>', 'Singleline')) {
+                $idMatch = [regex]::Match($frameMatch.Value, '<p:cNvPr id="(\d+)"')
+                $ridMatch = [regex]::Match($frameMatch.Value, 'r:id="(rId\d+)"')
+                if (-not $idMatch.Success -or -not $ridMatch.Success) { continue }
+                if ([int]$idMatch.Groups[1].Value -ne $ShapeId) { continue }
+                $target = $relTargets[$ridMatch.Groups[1].Value]
+                if (-not [string]::IsNullOrWhiteSpace($target) -and $target -like 'ppt/embeddings/*') {
+                    $embeddingPart = $target
+                }
+            }
+            if ([string]::IsNullOrWhiteSpace($embeddingPart)) {
+                throw "OLE embedding part not found for slide $SlideNumber shape id $ShapeId"
+            }
+            $embeddingEntry = $zip.GetEntry($embeddingPart)
+            if ($null -eq $embeddingEntry) { throw "OLE embedding part missing in package: $embeddingPart" }
+            $bytes = New-Object byte[] ([int]$embeddingEntry.Length)
+            $embeddingStream = $embeddingEntry.Open()
+            try {
+                $readTotal = 0
+                while ($readTotal -lt $bytes.Length) {
+                    $read = $embeddingStream.Read($bytes, $readTotal, $bytes.Length - $readTotal)
+                    if ($read -le 0) { break }
+                    $readTotal += $read
+                }
+            } finally {
+                $embeddingStream.Dispose()
+            }
+        } finally {
+            $zip.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
+    $chars = New-Object System.Collections.Generic.List[char]
+    foreach ($parity in @(0, 1)) {
+        for ($i = $parity; $i + 1 -lt $bytes.Length; $i += 2) {
+            $code = [int]$bytes[$i] -bor ([int]$bytes[$i + 1] * 256)
+            if ($code -ge 0x4E00 -and $code -le 0x9FFF -and -not $chars.Contains([char]$code)) {
+                $chars.Add([char]$code)
+            }
+        }
+        # MathType stores UTF-16 characters 2-byte aligned, so the primary
+        # (even) parity holds the real stream. The fallback parity only runs
+        # when the primary finds nothing — scanning both unconditionally would
+        # mirror ASCII letters (00 6D -> 洀) into phantom CJK hits.
+        if ($chars.Count -gt 0) { break }
+    }
+    return ,(($chars | Sort-Object) -join '')
+}
