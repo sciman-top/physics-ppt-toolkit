@@ -73,11 +73,10 @@
 
 ```text
 原始 PPTX（只读）
-  → [B0] Normalize 报告（SlideKind，COM）
-  → [B2] Export-FormulaCarrierInventory（Open XML，sha256 绑定源文件）
+  → [B2] Export-FormulaCarrierInventory（Open XML + COM，sha256 绑定源文件）
   → [T5] Export-FormulaOleCrops（按 bbox 从页面渲染图裁剪，只读）
   → [T6] AI 视觉草拟 GoldSet（Draft）→ 独立 agent/人工定稿（Approved）
-  → Export-FormulaOleMapping（白名单精确匹配 + 证据 + 页型排除校验）
+  → Export-FormulaOleMapping（白名单精确匹配 + 证据校验）
   → Export-FormulaOmmlCandidates（UnicodeMath→OMML/MathML/FormulaIR 片段）
   → Apply-FormulaOmmlForOle（副本写回，Fallback 保全）
   → FormulaOfficeMathValidator（0 错误）
@@ -137,9 +136,9 @@
 ### B3 批处理编排（闭 G6）
 
 - 新文件：`tools/Invoke-FormulaOleBatch.ps1`（薄编排，不改默认一键链；UTF-8 BOM）。
-- 参数：`-InputPath`、`-GoldSetCsv`、`-SlideKindCsv`（可选）、`-MaxItems`、`-SkipVisualAudit`、`-IncludeSpecialSlides`、`-Resume`。
+- 参数：`-InputPath`、`-GoldSetCsv`、`-PagesDir`（可选，预渲染页面）、`-DeliveryRoot`（可选，必须在 reports/ 之外）、`-MaxItems`、`-SkipVisualAudit`、`-Resume`。
 - 步骤（每步产物落盘、记录 sha256，任一步失败即停并汇总已成功步骤）：
-  1. `Export-FormulaCarrierInventory`（带 -SlideKindCsv）；
+  1. `Export-FormulaCarrierInventory`；
   2. `Export-FormulaOleCrops`；
   3. `Export-FormulaOleMapping`（页型排除生效）；
   4. `Export-FormulaOmmlCandidates`；
@@ -168,7 +167,6 @@
 |---|---|---|
 | 1 | 13.3：5 条代入链白名单晋升 + GoldSet + 全链转换副本 | Validator 0 错；PowerPoint 打开 40 页；5 处 judge 前后对比 pass；FormulaConversionRate 16/16 |
 | 2 | 14.1：slide6 三段式复评（确认 OleTimingDangling 仍拒绝，写入明确 OriginalKept 原因） | DispositionRate 100%，无强转 |
-| 3 | 小结页排除 dry-run：GoldSet 混入小结页行 | 默认 Failed(`SlideKindExcluded`)，开关放行后 judge 正常 |
 | 4 | 全局：`Test-ToolkitFiles.ps1` exit=0；`Test-PhysicsPptPolicy.ps1`（config/白名单有变更时）通过 | exit=0 |
 
 每批交付走版本化目录；失败删本批输出目录，从原始 PPTX 重跑。
@@ -225,7 +223,7 @@
 | B3 批处理编排 | ☑ 代码完成 | `tools/Invoke-FormulaOleBatch.ps1` 已入门禁；14.1 链头 dry-run 因源样本已被移出 `PPTX/` 暂无法复跑（样本恢复后即可） |
 | B4 GoldSet SOP | ☑ 完成 | `docs/公式GoldSet编制SOP.md` + `examples/fixtures/formula-goldset.sample.csv`（表头门禁断言） |
 | B5-1 13.3 代入链批次 | ☑ 完成（2026-09-16） | `reports/13.3比热容（王耀强）_v18`：链头=v17 交付副本；5 条代入链转换 + 5 条白名单晋升；16/16 达成；validator 0 错、不变量 0 阻断、judge 两轮验收（第 1 轮 FAIL 挖出并修复解析器上标括号泄漏/线性除号/长链溢出三缺陷，第 2 轮 PASS）。执行期间临时经 LFS 恢复 13.3 样本，收口后已删除还原 |
-| B5-2 14.1 slide6 复评 | ☑ 已被 v5 覆盖 | v5 实际交付优于原定 OriginalKept：动画 timing id 保全后 slide6 三段式全部转换成功；29/29 页导出、validator 0 错、不变量 passed（40 项均为授权的 OLE→OMML 载体差异） |
+| B5-2 14.1 slide6 复评 | ☑ 收口（2026-09-17 按定版 v44 复核） | v44 定版（28 页重跑链）：slide9/16 共 5 个 OLE 转换；slide6 三段式按动画 spid 绑定保护**保留 OLE**（明确归宿 OriginalKept，无强转）；validator 0 错、不变量 passed、judge 28/28 |
 | B5-3 小结页排除 dry-run | ⊘ 已取消（随 B0） | OLE 程序不排除任何页型 |
-| B6 字号建议（可选） | ☐ 未开始 | 用户未要求 |
+| B6 字号建议（可选） | ☑ 建议列已落地 | `Export-FormulaOleCrops.ps1` `SuggestedSizePt`（近白裁边字形高度估算，仅进 GoldSet 建议列，权威值仍由 judge 定版；见 `docs/公式GoldSet编制SOP.md` §3.4） |
 | 14.2 热机效率迁移批次 | ☑ 完成（2026-09-16，计划外新增） | `reports/14.2热机、效率（王耀强）_v32`：用户放入的新样本，3/3 OLE 转换（热机效率定义式/燃料放热量公式/气体燃料放热量公式）；validator 0 错、不变量 0 阻断、judge PASS；B3 批处理编排首次真实链头实跑并修复三缺陷 |

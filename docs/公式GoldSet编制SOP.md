@@ -30,13 +30,13 @@ CSV 文件（UTF-8 BOM），列与 `Export-FormulaOleMapping.ps1` 校验一致�
 
 ## 3. 编制流程
 
-1. **盘点**：`Export-FormulaCarrierInventory.ps1 -InputPath <链头PPTX> -OutputDir <版本目录>/00_检查报告/inventory -SlideKindCsv <normalize报告.csv>`，得到 `formula-carrier-inventory.json`（含每条记录 slideKind 注记）。
+1. **盘点**：`Export-FormulaCarrierInventory.ps1 -InputPath <链头PPTX> -OutputDir <版本目录>/00_检查报告/inventory`，得到 `formula-carrier-inventory.json`。
 2. **渲染**：`Export-PptxVisualAudit.ps1 -InputPath <链头PPTX> -OutputDir <版本目录>/00_检查报告/before-audit`，得到 `pages/slide-NNN.png`。
 3. **裁剪**：`Export-FormulaOleCrops.ps1 -CarrierInventoryJson <inventory.json> -PagesDir <before-audit/pages> -OutputDir <版本目录>/00_检查报告/crops`，得到 `ole-crops/*.png` 与 `ole-crops.csv`（含 `SuggestedSizePt` 建议列）。
 4. **AI 草拟（Draft）**：执行 agent 逐张读取裁剪图，填 `WhitelistName/SourceFormulaText/颜色/Note`，`SizePt` 取 `SuggestedSizePt`，`ReviewStatus=Draft`。
 5. **独立定稿（Approved）**：**另一个** agent 或人工对照裁剪图与整页图逐条核验转录与公式名，确认无误后改 `ReviewStatus=Approved`。同一会话不得自我验收。
 6. **白名单不命中时**：不批准。走 `Export-FormulaWhitelistSuggestions.ps1` 证据整理 → 人工确认后在 config `formulaWhitelist` 晋升（含 `targetUnicodeMath` canonical，书写遵守《公式处理说明》§4.1）→ 重跑本流程。
-7. **映射**：`Export-FormulaOleMapping.ps1 -CarrierInventoryJson <inventory.json> -GoldSetCsv <goldset.csv> -OutputDir <版本目录>/00_检查报告`；小结/封面/封底/资源页行默认被 `SlideKindExcluded` 拒绝，确需转换时显式 `-IncludeSpecialSlides`。
+7. **映射**：`Export-FormulaOleMapping.ps1 -CarrierInventoryJson <inventory.json> -GoldSetCsv <goldset.csv> -OutputDir <版本目录>/00_检查报告`。2026-09-14 起小结页不再例外，不排任何页型。
 
 ## 4. 拒绝与降级语义（自动，不可绕过）
 
@@ -46,7 +46,6 @@ CSV 文件（UTF-8 BOM），列与 `Export-FormulaOleMapping.ps1` 校验一致�
 | SourceFormulaText 未命中指定白名单规则 | 行被拒 |
 | 页码/形状 id 不在盘点或非 MathTypeOle | 行被拒 |
 | 证据文件缺失 | 行被拒 |
-| Summary/Cover/Ending/Resource 页 | 行被拒（`SlideKindExcluded`） |
 | 多 OLE 合并且次形状有动画绑定 | 写回阶段 `OleTimingDangling` 拒绝，保留 MathType |
 | 任何一行被拒 | `Export-FormulaOleMapping.ps1` 整体 Failed（有 error 即 throw） |
 
