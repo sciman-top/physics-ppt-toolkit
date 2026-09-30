@@ -150,12 +150,71 @@ function Release-ComObjectSafe {
     }
 }
 
+function Get-ComFailureCategory {
+    param([System.Management.Automation.ErrorRecord]$ErrorRecord)
+    $exception = $ErrorRecord.Exception
+    $hresult = if ($null -ne $exception) { $exception.HResult } else { 0 }
+
+    switch ($hresult) {
+        -2147418111 { return 'PowerPointBusyOrRejectedCall' } # 0x80010001 RPC_E_CALL_REJECTED
+        -2147417846 { return 'PowerPointBusyOrRejectedCall' } # 0x8001010A RPC_E_SERVERCALL_RETRYLATER
+        -2146822854 { return 'PowerPointBusyOrRejectedCall' } # 0x800AC472 VBA_E_IGNORE
+        -2147024864 { return 'FileInUseOrSharingViolation' } # 0x80070020
+        -2147221164 { return 'PowerPointComNotRegistered' }  # 0x80040154
+        -2147287038 { return 'FileNotFoundOrUnavailable' }   # 0x80030002
+        -2147417842 { return 'PowerPointDisconnected' }      # 0x80010108 RPC_E_DISCONNECTED
+        -2147023174 { return 'PowerPointDisconnected' }      # 0x800706BA RPC_S_SERVER_UNAVAILABLE
+        -2147023170 { return 'PowerPointDisconnected' }      # 0x800706BE RPC_S_CALL_FAILED
+        default {
+            if ($null -ne $exception -and $exception.Message -match 'PowerPoint|COM|RPC|rejected|busy') {
+                return 'PowerPointComFailure'
+            }
+            return 'UnhandledFailure'
+        }
+    }
+}
+
+function Format-ComFailureDetails {
+    param([System.Management.Automation.ErrorRecord]$ErrorRecord)
+    $category = Get-ComFailureCategory -ErrorRecord $ErrorRecord
+    $hresult = if ($null -ne $ErrorRecord.Exception) { ('0x{0:X8}' -f ($ErrorRecord.Exception.HResult -band 0xFFFFFFFF)) } else { 'n/a' }
+    return "$category [$hresult]: $($ErrorRecord.Exception.Message)"
+}
+
+function Test-IsRetryablePresentationFailure {
+    param(
+        [string]$Category,
+        [string]$Message
+    )
+
+    if ($Category -in @('PowerPointBusyOrRejectedCall', 'PowerPointComFailure', 'FileInUseOrSharingViolation')) {
+        return $true
+    }
+
+    # A dead PowerPoint RPC channel is "retryable" only in the sense that the
+    # caller must recreate the application object; one immediate retry keeps
+    # the failure visible while giving transient teardowns a chance to clear.
+    if ($Category -eq 'PowerPointDisconnected') {
+        return $true
+    }
+
+    # zh-CN hosts localize both the COM message and the PowerShell null-
+    # expression error, so match the localized phrasing as well.
+    if ($Category -eq 'UnhandledFailure' -and $Message -match 'null-valued expression|RPC|COM|PowerPoint|busy|rejected|不能对值为 Null|消息筛选器|正在使用') {
+        return $true
+    }
+
+    return $false
+}
+
 function Invoke-WithComRetry {
     <#
       Retry wrapper for Office COM operations that fail transiently while
       another automation instance is starting or releasing (RPC_E_CALL_REJECTED
       0x80010001, RPC_E_SERVERCALL_RETRYLATER 0x8001010A, VBA_E_IGNORE
-      0x800AC472) or when the target file is briefly locked (0x80070020).
+      0x800AC472), when the target file is briefly locked (0x80070020), or
+      when the PowerPoint RPC channel just died (0x80010108/0x800706BA/
+      0x800706BE — retry once, then recreate the application object).
       MaxRetries is the total number of attempts.
     #>
     param(
@@ -171,15 +230,9 @@ function Invoke-WithComRetry {
             return & $Action
         } catch {
             $lastError = $_
-            $hrHex = ''
-            try { $hrHex = ('{0:X8}' -f [int]$_.Exception.HResult) } catch { }
-            $message = ''
-            try { $message = [string]$_.Exception.Message } catch { }
-            $retryable = $hrHex -in @('80010001', '8001010A', '800AC472', '80070020')
-            if (-not $retryable) {
-                $retryable = $message -match '0x80010001|0x8001010A|0x800AC472|0x80070020|RPC_E_CALL_REJECTED'
-            }
-            if ($attempt -ge $MaxRetries -or -not $retryable) {
+            $category = Get-ComFailureCategory -ErrorRecord $_
+            $message = if ($null -ne $_.Exception) { $_.Exception.Message } else { '' }
+            if ($attempt -ge $MaxRetries -or -not (Test-IsRetryablePresentationFailure -Category $category -Message $message)) {
                 throw
             }
             Start-Sleep -Milliseconds $DelayMs
@@ -272,6 +325,27 @@ function New-PowerPointApplication {
         try { $application.DisplayAlerts = 1 } catch { }
     }
     return $application
+}
+
+function Restart-PowerPointApplicationInternal {
+    <#
+      Tear down a (possibly wedged) PowerPoint automation instance, wait out
+      the async teardown that keeps package handles alive for minutes, and
+      start a fresh one. Callers wrap this in their own thin function to bind
+      their own retry-delay parameter.
+    #>
+    param($Current, [int]$DelayMs = 2000)
+
+    if ($null -ne $Current) {
+        try { $Current.Quit() | Out-Null } catch { }
+        Release-ComObjectSafe -ComObject $Current
+    }
+
+    [System.GC]::Collect()
+    [System.GC]::WaitForPendingFinalizers()
+    if ($DelayMs -gt 0) { Start-Sleep -Milliseconds $DelayMs }
+
+    return (New-PowerPointApplication)
 }
 
 function Convert-ToSafeFormulaPathSegment {
@@ -783,6 +857,10 @@ function Get-OleEquationCjkFingerprint {
       scanned so stream alignment cannot hide a character. The package is
       opened with shared access because PowerPoint keeps packages locked
       for a while after Quit().
+      -SlideNumber is the 1-based PRESENTATION order (sldIdLst); the physical
+      slide part is resolved through Get-PresentationOrderSlidePartMap
+      because the slideN.xml number is creation order and drifts from the
+      presentation order once a deck is reordered in PowerPoint.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$PptxPath,
@@ -796,11 +874,13 @@ function Get-OleEquationCjkFingerprint {
     try {
         $zip = New-Object System.IO.Compression.ZipArchive($stream, [System.IO.Compression.ZipArchiveMode]::Read)
         try {
-            $slideEntryName = "ppt/slides/slide$SlideNumber.xml"
+            $slidePartMap = Get-PresentationOrderSlidePartMap -Zip $zip
+            if (-not $slidePartMap.ContainsKey($SlideNumber)) { throw "Presentation-order slide $SlideNumber not found in sldIdLst" }
+            $slideEntryName = [string]$slidePartMap[$SlideNumber]
             $slideEntry = $zip.GetEntry($slideEntryName)
             if ($null -eq $slideEntry) { throw "Slide part not found: $slideEntryName" }
             $slideText = Read-ZipEntryText -Zip $zip -EntryName $slideEntryName
-            $relsEntryName = "ppt/slides/_rels/slide$SlideNumber.xml.rels"
+            $relsEntryName = $slideEntryName -replace '^ppt/slides/(slide\d+\.xml)$', 'ppt/slides/_rels/$1.rels'
             $relsEntry = $zip.GetEntry($relsEntryName)
             if ($null -eq $relsEntry) { throw "Slide rels part not found: $relsEntryName" }
             $relsText = Read-ZipEntryText -Zip $zip -EntryName $relsEntryName

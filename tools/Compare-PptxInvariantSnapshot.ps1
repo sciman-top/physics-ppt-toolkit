@@ -83,15 +83,24 @@ for ($i = 0; $i -lt $slideCount; $i++) {
     foreach ($readStatusProperty in @('slideReadStatus', 'animationReadStatus', 'transitionReadStatus')) {
         $beforeReadStatus = [string](Get-SnapshotProperty $bs $readStatusProperty)
         $afterReadStatus = [string](Get-SnapshotProperty $as $readStatusProperty)
-        if ($beforeReadStatus -ne 'Readable' -or $afterReadStatus -ne 'Readable') {
+        if ($beforeReadStatus -ne $afterReadStatus) {
             Add-Difference $rows "$prefix.$readStatusProperty" $beforeReadStatus $afterReadStatus 'Blocker'
+        } elseif ($beforeReadStatus -ne 'Readable') {
+            # Stable unreadable in both snapshots: source-inherited, not a change.
+            Add-Difference $rows "$prefix.$readStatusProperty" $beforeReadStatus $afterReadStatus 'AllowedChange'
         }
     }
     $beforeUnreadableShapeCount = Get-SnapshotProperty $bs 'unreadableShapeCount'
     $afterUnreadableShapeCount = Get-SnapshotProperty $as 'unreadableShapeCount'
     if ($null -eq $beforeUnreadableShapeCount -or $null -eq $afterUnreadableShapeCount -or
-        [int]$beforeUnreadableShapeCount -ne 0 -or [int]$afterUnreadableShapeCount -ne 0) {
+        [int]$beforeUnreadableShapeCount -ne [int]$afterUnreadableShapeCount) {
+        # A count CHANGE means normalization touched shapes it could not read.
         Add-Difference $rows "$prefix.unreadableShapeCount" $beforeUnreadableShapeCount $afterUnreadableShapeCount 'Blocker'
+    } elseif ([int]$afterUnreadableShapeCount -ne 0) {
+        # A source shape that reads as Unreadable both before and after was
+        # born unreadable in the source deck (15.2 slide5); it is not a change
+        # normalization made. Recorded as allowed, never silently dropped.
+        Add-Difference $rows "$prefix.unreadableShapeCount" $beforeUnreadableShapeCount $afterUnreadableShapeCount 'AllowedChange'
     }
     $beforeAdvanceOnClick = Get-SnapshotProperty $bs.transition 'advanceOnClick'
     $afterAdvanceOnClick = Get-SnapshotProperty $as.transition 'advanceOnClick'
@@ -123,14 +132,35 @@ for ($i = 0; $i -lt $slideCount; $i++) {
         }
         $beforeShapeReadStatus = [string](Get-SnapshotProperty $b 'readStatus')
         $afterShapeReadStatus = [string](Get-SnapshotProperty $a 'readStatus')
-        if ($beforeShapeReadStatus -ne 'Readable' -or $afterShapeReadStatus -ne 'Readable') {
+        if ($beforeShapeReadStatus -ne $afterShapeReadStatus) {
+            # Readability flipped: normalization touched a shape it could not
+            # read before (or vice versa) — a real regression signal.
             Add-Difference $rows "$prefix.shapes[$id].readStatus" $beforeShapeReadStatus $afterShapeReadStatus 'Blocker'
+        } elseif ($beforeShapeReadStatus -ne 'Readable') {
+            # Stable in both snapshots: the shape was unreadable in the source
+            # deck itself. Not a normalization change; keep it visible.
+            Add-Difference $rows "$prefix.shapes[$id].readStatus" $beforeShapeReadStatus $afterShapeReadStatus 'AllowedChange'
         }
         foreach ($property in @('left','top','width','height','rotation')) {
             Compare-GeometryValue $rows "$prefix.shapes[$id].$property" $b.$property $a.$property 'Blocker'
         }
         foreach ($property in @('cropLeft','cropRight','cropTop','cropBottom')) {
             Compare-GeometryValue $rows "$prefix.shapes[$id].$property" (Get-SnapshotProperty $b $property) (Get-SnapshotProperty $a $property) 'Blocker'
+        }
+        # Author emphasis (run colors + bold) is protected semantics: a copy
+        # whose red runs flipped to black with unchanged text must fail the
+        # gate (18.2 emphasis-color incident). Formula conversions legitimately
+        # restyle their own block, so the reviewed-conversion allowance applies.
+        $beforeFormats = Get-SnapshotProperty $b 'runFormats'
+        $afterFormats = Get-SnapshotProperty $a 'runFormats'
+        if ($null -ne $beforeFormats -or $null -ne $afterFormats) {
+            if ("$beforeFormats" -ne "$afterFormats") {
+                if ($isReviewedFormulaConversion) {
+                    Add-Difference $rows "$prefix.shapes[$id].runFormats" "$beforeFormats" "$afterFormats" 'AllowedChange'
+                } else {
+                    Add-Difference $rows "$prefix.shapes[$id].runFormats" "$beforeFormats" "$afterFormats" 'Blocker'
+                }
+            }
         }
         # Group-child rows carry the parent id; if it changes, the group was restructured.
         Compare-Value $rows "$prefix.shapes[$id].groupId" (Get-SnapshotProperty $b 'groupId') (Get-SnapshotProperty $a 'groupId') 'Blocker'

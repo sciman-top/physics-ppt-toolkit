@@ -835,10 +835,26 @@ function New-ReviewIndexes {
 }
 
 function Get-ExpectedSlideCount {
-    param($Rows)
+    param($Rows, [string]$NormalizedPptxPath = '')
     $slides = @($Rows | Where-Object { $_.Issue -eq 'SlideType' -and $_.Slide -match '^\d+$' } | Select-Object -ExpandProperty Slide -Unique)
-    if ($slides.Count -eq 0) { return $null }
-    return $slides.Count
+    if ($slides.Count -gt 0) { return $slides.Count }
+    # A cache-hit rerun records only SkippedUpToDate (no per-slide rows). The
+    # cache record next to the normalized PPTX carries expectedSlides; without
+    # this fallback the rerun would falsely fail the page-count validation.
+    if (-not [string]::IsNullOrWhiteSpace($NormalizedPptxPath) -and (Test-Path -LiteralPath $NormalizedPptxPath)) {
+        $cachePath = "$NormalizedPptxPath.cache.json"
+        if (Test-Path -LiteralPath $cachePath) {
+            try {
+                $cache = Get-Content -LiteralPath $cachePath -Raw -Encoding UTF8 | ConvertFrom-Json
+                $cachedCount = 0
+                if ($null -ne $cache -and $null -ne $cache.PSObject.Properties['expectedSlides']) {
+                    [void][int]::TryParse([string]$cache.expectedSlides, [ref]$cachedCount)
+                }
+                if ($cachedCount -gt 0) { return $cachedCount }
+            } catch { }
+        }
+    }
+    return $null
 }
 
 function Get-PageImageCount {
@@ -1538,7 +1554,8 @@ function New-Manifest {
         $reviewPagePackage = if ($null -ne $ReviewPagePackages -and $ReviewPagePackages.ContainsKey($file.FullName)) { $ReviewPagePackages[$file.FullName] } else { $null }
         $reviewIndex = if ($null -ne $ReviewIndexes -and $ReviewIndexes.ContainsKey($file.FullName)) { $ReviewIndexes[$file.FullName] } else { $null }
         $reviewSlides = @(Get-ReviewSlideRecords -Rows $fileRows -ImageDir $imageDir -SourceImageDir $sourceImageDir)
-        $expectedSlides = Get-ExpectedSlideCount -Rows $fileRows
+        $normalizedPptxPath = if (Test-Path -LiteralPath $pptxPath) { $pptxPath } else { '' }
+        $expectedSlides = Get-ExpectedSlideCount -Rows $fileRows -NormalizedPptxPath $normalizedPptxPath
         if ($null -eq $expectedSlides -and $IncludeReviewArtifacts) {
             # A valid normalization cache reports only SkippedUpToDate at
             # slide 0. Recover the count from the already validated contiguous

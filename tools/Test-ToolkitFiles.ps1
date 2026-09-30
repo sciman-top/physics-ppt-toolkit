@@ -51,6 +51,11 @@ $required = @(
     'config\formula-goldset.schema.json',
     'config\formula-recognition-result.schema.json',
     'config\formula-recognition.adapters.json',
+    'config\formula-converter-supply-chain.schema.json',
+    'config\formula-host-compatibility-receipt.schema.json',
+    'config\formula-host-compatibility-matrix.schema.json',
+    'config\formula-goldset-evidence-availability.schema.json',
+    'config\formula-ole-visual-adjudication.schema.json',
     'config\presentation-snapshot.schema.json',
     'config\invariant-comparison.schema.json',
     'tools\Normalize-PhysicsPpt.ps1',
@@ -58,6 +63,22 @@ $required = @(
     'tools\Export-FormulaOmmlCandidates.ps1',
     'tools\Export-FormulaIrFromOleMapping.ps1',
     'tools\Test-FormulaIr.ps1',
+    'tools\Run-FormulaRecognitionAdapter.ps1',
+    'tools\Measure-FormulaRecognitionAdapters.ps1',
+    'tools\Test-FormulaRecognitionAdapter.ps1',
+    'tools\Resolve-FormulaCanonicalContext.ps1',
+    'tools\Test-FormulaCanonicalContext.ps1',
+    'tools\Export-FormulaConverterSupplyChain.ps1',
+    'tools\Plan-FormulaFallbackSvg.ps1',
+    'tools\Test-FormulaFallbackSvg.ps1',
+    'tools\Test-FormulaOfficeMathValidator.ps1',
+    'tools\Test-ClosedWorldCircuitBreaker.ps1',
+    'tools\Plan-ClosedWorldUnattended.ps1',
+    'tools\Export-FormulaOleStructuredSourceProbe.ps1',
+    'tools\Export-FormulaDecisionSummary.ps1',
+    'tools\Export-FormulaHostCompatibilityReceipt.ps1',
+    'tools\Export-FormulaHostCompatibilityMatrix.ps1',
+    'tools\Test-FormulaPowerPointRepairHandling.ps1',
     'tools\Apply-FormulaOmmlWhitelist.ps1',
     'tools\Apply-FormulaOmmlForOle.ps1',
     'tools\Set-PptxTextBold.ps1',
@@ -71,6 +92,8 @@ $required = @(
     'tools\Export-FormulaCarrierInventory.ps1',
     'tools\Export-FormulaOleMapping.ps1',
     'tools\Export-FormulaOleCrops.ps1',
+    'tools\Export-FormulaOleVisualAdjudication.ps1',
+    'tools\Test-FormulaOleVisualAdjudication.ps1',
     'tools\Export-FormulaEvidenceManifest.ps1',
     'tools\Invoke-FormulaImageOcrProbe.ps1',
     'tools\formula_image_ocr_probe.py',
@@ -111,6 +134,9 @@ $required = @(
     'examples\fixtures\minimal-physics-sample.pptx',
     'examples\fixtures\formula-ir.valid.json',
     'examples\fixtures\formula-ir.invalid.json',
+    'examples\fixtures\formula-adapter-valid-runner.ps1',
+    'examples\fixtures\formula-adapter-invalid-runner.ps1',
+    'examples\fixtures\formula-adapter-timeout-runner.ps1',
     'examples\fixtures\formula-unicodemath.valid.json',
     'examples\fixtures\formula-unicodemath.invalid.json',
     'examples\fixtures\formula-goldset.sample.csv',
@@ -174,6 +200,95 @@ $evidenceSchema = Get-Content -LiteralPath $evidenceSchemaPath -Raw -Encoding UT
 if ([string]$evidenceSchema.title -ne 'Physics PPT formula evidence manifest' -or
     [int]$evidenceSchema.properties.schemaVersion.const -ne 1) {
     throw 'Formula evidence manifest schema metadata is invalid.'
+}
+$adapterConfigPath = Join-Path $root 'config\formula-recognition.adapters.json'
+$adapterConfig = Get-Content -LiteralPath $adapterConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+if ([int]$adapterConfig.schemaVersion -ne 1 -or [bool]$adapterConfig.writeBackAllowed) {
+    throw 'Formula recognition adapter config must be schemaVersion 1 with writeBackAllowed=false.'
+}
+if (@($adapterConfig.adapters).Count -lt 4) { throw 'Formula recognition adapter config must register the four comparison adapters.' }
+$adapterResultSchemaPath = Join-Path $root 'config\formula-recognition-result.schema.json'
+$adapterResultSchema = Get-Content -LiteralPath $adapterResultSchemaPath -Raw -Encoding UTF8 | ConvertFrom-Json
+if ([string]$adapterResultSchema.title -ne 'Physics PPT formula recognition adapter result' -or $adapterResultSchema.properties.writeBackAllowed.const -ne $false) {
+    throw 'Formula recognition adapter result schema does not enforce writeBackAllowed=false.'
+}
+$adapterScript = Get-Content -LiteralPath (Join-Path $root 'tools\Run-FormulaRecognitionAdapter.ps1') -Raw -Encoding UTF8
+foreach ($adapterToken in @('Unavailable', 'InvalidOutput', 'Timeout', 'writeBackAllowed = $false', 'RunnerArgumentList')) {
+    if ($adapterScript -notmatch [regex]::Escape($adapterToken)) { throw "Formula recognition adapter is missing required safety token: $adapterToken" }
+}
+$adapterEvaluationScript = Get-Content -LiteralPath (Join-Path $root 'tools\Measure-FormulaRecognitionAdapters.ps1') -Raw -Encoding UTF8
+foreach ($evaluationToken in @('CandidateOnlyNoAvailableAdapter', 'exactFormulaIrMatch', 'falseAcceptCount', 'Get-Sha256FileLocal', 'writeBackAllowed')) {
+    if ($adapterEvaluationScript -notmatch [regex]::Escape($evaluationToken)) { throw "Formula recognition evaluation is missing required safety token: $evaluationToken" }
+}
+$contextResolverScript = Get-Content -LiteralPath (Join-Path $root 'tools\Resolve-FormulaCanonicalContext.ps1') -Raw -Encoding UTF8
+foreach ($contextToken in @('ManualRequired', 'CandidateOnly', 'SourceSha256', 'sourceContextRequiredForGoldSet', 'writeBackAllowed = $false')) {
+    if ($contextResolverScript -notmatch [regex]::Escape($contextToken)) { throw "Formula context resolver is missing required safety token: $contextToken" }
+}
+$supplyChainSchema = Get-Content -LiteralPath (Join-Path $root 'config\formula-converter-supply-chain.schema.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+if ([string]$supplyChainSchema.title -ne 'Physics PPT formula converter supply chain manifest' -or [int]$supplyChainSchema.properties.schemaVersion.const -ne 1) {
+    throw 'Formula converter supply-chain schema metadata is invalid.'
+}
+$supplyChainScript = Get-Content -LiteralPath (Join-Path $root 'tools\Export-FormulaConverterSupplyChain.ps1') -Raw -Encoding UTF8
+foreach ($supplyToken in @('Pandoc', 'MathJax', 'NotAdopted', 'package-lock.json', 'writesPptx = $false')) {
+    if ($supplyChainScript -notmatch [regex]::Escape($supplyToken)) { throw "Formula converter supply-chain exporter is missing required token: $supplyToken" }
+}
+$hostReceiptSchema = Get-Content -LiteralPath (Join-Path $root 'config\formula-host-compatibility-receipt.schema.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+if ([string]$hostReceiptSchema.title -ne 'Physics PPT formula host compatibility receipt' -or
+    [int]$hostReceiptSchema.properties.schemaVersion.const -ne 1 -or
+    [bool]$hostReceiptSchema.properties.policy.properties.writeBackAllowed.const) {
+    throw 'Formula host compatibility receipt schema metadata is invalid.'
+}
+$hostReceiptScript = Get-Content -LiteralPath (Join-Path $root 'tools\Export-FormulaHostCompatibilityReceipt.ps1') -Raw -Encoding UTF8
+foreach ($hostReceiptToken in @('formula-host-compatibility-receipt.json', 'SaveAsPdfFallback', 'Unavailable', 'NotEvaluated', 'writeBackAllowed = $false')) {
+    if ($hostReceiptScript -notmatch [regex]::Escape($hostReceiptToken)) {
+        throw "Formula host compatibility receipt exporter is missing required token: $hostReceiptToken"
+    }
+}
+$hostMatrixSchema = Get-Content -LiteralPath (Join-Path $root 'config\formula-host-compatibility-matrix.schema.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+if ([string]$hostMatrixSchema.title -ne 'Physics PPT formula host compatibility matrix' -or
+    [int]$hostMatrixSchema.properties.schemaVersion.const -ne 1 -or
+    [bool]$hostMatrixSchema.properties.policy.properties.migrationExpansionAllowed.const) {
+    throw 'Formula host compatibility matrix schema metadata is invalid.'
+}
+$hostMatrixScript = Get-Content -LiteralPath (Join-Path $root 'tools\Export-FormulaHostCompatibilityMatrix.ps1') -Raw -Encoding UTF8
+foreach ($hostMatrixToken in @('Export-FormulaHostCompatibilityReceipt.ps1', 'Group-Object -Property host', 'migrationExpansionAllowed = $false', 'WPS is unavailable', 'Physical projection')) {
+    if ($hostMatrixScript -notmatch [regex]::Escape($hostMatrixToken)) {
+        throw "Formula host compatibility matrix exporter is missing required token: $hostMatrixToken"
+    }
+}
+$goldSetEvidenceSchema = Get-Content -LiteralPath (Join-Path $root 'config\formula-goldset-evidence-availability.schema.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+if ([string]$goldSetEvidenceSchema.title -ne 'Physics PPT formula GoldSet evidence availability receipt' -or
+    [int]$goldSetEvidenceSchema.properties.schemaVersion.const -ne 1 -or
+    [bool]$goldSetEvidenceSchema.properties.policy.properties.writeBackAllowed.const) {
+    throw 'Formula GoldSet evidence availability schema metadata is invalid.'
+}
+$goldSetEvidenceScript = Get-Content -LiteralPath (Join-Path $root 'tools\Export-FormulaGoldSetEvidenceAvailability.ps1') -Raw -Encoding UTF8
+foreach ($goldSetEvidenceToken in @('GoldSetManifestPath', 'EvidenceRoot', 'Get-Sha256Local', 'Available', 'Missing', 'writeBackAllowed = $false')) {
+    if ($goldSetEvidenceScript -notmatch [regex]::Escape($goldSetEvidenceToken)) {
+        throw "Formula GoldSet evidence availability exporter is missing required token: $goldSetEvidenceToken"
+    }
+}
+$oleVisualAdjudicationSchema = Get-Content -LiteralPath (Join-Path $root 'config\formula-ole-visual-adjudication.schema.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+if ([string]$oleVisualAdjudicationSchema.title -ne 'Physics PPT current MathType/OLE visual adjudication proposal' -or
+    [int]$oleVisualAdjudicationSchema.properties.schemaVersion.const -ne 1 -or
+    [bool]$oleVisualAdjudicationSchema.properties.policy.properties.writeBackAllowed.const) {
+    throw 'Formula OLE visual adjudication schema metadata is invalid.'
+}
+$oleVisualAdjudicationScript = Get-Content -LiteralPath (Join-Path $root 'tools\Export-FormulaOleVisualAdjudication.ps1') -Raw -Encoding UTF8
+foreach ($oleVisualAdjudicationToken in @('AdjudicationCsv', 'CandidateOnly', 'ManualRequired', 'CropSha256', 'evidenceSetSha256', 'writeBackAllowed = $false', 'never writes a PPTX')) {
+    if ($oleVisualAdjudicationScript -notmatch [regex]::Escape($oleVisualAdjudicationToken)) {
+        throw "Formula OLE visual adjudication exporter is missing required token: $oleVisualAdjudicationToken"
+    }
+}
+$oleVisualAdjudicationTestScript = Get-Content -LiteralPath (Join-Path $root 'tools\Test-FormulaOleVisualAdjudication.ps1') -Raw -Encoding UTF8
+foreach ($oleVisualAdjudicationTestToken in @('drifted-adjudication.csv', 'Drifted crop hash was not rejected', 'Formula OLE visual adjudication tests passed')) {
+    if ($oleVisualAdjudicationTestScript -notmatch [regex]::Escape($oleVisualAdjudicationTestToken)) {
+        throw "Formula OLE visual adjudication test is missing required token: $oleVisualAdjudicationTestToken"
+    }
+}
+$fallbackPlannerScript = Get-Content -LiteralPath (Join-Path $root 'tools\Plan-FormulaFallbackSvg.ps1') -Raw -Encoding UTF8
+foreach ($fallbackToken in @('FallbackSvg', 'OriginalKept', 'originalPreservedOnFailure', 'writeBackAllowed = $false')) {
+    if ($fallbackPlannerScript -notmatch [regex]::Escape($fallbackToken)) { throw "Formula fallback planner is missing required safety token: $fallbackToken" }
 }
 foreach ($evidenceRequired in @('schemaVersion', 'generatedAt', 'policy', 'input', 'inventory', 'counts', 'records')) {
     if ($evidenceRequired -notin @($evidenceSchema.required)) {
@@ -289,7 +404,7 @@ $ommlCandidatesParserAst = [System.Management.Automation.Language.Parser]::Parse
 if (@($parserParseErrors).Count -gt 0) { throw "OMML candidate exporter failed to parse: $($ommlCandidatesParserPath)" }
 $requiredParserFunctions = @(
     'Convert-SuperscriptSubscriptCharsToAscii', 'Get-FormulaTokens', 'Parse-FormulaAtom',
-    'Parse-FormulaSequence', 'Parse-FormulaExpression', 'Parse-FormulaAst',
+    'Parse-FormulaSequence', 'Parse-FormulaExpression', 'Parse-FormulaAst', 'Find-FormulaStructureIssue',
     'Get-FormulaTokenRole', 'Convert-FormulaTokenToTex', 'Convert-AstToUnicodeMath',
     'New-OmmlFragment', 'New-Element', 'Add-TextElement', 'Add-OmmlRun', 'New-RunProperties', 'Add-OmmlNode'
 )
@@ -410,6 +525,42 @@ foreach ($oleBatchToken in @('formula-ole-batch-manifest.json', 'Resume', 'Apply
         throw "OLE batch orchestrator is missing required contract token: $oleBatchToken"
     }
 }
+$validatorFaultScript = Get-Content -LiteralPath (Join-Path $root 'tools\Test-FormulaOfficeMathValidator.ps1') -Raw -Encoding UTF8
+foreach ($validatorFaultToken in @('malformed PPTX', 'FormulaOfficeMathValidator', 'OpenXmlErrorCount', 'source fixture')) {
+    if ($validatorFaultScript -notmatch [regex]::Escape($validatorFaultToken)) {
+        throw "OfficeMath validator fault-injection test is missing required contract token: $validatorFaultToken"
+    }
+}
+$repairProbeScript = Get-Content -LiteralPath (Join-Path $root 'tools\Test-FormulaPowerPointRepairHandling.ps1') -Raw -Encoding UTF8
+foreach ($repairProbeToken in @('malformed temporary PPTX copy', 'Presentations.Open', 'NotObservable', 'OriginalKept', 'source fixture')) {
+    if ($repairProbeScript -notmatch [regex]::Escape($repairProbeToken)) {
+        throw "PowerPoint repair probe is missing required contract token: $repairProbeToken"
+    }
+}
+$closedWorldPlanScript = Get-Content -LiteralPath (Join-Path $root 'tools\Plan-ClosedWorldUnattended.ps1') -Raw -Encoding UTF8
+foreach ($closedWorldToken in @('ClosedWorldUnattended', 'planOnly', 'circuitBreaker', 'FormulaImage', 'writeBackAllowed = $false', 'GoldSet source hash does not match', 'Recognition evaluation is not bound', 'Context resolution contains a source record absent', 'falseAcceptCount', 'false acceptance')) {
+    if ($closedWorldPlanScript -notmatch [regex]::Escape($closedWorldToken)) {
+        throw "Closed-world planner is missing required safety token: $closedWorldToken"
+    }
+}
+$oleSourceProbeScript = Get-Content -LiteralPath (Join-Path $root 'tools\Export-FormulaOleStructuredSourceProbe.ps1') -Raw -Encoding UTF8
+foreach ($oleSourceProbeToken in @('read-only', 'mtefParsed = $false', 'OriginalKept', 'structuredSourceStatus')) {
+    if ($oleSourceProbeScript -notmatch [regex]::Escape($oleSourceProbeToken)) {
+        throw "MathType structured-source probe is missing required safety token: $oleSourceProbeToken"
+    }
+}
+$decisionSummaryScript = Get-Content -LiteralPath (Join-Path $root 'tools\Export-FormulaDecisionSummary.ps1') -Raw -Encoding UTF8
+foreach ($decisionSummaryToken in @('NativeKept', 'Converted', 'FallbackSvg', 'OriginalKept', 'ManualRequired', 'Skipped', 'Failed', 'evidenceSetSha256')) {
+    if ($decisionSummaryScript -notmatch [regex]::Escape($decisionSummaryToken)) {
+        throw "Formula decision summary is missing terminal-state/evidence token: $decisionSummaryToken"
+    }
+}
+$hostCompatibilityScript = Get-Content -LiteralPath (Join-Path $root 'tools\Export-FormulaHostCompatibilityReceipt.ps1') -Raw -Encoding UTF8
+foreach ($hostCompatibilityToken in @('Microsoft PowerPoint COM', 'WPS Office', 'Physical projector or extended display', 'writeBackAllowed = $false', 'inputModified = $false')) {
+    if ($hostCompatibilityScript -notmatch [regex]::Escape($hostCompatibilityToken)) {
+        throw "Formula host compatibility receipt is missing required boundary token: $hostCompatibilityToken"
+    }
+}
 $goldSetSampleRows = @(Import-Csv -LiteralPath (Join-Path $root 'examples\fixtures\formula-goldset.sample.csv'))
 if ($goldSetSampleRows.Count -lt 1) { throw 'Formula gold set sample fixture must contain at least one row.' }
 $goldSetSampleHeader = @($goldSetSampleRows[0].PSObject.Properties.Name)
@@ -468,6 +619,19 @@ try {
 } finally {
     if (Test-Path -LiteralPath $adapterProbeDir) { Remove-Item -LiteralPath $adapterProbeDir -Recurse -Force }
 }
+
+& (Join-Path $root 'tools\Test-FormulaCanonicalContext.ps1')
+if (-not $?) { throw 'Formula context resolver fixture test failed.' }
+& (Join-Path $root 'tools\Test-FormulaFallbackSvg.ps1')
+if (-not $?) { throw 'Formula fallback SVG fixture test failed.' }
+& (Join-Path $root 'tools\Test-FormulaOleVisualAdjudication.ps1')
+if (-not $?) { throw 'Formula OLE visual adjudication fixture test failed.' }
+& (Join-Path $root 'tools\Test-FormulaOfficeMathValidator.ps1')
+if (-not $?) { throw 'FormulaOfficeMathValidator fault-injection test failed.' }
+& (Join-Path $root 'tools\Test-FormulaPowerPointRepairHandling.ps1')
+if (-not $?) { throw 'PowerPoint repair-handling probe failed.' }
+& (Join-Path $root 'tools\Test-ClosedWorldCircuitBreaker.ps1')
+if (-not $?) { throw 'Closed-world false-acceptance circuit-breaker test failed.' }
 
 $requiredFontFields = @('chinese', 'compactChinese', 'latin', 'math')
 foreach ($field in $requiredFontFields) {
@@ -851,6 +1015,10 @@ if ($normalizeContent -notmatch 'Resolve-PowerShellHost') { throw 'Normalize scr
 
 foreach ($launcher in @('一键规范化并导出PDF.cmd', '一键检查PPT.cmd', '一键规范化导出并转换可编辑公式.cmd')) {
     $launcherPath = Join-Path $root $launcher
+    # cmd.exe does not strip a UTF-8 BOM: the first line turns into garbage
+    # before @echo off and the launcher prints an error on every run.
+    $launcherBytes = [System.IO.File]::ReadAllBytes($launcherPath)
+    if ($launcherBytes.Length -ge 3 -and $launcherBytes[0] -eq 0xEF -and $launcherBytes[1] -eq 0xBB -and $launcherBytes[2] -eq 0xBF) { throw "Launcher must not carry a UTF-8 BOM: $launcher" }
     $launcherContent = Get-Content -LiteralPath $launcherPath -Raw -Encoding UTF8
     if ($launcherContent -notmatch '(?im)where\s+pwsh\.exe') { throw "Launcher must probe pwsh first: $launcher" }
     if ($launcherContent -notmatch '(?im)set\s+"PS_HOST=pwsh\.exe"') { throw "Launcher must default to pwsh.exe: $launcher" }
@@ -882,6 +1050,28 @@ if ($normalizeContent -match "Issue 'TextStyleSkippedAutoSize'") { throw 'AutoSi
 foreach ($fontSafetyMarker in @('AutoSizeGeometryRestored', 'Set-AutoSizeTextFontSafely', 'TextStyleSkippedGeometryRisk', 'font and geometry were rolled back before save')) {
     if ($normalizeContent -notmatch [regex]::Escape($fontSafetyMarker)) { throw "AutoSize font normalization safety marker is missing: $fontSafetyMarker" }
 }
+foreach ($lineLayoutMarker in @('Get-TextRangeLineLayout', 'Test-TextRangeLayoutUnchanged', 'Get-TextRangeLayoutChangeText', 'TextStyleSkippedLineRelayout', 'beforeLayout', 'afterLayout')) {
+    if ($normalizeContent -notmatch [regex]::Escape($lineLayoutMarker)) { throw "Line-layout re-wrap guard marker is missing: $lineLayoutMarker" }
+}
+foreach ($pictureFillMarker in @('Get-PictureFillShapeIds', 'Test-PictureFillShapeId', 'PictureFillShapePreserved', 're-bakes the fill bitmap')) {
+    if ($normalizeContent -notmatch [regex]::Escape($pictureFillMarker)) { throw "Picture-fill shape guard marker is missing: $pictureFillMarker" }
+}
+foreach ($shapeEnumGuardMarker in @('Invoke-NormalizeSlideShape', 'consecutiveShapeFailures', 'enumerationBrokenAfter', 'ShapeEnumerationRecovered', 'ShapeEnumerationCorrupted', 'indexed recovery pass re-processed')) {
+    if ($normalizeContent -notmatch [regex]::Escape($shapeEnumGuardMarker)) { throw "Shape-enumeration circuit breaker marker is missing: $shapeEnumGuardMarker" }
+}
+$brandContent = Get-Content -LiteralPath (Join-Path $root 'tools\Apply-PptxBrandVisualRefresh.ps1') -Raw -Encoding UTF8
+foreach ($dividerGuardMarker in @('cjkCount', 'textShapeCount', '$isCjkHeadline', '$isFormulaDivider', '$textShapeCount -le 1', '$SlideText.Length -gt 20')) {
+    if ($brandContent -notmatch [regex]::Escape($dividerGuardMarker)) { throw "Divider detection guard marker is missing: $dividerGuardMarker" }
+}
+$highlightBoxContent = Get-Content -LiteralPath (Join-Path $root 'tools\Apply-PptxHighlightBoxStyle.ps1') -Raw -Encoding UTF8
+foreach ($brightYellowMarker in @('$rgbBrightYellow', 'rgb -eq $rgbBrightYellow', 'semantic box')) {
+    if ($highlightBoxContent -notmatch [regex]::Escape($brightYellowMarker)) { throw "Bright-yellow conclusion family marker is missing: $brightYellowMarker" }
+}
+foreach ($emphasisGuardMarker in @('pass only ever ADDS bold for titles and never writes a', 'if ($Bold) { $font.Bold = $script:MsoTrue }', 'Author bold and color carry teaching semantics', 'HighlightTextColorPreserved', 'Test-IsLargeDisplayTextShape', 'DisplayTextPreserved', 'SectionTitleStyleSkippedMixedEmphasis', 'FormulaStyleSkippedMixedFontSize', 'FormulaStyleSkippedLineRelayout', 'AuthorLargeTextFloor', 'EmbeddedObjectPreserved', 'Sub-property writes are gated on a VISIBLE shadow')) {
+    if ($normalizeContent -notmatch [regex]::Escape($emphasisGuardMarker)) { throw "Author emphasis preservation guard marker is missing: $emphasisGuardMarker" }
+}
+if ($normalizeContent -match [regex]::Escape('$font.Fill.ForeColor.RGB = $Color')) { throw 'Normalize body path must never write author text colors.' }
+if ($normalizeContent -match [regex]::Escape('$font.Bold = $(if ($Bold) { $script:MsoTrue } else { $script:MsoFalse })')) { throw 'Normalize body path must never write Bold=false over author bold runs.' }
 foreach ($preflightMarker in @('Get-MissingConfiguredFonts', 'Get-SlideAspectRatioCheck', 'CHECK.FONT.AVAILABILITY', 'CHECK.SLIDE.ASPECT_RATIO', 'ConfiguredFontCheckUnavailable', 'SlideAspectRatioCheckUnavailable')) {
     if ($normalizeContent -notmatch [regex]::Escape($preflightMarker)) { throw "Preflight check marker is missing: $preflightMarker" }
 }
@@ -954,6 +1144,16 @@ try {
             $probePayload = [System.Text.Encoding]::Unicode.GetBytes('Q放=qm')
             $probeBinStream.Write($probePayload, 0, $probePayload.Length)
         } finally { $probeBinStream.Dispose() }
+        $probePresEntry = $probeArchive.CreateEntry('ppt/presentation.xml')
+        $probePresWriter = New-Object System.IO.StreamWriter($probePresEntry.Open(), $probeUtf8)
+        try {
+            $probePresWriter.Write('<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst></p:presentation>')
+        } finally { $probePresWriter.Dispose() }
+        $probePresRelsEntry = $probeArchive.CreateEntry('ppt/_rels/presentation.xml.rels')
+        $probePresRelsWriter = New-Object System.IO.StreamWriter($probePresRelsEntry.Open(), $probeUtf8)
+        try {
+            $probePresRelsWriter.Write('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>')
+        } finally { $probePresRelsWriter.Dispose() }
     } finally { $probeArchive.Dispose() }
     $probeFingerprint = Get-OleEquationCjkFingerprint -PptxPath $fingerprintProbeZip -SlideNumber 1 -ShapeId 7
     if ($probeFingerprint -cne '放') { throw "OLE fingerprint probe failed: expected 放, got '$probeFingerprint'." }
@@ -961,6 +1161,111 @@ try {
     if ($probeMissing.Count -ne 1 -or $probeMissing[0] -cne '吸') { throw 'OLE fingerprint subset probe failed: 吸 must be reported missing from a Q放=qm embedding.' }
 } finally {
     if (Test-Path -LiteralPath $fingerprintProbeDir) { Remove-Item -LiteralPath $fingerprintProbeDir -Recurse -Force }
+}
+
+# Slide-order domain probe: slideN.xml names are creation order and drift
+# from the presentation order once a deck is reordered in PowerPoint. Every
+# slide-locating helper must resolve through the sldIdLst map, or guards
+# silently miss on reordered decks (18.2 blipFill re-bake class).
+$reorderCommonFunctions = @('Get-PresentationOrderSlidePartMap')
+foreach ($fnName in $reorderCommonFunctions) {
+    if ($commonContent -notmatch [regex]::Escape("function $fnName")) { throw "Slide-order helper is missing from Common: $fnName" }
+}
+$normalizeReorderAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'tools\Normalize-PhysicsPpt.ps1'), [ref]$null, [ref]$null)
+$reorderNormalizeFunctions = @('Read-GeometrySlideXmlDocument', 'Get-PictureFillShapeIds')
+$reorderFunctionText = ''
+foreach ($fnName in $reorderNormalizeFunctions) {
+    $fnAst = $normalizeReorderAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $fnName }, $true) | Select-Object -First 1
+    if ($null -eq $fnAst) { throw "Normalize slide-order function not found for the behavioral probe: $fnName" }
+    $reorderFunctionText += "`n" + $fnAst.Extent.Text
+}
+Invoke-Expression $reorderFunctionText
+$reorderProbeDir = Join-Path $env:TEMP ("reorder-probe-" + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $reorderProbeDir -Force | Out-Null
+try {
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $reorderProbeZip = Join-Path $reorderProbeDir 'reordered.pptx'
+    $reorderArchive = [System.IO.Compression.ZipFile]::Open($reorderProbeZip, [System.IO.Compression.ZipArchiveMode]::Create)
+    try {
+        $reorderUtf8 = New-Object System.Text.UTF8Encoding($false)
+        # Physical slide1.xml holds the OLE (id=7); physical slide2.xml holds
+        # the picture-filled text box (id=9). Presentation order swaps them:
+        # presentation page 1 = slide2.xml, page 2 = slide1.xml.
+        $r1Entry = $reorderArchive.CreateEntry('ppt/slides/slide1.xml')
+        $r1Writer = New-Object System.IO.StreamWriter($r1Entry.Open(), $reorderUtf8)
+        try {
+            $r1Writer.Write('<p:spTree xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="7" name="probe"/></p:nvGraphicFramePr><p:graphicData><oleObj r:id="rId5"/></p:graphicData></p:graphicFrame></p:spTree>')
+        } finally { $r1Writer.Dispose() }
+        $r2Entry = $reorderArchive.CreateEntry('ppt/slides/slide2.xml')
+        $r2Writer = New-Object System.IO.StreamWriter($r2Entry.Open(), $reorderUtf8)
+        try {
+            $r2Writer.Write('<p:spTree xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sp><p:nvSpPr><p:cNvPr id="9" name="probe-fill"/></p:nvSpPr><p:spPr><a:blipFill><a:blip r:embed="rId3"/></a:blipFill></p:spPr></p:sp></p:spTree>')
+        } finally { $r2Writer.Dispose() }
+        $rPresEntry = $reorderArchive.CreateEntry('ppt/presentation.xml')
+        $rPresWriter = New-Object System.IO.StreamWriter($rPresEntry.Open(), $reorderUtf8)
+        try {
+            $rPresWriter.Write('<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="256" r:id="rIdB"/><p:sldId id="257" r:id="rIdA"/></p:sldIdLst></p:presentation>')
+        } finally { $rPresWriter.Dispose() }
+        $rPresRelsEntry = $reorderArchive.CreateEntry('ppt/_rels/presentation.xml.rels')
+        $rPresRelsWriter = New-Object System.IO.StreamWriter($rPresRelsEntry.Open(), $reorderUtf8)
+        try {
+            $rPresRelsWriter.Write('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdA" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/><Relationship Id="rIdB" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide2.xml"/></Relationships>')
+        } finally { $rPresRelsWriter.Dispose() }
+        $rS1RelsEntry = $reorderArchive.CreateEntry('ppt/slides/_rels/slide1.xml.rels')
+        $rS1RelsWriter = New-Object System.IO.StreamWriter($rS1RelsEntry.Open(), $reorderUtf8)
+        try {
+            $rS1RelsWriter.Write('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId5" Type="http://p.invalid/ole" Target="../embeddings/ole1.bin"/></Relationships>')
+        } finally { $rS1RelsWriter.Dispose() }
+        $rBinEntry = $reorderArchive.CreateEntry('ppt/embeddings/ole1.bin')
+        $rBinStream = $rBinEntry.Open()
+        try {
+            $rBinPayload = [System.Text.Encoding]::Unicode.GetBytes('Q放=qm')
+            $rBinStream.Write($rBinPayload, 0, $rBinPayload.Length)
+        } finally { $rBinStream.Dispose() }
+    } finally { $reorderArchive.Dispose() }
+    # The OLE lives on presentation page 2 (physical slide1.xml). A physical-
+    # name implementation would look inside slide2.xml and fail.
+    $reorderFingerprint = Get-OleEquationCjkFingerprint -PptxPath $reorderProbeZip -SlideNumber 2 -ShapeId 7
+    if ($reorderFingerprint -cne '放') { throw "Reordered-deck fingerprint probe failed: expected 放 via presentation order, got '$reorderFingerprint'." }
+    # The picture-fill map must key by presentation order: the fill shape is
+    # on presentation page 1 (physical slide2.xml), shape id 9.
+    $reorderFillMap = Get-PictureFillShapeIds -SourcePath $reorderProbeZip
+    if (-not $reorderFillMap.ContainsKey(1) -or @($reorderFillMap[1]) -notcontains 9) {
+        throw "Reordered-deck picture-fill probe failed: expected shape 9 under presentation page 1, got keys [$(@($reorderFillMap.Keys) -join ',')]."
+    }
+    if ($reorderFillMap.ContainsKey(2)) { throw 'Reordered-deck picture-fill probe failed: presentation page 2 must not carry picture-fill ids.' }
+} finally {
+    if (Test-Path -LiteralPath $reorderProbeDir) { Remove-Item -LiteralPath $reorderProbeDir -Recurse -Force }
+}
+
+# OLE block id probe: the apply step resolves slide+shapeId as the primary
+# mapping identity, and the reused cNvPr id keeps animation spids valid. The
+# id extractor must cover every authoring layout — before the 15.4电流的测量
+# fix, a bare p:graphicFrame with mc:AlternateContent inside a:graphicData
+# (legacy authoring) returned 0 and failed mapping with OleIndexOutOfRange.
+$oleApplyAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'tools\Apply-FormulaOmmlForOle.ps1'), [ref]$null, [ref]$null)
+$oleBlockIdFn = $oleApplyAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-OleBlockShapeId' }, $true) | Select-Object -First 1
+if ($null -eq $oleBlockIdFn) { throw 'OLE apply function Get-OleBlockShapeId not found for the behavioral probe.' }
+Invoke-Expression $oleBlockIdFn.Extent.Text
+$oleIdProbeNs = 'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"'
+$oleIdXmlLegacy = '<p:graphicFrame ' + $oleIdProbeNs + '><p:nvGraphicFramePr><p:cNvPr id="8" name="legacy"/></p:nvGraphicFramePr><a:graphic><a:graphicData uri="ole"><mc:AlternateContent><mc:Choice Requires="v"><p:oleObj progId="Equation.DSMT4"/></mc:Choice><mc:Fallback><p:oleObj progId="Equation.DSMT4"><p:pic><p:nvPicPr><p:cNvPr id="8" name="legacy"/></p:nvPicPr></p:pic></p:oleObj></mc:Fallback></mc:AlternateContent></a:graphicData></a:graphic></p:graphicFrame>'
+$oleIdXmlAcFrameChild = '<mc:AlternateContent ' + $oleIdProbeNs + '><p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="13" name="ac-frame"/></p:nvGraphicFramePr></p:graphicFrame><mc:Fallback/></mc:AlternateContent>'
+$oleIdXmlAcChoice = '<mc:AlternateContent ' + $oleIdProbeNs + '><mc:Choice Requires="v"><p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="11" name="modern"/></p:nvGraphicFramePr></p:graphicFrame></mc:Choice><mc:Fallback/></mc:AlternateContent>'
+$oleIdXmlFallbackOnly = '<mc:AlternateContent ' + $oleIdProbeNs + '><mc:Choice Requires="v"><p:oleObj progId="Equation.DSMT4"/></mc:Choice><mc:Fallback><p:pic><p:nvPicPr><p:cNvPr id="21" name="fallback-only"/></p:nvPicPr></p:pic></mc:Fallback></mc:AlternateContent>'
+$oleIdProbeCases = @(
+    @('legacy bare graphicFrame (AC inside a:graphicData)', $oleIdXmlLegacy, 8),
+    @('top-level AC with bare graphicFrame child', $oleIdXmlAcFrameChild, 13),
+    @('top-level AC with graphicFrame inside Choice (PowerPoint 2016+)', $oleIdXmlAcChoice, 11),
+    @('AC without a resolvable frame id must stay 0 (Fallback pic is never used)', $oleIdXmlFallbackOnly, 0)
+)
+foreach ($oleIdCase in $oleIdProbeCases) {
+    $oleIdDoc = New-Object System.Xml.XmlDocument
+    $oleIdDoc.LoadXml([string]$oleIdCase[1])
+    $oleIdActual = Get-OleBlockShapeId -Block $oleIdDoc.DocumentElement -NsManager $null
+    if ([int]$oleIdActual -ne [int]$oleIdCase[2]) {
+        throw ("OLE block id probe failed for {0}: expected id {1}, got {2}." -f $oleIdCase[0], $oleIdCase[2], $oleIdActual)
+    }
 }
 
 $aiImportContent = Get-Content -LiteralPath (Join-Path $root 'tools\Import-PptxAiReviewResult.ps1') -Raw -Encoding UTF8

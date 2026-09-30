@@ -330,16 +330,22 @@ $slideRows = New-Object System.Collections.Generic.List[object]
 $pp = $null
 $pres = $null
 try {
-    $pp = New-PowerPointApplication
-    $pres = $pp.Presentations.Open($InputPath, $script:MsoTrue, $script:MsoFalse, $script:MsoFalse)
+    # COM transient protection: application start and Open are the two calls
+    # that historically die with "cannot call a method on a null-valued
+    # expression" while a previous automation instance is still tearing down.
+    $pp = Invoke-WithComRetry -MaxRetries 3 -DelayMs 1500 -Action { New-PowerPointApplication }
+    $pres = Invoke-WithComRetry -MaxRetries 3 -DelayMs 1500 -Action { $pp.Presentations.Open($InputPath, $script:MsoTrue, $script:MsoFalse, $script:MsoFalse) }
     $slideWidth = [double]$pres.PageSetup.SlideWidth
     $slideHeight = [double]$pres.PageSetup.SlideHeight
     $slideCount = [int]$pres.Slides.Count
 
     if (-not $NoPdf) {
         $pdfPath = Join-Path $OutputDir ($safeBase + '.pdf')
+        # A failed export must not leave the previous run's PDF behind: the
+        # path contract would hand stale output to downstream consumers.
+        if (Test-Path -LiteralPath $pdfPath) { Remove-Item -LiteralPath $pdfPath -Force }
         try {
-            $pres.ExportAsFixedFormat($pdfPath, 2) | Out-Null
+            Invoke-WithComRetry -MaxRetries 3 -DelayMs 1000 -Action { $pres.ExportAsFixedFormat($pdfPath, 2) } | Out-Null
             if (-not (Test-Path -LiteralPath $pdfPath) -or (Get-Item -LiteralPath $pdfPath).Length -le 0) {
                 throw "PowerPoint did not create a non-empty PDF: $pdfPath"
             }
@@ -374,8 +380,22 @@ try {
             $metrics = Get-ImageVisualMetrics -Path $imagePath
             $slideExportStatus = 'Succeeded'
         } catch {
-            $slideExportError = $_.Exception.Message
-            Add-AuditRow -Rows $auditRows -File $fileName -Slide $slideNo -Shape '(slide)' -Issue 'SlidePngExportFailed' -Severity 'Error' -Details $_.Exception.Message
+            # Per-page COM transient retry: the slide export rejects calls while
+            # the application is busy; one delayed retry clears most of them
+            # without aborting the rest of the audit.
+            try {
+                Start-Sleep -Milliseconds 1200
+                Export-SlidePng -Slide $slide -Path $imagePath -Width $ExportWidth -Height $ExportHeight
+                if (-not (Test-Path -LiteralPath $imagePath) -or (Get-Item -LiteralPath $imagePath).Length -le 0) {
+                    throw "PowerPoint did not create a non-empty PNG on retry: $imagePath"
+                }
+                $metrics = Get-ImageVisualMetrics -Path $imagePath
+                $slideExportStatus = 'Succeeded'
+                Add-AuditRow -Rows $auditRows -File $fileName -Slide $slideNo -Shape '(slide)' -Issue 'SlidePngExportRetried' -Severity 'Info' -Details ("first attempt failed: {0}" -f $_.Exception.Message)
+            } catch {
+                $slideExportError = $_.Exception.Message
+                Add-AuditRow -Rows $auditRows -File $fileName -Slide $slideNo -Shape '(slide)' -Issue 'SlidePngExportFailed' -Severity 'Error' -Details $_.Exception.Message
+            }
         }
 
         foreach ($shape in $slide.Shapes) {

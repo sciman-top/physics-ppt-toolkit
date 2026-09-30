@@ -389,6 +389,97 @@
       "targetUnicodeMath": "Δt=40℃-20℃=20℃",
       "targetTex": "\\Delta t=40℃-20℃=20℃",
       "note": "温差数值代入链；来源：13.3 v17 遗留 OLE 清单 idx17（slide29 裁剪图，judge 定稿）。"
+    },
+    {
+      "name": "电功率时间变形式",
+      "sourcePattern": "^t=W/P$",
+      "targetUnicodeMath": "t=W/P",
+      "targetTex": "t=\\frac{W}{P}",
+      "note": "电功率公式时间变形式；来源：18.2电功率 OLE slide4/12（蓝色大分式）。"
+    },
+    {
+      "name": "电功公式",
+      "sourcePattern": "^W=Pt$",
+      "targetUnicodeMath": "W=Pt",
+      "targetTex": "W=Pt",
+      "note": "电功定义式（W=Pt）；来源：18.2电功率 OLE slide4/9/12（蓝色线性式）。"
+    },
+    {
+      "name": "电功率公式",
+      "sourcePattern": "^P=UI$",
+      "targetUnicodeMath": "P=UI",
+      "targetTex": "P=UI",
+      "note": "电功率核心式（P=UI）；来源：18.2电功率 OLE slide15（蓝色）。"
+    },
+    {
+      "name": "电功率定义代入段",
+      "sourcePattern": "^P=W/t=$",
+      "targetUnicodeMath": "P=W/t=",
+      "targetTex": "P=\\frac{W}{t}=",
+      "note": "电功率定义式接等号的推导链左段；来源：18.2电功率 OLE slide15（蓝色大分式）。"
+    },
+    {
+      "name": "电功率代换代入段",
+      "sourcePattern": "^UIt/t=$",
+      "targetUnicodeMath": "UIt/t=",
+      "targetTex": "\\frac{UIt}{t}=",
+      "note": "W=UIt 代入后的约分中间段；来源：18.2电功率 OLE slide15（黑色大分式）。"
+    },
+    {
+      "name": "电压电流乘积片段",
+      "sourcePattern": "^UI$",
+      "targetUnicodeMath": "UI",
+      "targetTex": "UI",
+      "note": "UI 乘积片段（推导链尾段）；来源：18.2电功率 OLE slide15（黑色）。"
+    },
+    {
+      "name": "实际额定功率比段",
+      "sourcePattern": "^P实/P额=$",
+      "targetUnicodeMath": "P_实/P_额=",
+      "targetTex": "\\frac{P_{\\text{实}}}{P_{\\text{额}}}=",
+      "note": "实际功率与额定功率比值左段；来源：18.2电功率 OLE slide37（黑字红下标）。"
+    },
+    {
+      "name": "等号四分之一",
+      "sourcePattern": "^=1/4$",
+      "targetUnicodeMath": "=1/4",
+      "targetTex": "=\\frac{1}{4}",
+      "note": "接等号的四分之一片段；来源：18.2电功率 OLE slide37（红色）。"
+    },
+    {
+      "name": "实际电流代入链",
+      "sourcePattern": "^I实=U实/R=110V/55Ω=2A$",
+      "targetUnicodeMath": "I_实=U_实/R=110V/55Ω=2A",
+      "targetTex": "I_{\\text{实}}=\\frac{U_{\\text{实}}}{R}=\\frac{110V}{55\\Omega}=2A",
+      "note": "实际电流数值代入链；来源：18.2电功率 OLE slide37（蓝字红下标）。"
+    },
+    {
+      "name": "实际电功率代入链",
+      "sourcePattern": "^P实=U实I实=110V×2A=220W$",
+      "targetUnicodeMath": "P_实=U_实I_实=110V×2A=220W",
+      "targetTex": "P_{\\text{实}}=U_{\\text{实}}I_{\\text{实}}=110V\\times2A=220W",
+      "note": "实际电功率数值代入链；来源：18.2电功率 OLE slide37（蓝字红下标）。"
+    },
+    {
+      "name": "额定电流代入链",
+      "sourcePattern": "^I额=P额/U额=880W/220V=4A$",
+      "targetUnicodeMath": "I_额=P_额/U_额=880W/220V=4A",
+      "targetTex": "I_{\\text{额}}=\\frac{P_{\\text{额}}}{U_{\\text{额}}}=\\frac{880W}{220V}=4A",
+      "note": "额定电流数值代入链；来源：18.2电功率 OLE slide37（蓝字红下标）。"
+    },
+    {
+      "name": "额定电阻代入链",
+      "sourcePattern": "^R=U额/I额=220V/4A=55Ω$",
+      "targetUnicodeMath": "R=U_额/I_额=220V/4A=55Ω",
+      "targetTex": "R=\\frac{U_{\\text{额}}}{I_{\\text{额}}}=\\frac{220V}{4A}=55\\Omega",
+      "note": "额定电阻数值代入链；来源：18.2电功率 OLE slide37（蓝字红下标）。"
+    },
+    {
+      "name": "电流数值代入式0.3A",
+      "sourcePattern": "^I=0\\.3A$",
+      "targetUnicodeMath": "I=0.3A",
+      "targetTex": "I=0.3A",
+      "note": "电流数值代入式；来源：15.4电流的测量 OLE slide5（黑色斜体）。"
     }
   ],
   "rules": {

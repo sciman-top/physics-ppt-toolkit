@@ -102,7 +102,12 @@ $rgbConclusionFill = Convert-HexToRgbLong ([string]$config.colors.yellowFill)
 $rgbChipFill = Convert-HexToRgbLong ([string]$config.colors.videoYellow)
 $rgbBorder = Convert-HexToRgbLong ([string]$config.colors.yellowBorder)
 $rgbLegacyYellow = Convert-HexToRgbLong '#FFFFCC'
+$rgbBrightYellow = Convert-HexToRgbLong '#FFFF00'
 $rgbChipAmber = Convert-HexToRgbLong '#FFDB93'
+# The MediaTag target color must also be a recognized MediaTag source, or a
+# second run of this tool would not even classify the converted chips (no
+# AlreadyApplied rows, no idempotency).
+$rgbChipTargetYellow = Convert-HexToRgbLong '#FFD966'
 $rgbWhite = 0xFFFFFF
 $rgbLegacyBorderOrange = Convert-HexToRgbLong '#FF9900'
 $rgbLegacyBorderRed = Convert-HexToRgbLong '#C00000'
@@ -175,8 +180,13 @@ function Get-HighlightBoxClass {
         if ($Shape.Fill.Type -ne $script:MsoFillSolid) { return $null }
         if ($Shape.Fill.Visible -ne $script:MsoTrue) { return $null }
         $rgb = [int]$Shape.Fill.ForeColor.RGB
-        if ($rgb -eq $rgbLegacyYellow -or $rgb -eq $rgbConclusionFill) { return 'Conclusion' }
-        if ($rgb -eq $rgbChipAmber) { return 'MediaTag' }
+        # Bright FFFF00 is the same conclusion family as pale FFFFCC — some
+        # decks (18.2 slides 5/6/7) key their takeaway lines in pure yellow;
+        # leaving them unconverted produced two different fills for one
+        # semantic box. Empty FFFF00 blocks (diagram swatches) never reach
+        # here because of the HasText gate above.
+        if ($rgb -eq $rgbLegacyYellow -or $rgb -eq $rgbConclusionFill -or $rgb -eq $rgbBrightYellow) { return 'Conclusion' }
+        if ($rgb -eq $rgbChipAmber -or $rgb -eq $rgbChipTargetYellow) { return 'MediaTag' }
         if ($rgb -eq $rgbWhite -and $Shape.Line.Visible -eq $script:MsoTrue) {
             $lineRgb = [int]$Shape.Line.ForeColor.RGB
             if ($lineRgb -eq $rgbLegacyBorderOrange -or $lineRgb -eq $rgbLegacyBorderRed) { return 'Conclusion' }
@@ -317,10 +327,41 @@ try {
     Release-ComObjectSafe $application
 }
 
+function Get-FileSha256Safe {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) { return '' }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            return (($sha.ComputeHash($stream) | ForEach-Object { $_.ToString('x2') }) -join '')
+        } finally { $stream.Dispose() }
+    } catch { return '' } finally { $sha.Dispose() }
+}
+
 $reportCsv = Join-Path $reportDir 'highlight-box-unify-report.csv'
 Write-Utf8BomCsv -InputObject $reportRows -Path $reportCsv
+
+# Delivery manifest: an output-PPTX change must carry reviewable evidence
+# (source/output hashes + counters + delivery status), same contract as the
+# brand-refresh pass.
+$deliverySource = if (Test-Path -LiteralPath (Join-Path $backupDir (Split-Path -Leaf $PptxPath))) { Join-Path $backupDir (Split-Path -Leaf $PptxPath) } else { $PptxPath }
+$deliveryManifest = [ordered]@{
+    schemaVersion = 1
+    generatedAt = Get-Date -Format 'yyyy-MM-dd hh:mm:ss'
+    tool = 'Apply-PptxHighlightBoxStyle'
+    source = [ordered]@{ path = $PptxPath; sha256 = (Get-FileSha256Safe -Path $deliverySource) }
+    output = [ordered]@{ path = $workingPptx; sha256 = (Get-FileSha256Safe -Path $workingPptx) }
+    counters = [ordered]@{ changed = $script:counters.Changed; alreadyApplied = $script:counters.AlreadyApplied; groupsSkipped = $script:counters.GroupsSkipped; failed = $script:counters.Failed }
+    slideCount = $slideCount
+    report = $reportCsv
+    deliveryStatus = if ($script:counters.Failed -gt 0) { 'BlockedHighlightFailures' } else { 'PendingManualVisualReview' }
+}
+$deliveryManifestPath = Join-Path $reportDir 'highlight-box-unify-manifest.json'
+Write-Utf8BomText -Text ($deliveryManifest | ConvertTo-Json -Depth 6) -Path $deliveryManifestPath
 
 Write-Host "Highlight box unify complete: $workingPptx"
 Write-Host ("Changed={0} AlreadyApplied={1} GroupsSkipped={2} Failed={3} SlideCount={4}" -f `
     $script:counters.Changed, $script:counters.AlreadyApplied, $script:counters.GroupsSkipped, $script:counters.Failed, $slideCount)
 Write-Host "Report: $reportCsv"
+Write-Host "Manifest: $deliveryManifestPath"

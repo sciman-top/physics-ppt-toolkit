@@ -1,4 +1,4 @@
-{
+﻿{
   "schemaVersion": 1,
   "description": "UnicodeMath inputs the OMML candidate parser must reject deterministically. Bare operator scripts and chained linear division are ambiguous; canonical form requires parentheses (10^(-3), (a/b)/c via explicit grouping).",
   "cases": [
@@ -29,6 +29,22 @@
     {
       "name": "dangling-subscript-marker-underscore",
       "unicodeMath": "Q_"
+    },
+    {
+      "name": "adjacent-equality-signs",
+      "unicodeMath": "a==b"
+    },
+    {
+      "name": "grouped-trailing-equality",
+      "unicodeMath": "(a=)"
+    },
+    {
+      "name": "leading-and-trailing-equality",
+      "unicodeMath": "=a="
+    },
+    {
+      "name": "fraction-denominator-trailing-equality",
+      "unicodeMath": "a/(b=)"
     }
   ]
 }

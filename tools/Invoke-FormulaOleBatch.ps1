@@ -100,8 +100,13 @@ function Get-BatchManifestPath {
 }
 
 function New-StepSignature {
+    # Tool-script, config and batch-parameter hashes are part of the signature:
+    # a code/config/parameter change must invalidate recorded steps, otherwise
+    # -Resume replays stale artifacts (a tokenizer fix would be ignored).
     param([string]$StepName, [string[]]$InputPaths, [string[]]$Flags)
-    $material = @($StepName) + @($Flags) + @($InputPaths | ForEach-Object { Get-FileSha256 -Path $_ })
+    $material = @($StepName) + @($Flags) + @($InputPaths | ForEach-Object { Get-FileSha256 -Path $_ }) + @(
+        $script:SignatureToolHash, $script:SignatureConfigHash, [string]$MaxItems
+    )
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try {
         $bytes = [System.Text.Encoding]::UTF8.GetBytes(($material -join '|'))
@@ -120,6 +125,22 @@ function Test-StepReusable {
     }
     return (New-StepSignature -StepName ([string]$Step.name) -InputPaths @([string[]]$Step.inputs) -Flags @([string[]]$step.flags) -eq [string]$Step.signature)
 }
+
+# --- signature inputs: child tool scripts + style config (hashed once) ---
+$signatureToolFiles = @(
+    'Export-FormulaCarrierInventory.ps1', 'Export-PptxVisualAudit.ps1', 'Export-FormulaOleCrops.ps1',
+    'Export-FormulaOleMapping.ps1', 'Export-FormulaOmmlCandidates.ps1', 'Apply-FormulaOmmlForOle.ps1'
+)
+$script:SignatureToolHash = $null
+$toolHashMaterial = @()
+foreach ($toolFile in $signatureToolFiles) { $toolHashMaterial += (Get-FileSha256 -Path (Join-Path $PSScriptRoot $toolFile)) }
+$toolHashSha = [System.Security.Cryptography.SHA256]::Create()
+try {
+    $toolHashBytes = [System.Text.Encoding]::UTF8.GetBytes(($toolHashMaterial -join '|'))
+    $script:SignatureToolHash = ([System.BitConverter]::ToString($toolHashSha.ComputeHash($toolHashBytes)) -replace '-', '').ToLowerInvariant()
+} finally { $toolHashSha.Dispose() }
+$styleConfigPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'config\physics-ppt-style.config.json'
+$script:SignatureConfigHash = if (Test-Path -LiteralPath $styleConfigPath) { Get-FileSha256 -Path $styleConfigPath } else { 'no-config' }
 
 # --- delivery root: explicit (outside reports/) or auto-versioned ---
 $reportsRoot = Join-Path (Split-Path -Parent $PSScriptRoot) 'reports'
@@ -246,7 +267,7 @@ try {
     $mappingCsv = Join-Path $reportDir 'formula-ole-mapping.csv'
     $reviewCsv = Join-Path $reportDir 'formula-ole-review.csv'
     Invoke-BatchStep -StepName 'mapping' -Inputs @($inventoryJson, $goldSetPath) -Outputs @($mappingCsv, $reviewCsv) -Action {
-        & (Join-Path $PSScriptRoot 'Export-FormulaOleMapping.ps1') -CarrierInventoryJson $inventoryJson -GoldSetCsv $goldSetPath -OutputDir $reportDir | Out-Null
+        & (Join-Path $PSScriptRoot 'Export-FormulaOleMapping.ps1') -CarrierInventoryJson $inventoryJson -GoldSetCsv $goldSetPath -OutputDir $reportDir -MaxItems $MaxItems | Out-Null
     }
 
     # --- step 5: OMML candidates ---
@@ -261,7 +282,7 @@ try {
     $outputPptx = Join-Path $deliveryDir $outputName
     $applyReport = Join-Path $reportDir 'formula-ole-apply-report.csv'
     Invoke-BatchStep -StepName 'apply' -Inputs @($inputFullPath, $mappingCsv, $candidatesCsv) -Outputs @($outputPptx, $applyReport) -Action {
-        & (Join-Path $PSScriptRoot 'Apply-FormulaOmmlForOle.ps1') -InputPath $inputFullPath -MappingCsv $mappingCsv -OmmlCandidateCsv $candidatesCsv -OutputPath $outputPptx -ReportPath $applyReport | Out-Null
+        & (Join-Path $PSScriptRoot 'Apply-FormulaOmmlForOle.ps1') -InputPath $inputFullPath -MappingCsv $mappingCsv -OmmlCandidateCsv $candidatesCsv -OutputPath $outputPptx -ReportPath $applyReport -MaxItems $MaxItems | Out-Null
     }
 
     # --- step 7: Open XML validator ---
@@ -287,25 +308,44 @@ try {
     if (Test-Path -LiteralPath $applyReport) {
         $applyRows = @(Import-Csv -LiteralPath $applyReport -Encoding UTF8)
     }
+    $replacedCount = @($applyRows | Where-Object { $_.Issue -eq 'OleFormulaReplaced' }).Count
+    $refusedCount = @($applyRows | Where-Object { $_.Issue -notin @('OleFormulaReplaced', 'SavedAs') }).Count
+    # A batch whose mapping promised rows but replaced nothing is a failure,
+    # not a quiet pass: the whole point of the run was the conversion.
+    $batchStatus = 'Passed'
+    $writeBackAllowed = $true
+    $batchNote = 'Explicit migration batch on a new copy. Source PPTX untouched; mc:Fallback keeps original OLE objects.'
+    if ($refusedCount -gt 0 -and $replacedCount -eq 0) {
+        $batchStatus = 'Failed'
+        $writeBackAllowed = $false
+        $batchNote = 'Every mapping row was refused and nothing was replaced; treat this delivery as inert and investigate the apply report.'
+    } elseif ($refusedCount -gt 0) {
+        $batchStatus = 'Degraded'
+        $batchNote = 'Some mapping rows were refused; see formula-ole-apply-report.csv for the per-row reasons before accepting this delivery.'
+    }
     $manifest = [ordered]@{
         schemaVersion = 1
         generatedAt = Get-Date -Format 'yyyy-MM-dd hh:mm:ss'
-        status = 'Passed'
+        status = $batchStatus
         input = [ordered]@{ path = $inputFullPath; sha256 = $inputSha256 }
         goldSet = [ordered]@{ path = $goldSetPath; sha256 = $goldSetSha256 }
         deliveryRoot = $deliveryFullPath
         outputPptx = $outputPptx
         outputSha256 = Get-FileSha256 -Path $outputPptx
         applySummary = [ordered]@{
-            replaced = @($applyRows | Where-Object { $_.Issue -eq 'OleFormulaReplaced' }).Count
-            refused = @($applyRows | Where-Object { $_.Issue -notin @('OleFormulaReplaced', 'SavedAs') }).Count
+            replaced = $replacedCount
+            refused = $refusedCount
         }
         steps = $batchSteps.ToArray()
-        writeBackAllowed = $true
-        note = 'Explicit migration batch on a new copy. Source PPTX untouched; mc:Fallback keeps original OLE objects.'
+        writeBackAllowed = $writeBackAllowed
+        note = $batchNote
     }
     Write-Utf8BomText -Text ($manifest | ConvertTo-Json -Depth 10) -Path $manifestPath
-    Write-Output ("Batch passed: {0}" -f $deliveryFullPath)
+    if ($batchStatus -eq 'Passed') {
+        Write-Output ("Batch passed: {0}" -f $deliveryFullPath)
+    } else {
+        Write-Output ("Batch {0}: {1}" -f $batchStatus, $deliveryFullPath)
+    }
     Write-Output ("Output: {0} (replaced={1}; refused={2})" -f $outputPptx, $manifest.applySummary.replaced, $manifest.applySummary.refused)
 } catch {
     # A failure after the Passed manifest was written (e.g. a reporting crash)

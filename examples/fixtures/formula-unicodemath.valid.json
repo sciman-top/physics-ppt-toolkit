@@ -1,4 +1,4 @@
-{
+﻿{
   "schemaVersion": 1,
   "description": "Valid canonical UnicodeMath cases for the OMML candidate parser. expectedCanonicalUnicodeMath is optional; when present the canonical round-trip must equal it exactly (case-sensitive). Every case must parse and re-render stably.",
   "cases": [
@@ -62,6 +62,16 @@
       "unicodeMath": "Q_吸=cmΔt=4.2×10^(3)J\\/(kg·℃)×50kg×20℃=4.2×10^(6)J",
       "expectedCanonicalUnicodeMath": "Q_吸=cmΔt=4.2×10^(3)J\\/(kg·℃)×50kg×20℃=4.2×10^(6)J",
       "note": "代入链端到端：线性单位斜杠 + 括号指数 + 多重等号。"
+    },
+    {
+      "name": "trailing-equality-definition-segment",
+      "unicodeMath": "P=W/t=",
+      "expectedCanonicalUnicodeMath": "P=W/t="
+    },
+    {
+      "name": "trailing-equality-subscript-ratio-segment",
+      "unicodeMath": "P_实/P_额=",
+      "expectedCanonicalUnicodeMath": "P_实/P_额="
     }
   ]
 }

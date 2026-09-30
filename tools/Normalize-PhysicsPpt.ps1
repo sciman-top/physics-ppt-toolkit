@@ -98,6 +98,12 @@ $script:PpAlignCenter = 2
 $script:MsoAnimEffectSplit = 16
 $script:MsoAnimationLevelNone = 0
 $script:MsoAnimTriggerOnPageClick = 1
+$script:MsoMixed = -2
+$script:MsoEmbeddedOle = 7
+$script:MsoLinkedOle = 10
+# Authored text at/above this size is treated as display emphasis even below
+# SizeDisplayTitleMin: it is never capped down to body size.
+$script:AuthorLargeTextFloor = 44
 
 function Convert-HexToRgbInt {
     param([Parameter(Mandatory = $true)][string]$Hex)
@@ -111,67 +117,10 @@ function Convert-HexToRgbInt {
     return ($r + ($g * 256) + ($b * 65536))
 }
 
-function Invoke-WithComRetry {
-    param([scriptblock]$Action, [int]$MaxRetries = 2, [int]$DelayMs = 500)
-    $lastError = $null
-    for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
-        try {
-            return & $Action
-        } catch {
-            $lastError = $_
-            $category = Get-ComFailureCategory -ErrorRecord $_
-            $message = if ($null -ne $_.Exception) { $_.Exception.Message } else { '' }
-            if ($attempt -ge $MaxRetries -or -not (Test-IsRetryablePresentationFailure -Category $category -Message $message)) {
-                throw
-            }
-            Start-Sleep -Milliseconds $DelayMs
-        }
-    }
-    throw $lastError
-}
-
-function Get-ComFailureCategory {
-    param([System.Management.Automation.ErrorRecord]$ErrorRecord)
-    $exception = $ErrorRecord.Exception
-    $hresult = if ($null -ne $exception) { $exception.HResult } else { 0 }
-
-    switch ($hresult) {
-        -2147418111 { return 'PowerPointBusyOrRejectedCall' } # 0x80010001 RPC_E_CALL_REJECTED
-        -2147024864 { return 'FileInUseOrSharingViolation' } # 0x80070020
-        -2147221164 { return 'PowerPointComNotRegistered' }  # 0x80040154
-        -2147287038 { return 'FileNotFoundOrUnavailable' }   # 0x80030002
-        default {
-            if ($null -ne $exception -and $exception.Message -match 'PowerPoint|COM|RPC|rejected|busy') {
-                return 'PowerPointComFailure'
-            }
-            return 'UnhandledFailure'
-        }
-    }
-}
-
-function Format-ComFailureDetails {
-    param([System.Management.Automation.ErrorRecord]$ErrorRecord)
-    $category = Get-ComFailureCategory -ErrorRecord $ErrorRecord
-    $hresult = if ($null -ne $ErrorRecord.Exception) { ('0x{0:X8}' -f ($ErrorRecord.Exception.HResult -band 0xFFFFFFFF)) } else { 'n/a' }
-    return "$category [$hresult]: $($ErrorRecord.Exception.Message)"
-}
-
-function Test-IsRetryablePresentationFailure {
-    param(
-        [string]$Category,
-        [string]$Message
-    )
-
-    if ($Category -in @('PowerPointBusyOrRejectedCall', 'PowerPointComFailure', 'FileInUseOrSharingViolation')) {
-        return $true
-    }
-
-    if ($Category -eq 'UnhandledFailure' -and $Message -match 'null-valued expression|RPC|COM|PowerPoint|busy|rejected') {
-        return $true
-    }
-
-    return $false
-}
+# Invoke-WithComRetry, Get-ComFailureCategory, Format-ComFailureDetails and
+# Test-IsRetryablePresentationFailure are shared and come from
+# PhysicsPpt.Common.ps1 (dot-sourced above) — do not re-declare them here;
+# the Common version carries the fuller HRESULT retry table.
 
 # --- Load style configuration from JSON ---
 $ConfigPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'config\physics-ppt-style.config.json'
@@ -304,6 +253,7 @@ $script:ConfiguredFontCheckCache = $null
 # re-grow COM-restored bounds before the package is serialized, so the
 # file-level restore is the only deterministic conservation point.
 $script:IntentionalGeometryShapes = @{}
+$script:PresentationSlidePartMap = @{}
 # Per-file restore requests, executed after PowerPoint quits (the SaveAs
 # target stays locked by the PowerPoint process until then).
 $script:PendingGeometryRestores = New-Object System.Collections.Generic.List[object]
@@ -436,19 +386,10 @@ function Reset-ReportRowsToCount {
 }
 
 function Restart-PowerPointApplication {
+    # Thin wrapper: shared implementation in PhysicsPpt.Common.ps1, wired to
+    # this script's retry delay parameter.
     param($Current)
-
-    if ($null -ne $Current) {
-        try { $Current.Quit() | Out-Null } catch { }
-        Release-ComObjectSafe -ComObject $Current
-    }
-
-    [System.GC]::Collect()
-    [System.GC]::WaitForPendingFinalizers()
-    if ($FileRetryDelayMs -gt 0) { Start-Sleep -Milliseconds $FileRetryDelayMs }
-
-    $next = New-PowerPointApplication
-    return $next
+    return Restart-PowerPointApplicationInternal -Current $Current -DelayMs $FileRetryDelayMs
 }
 
 function Get-ShapeText {
@@ -861,24 +802,47 @@ function Set-FormulaTextStyle {
         $beforeBold = [string]$font.Bold
         $beforeColor = ''
         try { $beforeColor = [string]$font.Fill.ForeColor.RGB } catch { }
+        # A mixed-size range (Get-TextRangeFontSize returns null) means a size
+        # write would flatten the emphasis hierarchy — same guard as body text.
+        if ($null -eq $beforeSize) {
+            Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $Shape.Name -Issue 'FormulaStyleSkippedMixedFontSize' `
+                -Details 'Formula text mixes font sizes; family, size, and alignment were preserved to keep the emphasis hierarchy.' `
+                -RuleId 'STYLE.FORMULA.TEXT' -Property 'FontName/NameFarEast/Size/ParagraphAlignment' -RiskLevel 'R0' -Result 'Skipped'
+            return
+        }
         $targetSize = Resolve-FormulaTargetSize -Profile $Profile
         $safeSize = Resolve-SafeFontSize -TextRange $textRange -TargetSize $targetSize -FileName $FileName -SlideNumber $SlideNumber -ShapeName $Shape.Name
         $beforeAlignment = ''
         try { $beforeAlignment = [string]$textRange.ParagraphFormat.Alignment } catch { }
+        $beforeLayout = Get-TextRangeLineLayout -TextRange $textRange
 
         $font.Name = $script:Style.FontMath
         $font.NameFarEast = $script:Style.FontChinese
         $font.Size = $safeSize
-        $font.Bold = $script:MsoFalse
-        $font.Fill.Visible = $script:MsoTrue
-        $font.Fill.ForeColor.RGB = $script:Style.ColorFormulaBlue
+        # Author bold and color carry teaching semantics (red derivation
+        # formulas, bold display titles); only family/size/alignment normalize.
         $textRange.ParagraphFormat.Alignment = $script:PpAlignCenter
 
+        $afterLayout = Get-TextRangeLineLayout -TextRange $textRange
+        if (-not (Test-TextRangeLayoutUnchanged -Before $beforeLayout -After $afterLayout)) {
+            $font.Name = $beforeName
+            $font.NameFarEast = $beforeFarEast
+            $font.Size = $beforeSize
+            try { $textRange.ParagraphFormat.Alignment = [int]$beforeAlignment } catch { }
+            Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $Shape.Name -Issue 'FormulaStyleSkippedLineRelayout' `
+                -Details ("Formula style re-wrapped the shape ({0}); the original style was restored." -f (Get-TextRangeLayoutChangeText -Before $beforeLayout -After $afterLayout)) `
+                -RuleId 'STYLE.FORMULA.TEXT' -Property 'FontName/NameFarEast/Size/ParagraphAlignment' `
+                -Before ("{0}|{1}|{2}|{3}|{4}|{5}" -f $beforeName, $beforeFarEast, $beforeSize, $beforeBold, $beforeColor, $beforeAlignment) `
+                -After ("{0}|{1}|{2}|{3}|{4}|{5}" -f $beforeName, $beforeFarEast, $beforeSize, $beforeBold, $beforeColor, $beforeAlignment) `
+                -RiskLevel 'R0' -Result 'Skipped'
+            return
+        }
+
         Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $Shape.Name -Issue 'FormulaTextStyleNormalized' `
-            -Details ("kind={0}; size={1:N1} pt; font={2}; color={3}; text preserved." -f $Profile.Kind, $safeSize, $script:Style.FontMath, $script:Style.ColorFormulaBlueHex) `
-            -RuleId 'STYLE.FORMULA.TEXT' -Property 'FontName/NameFarEast/Size/Bold/Color/ParagraphAlignment' `
+            -Details ("kind={0}; size={1:N1} pt; font={2}; author color and bold preserved; text preserved." -f $Profile.Kind, $safeSize, $script:Style.FontMath) `
+            -RuleId 'STYLE.FORMULA.TEXT' -Property 'FontName/NameFarEast/Size/ParagraphAlignment' `
             -Before ("{0}|{1}|{2}|{3}|{4}|{5}" -f $beforeName, $beforeFarEast, $beforeSize, $beforeBold, $beforeColor, $beforeAlignment) `
-            -After ("{0}|{1}|{2}|{3}|{4}|{5}" -f $script:Style.FontMath, $script:Style.FontChinese, $safeSize, $script:MsoFalse, $script:Style.ColorFormulaBlue, $script:PpAlignCenter) `
+            -After ("{0}|{1}|{2}|{3}|{4}|{5}" -f $script:Style.FontMath, $script:Style.FontChinese, $safeSize, $beforeBold, $beforeColor, $script:PpAlignCenter) `
             -RiskLevel 'R1' -Result 'Applied'
     } catch {
         Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName (Get-ShapeName $Shape) -Issue 'FormulaTextStyleFailed' -Details $_.Exception.Message `
@@ -935,6 +899,54 @@ function Test-TextRangeFitsShape {
         Width = $bounds.Width
         Height = $bounds.Height
     }
+}
+
+function Get-TextRangeLineLayout {
+    # Rendered per-line text of a range.  A family/size write can re-wrap a
+    # shape while its bounds and line count stay unchanged, and sibling answer
+    # shapes anchor to the old break points (slide 16 blank-collision class).
+    # $null means the COM probe is unavailable; callers must stay inert rather
+    # than block normalization on a missing probe.
+    param($TextRange)
+    try {
+        $lines = $TextRange.Lines()
+        $lineCount = [int]$lines.Count
+        if ($lineCount -le 0) { return $null }
+        $texts = New-Object 'System.Collections.Generic.List[string]'
+        for ($lineIndex = 1; $lineIndex -le $lineCount; $lineIndex++) {
+            $lineText = [string]$lines.Item($lineIndex).Text
+            $texts.Add($lineText.TrimEnd("`r", "`v", ' ', '　'))
+        }
+        return ,$texts.ToArray()
+    } catch {
+        return $null
+    }
+}
+
+function Test-TextRangeLayoutUnchanged {
+    param($Before, $After)
+    if ($null -eq $Before -or $null -eq $After) { return $true }
+    if ($Before.Count -ne $After.Count) { return $false }
+    for ($lineIndex = 0; $lineIndex -lt $Before.Count; $lineIndex++) {
+        if ([string]$Before[$lineIndex] -ne [string]$After[$lineIndex]) { return $false }
+    }
+    return $true
+}
+
+function Get-TextRangeLayoutChangeText {
+    param($Before, $After)
+    $beforeCount = if ($null -ne $Before) { $Before.Count } else { -1 }
+    $afterCount = if ($null -ne $After) { $After.Count } else { -1 }
+    $firstDiff = 0
+    if (($null -ne $Before) -and ($null -ne $After)) {
+        $shared = [Math]::Min($beforeCount, $afterCount)
+        for ($lineIndex = 0; $lineIndex -lt $shared; $lineIndex++) {
+            if ([string]$Before[$lineIndex] -ne [string]$After[$lineIndex]) { $firstDiff = $lineIndex + 1; break }
+        }
+        if ($firstDiff -eq 0 -and $beforeCount -ne $afterCount) { $firstDiff = $shared + 1 }
+    }
+    $firstDiffText = if ($firstDiff -gt 0) { [string]$firstDiff } else { 'none' }
+    return ("rendered lines {0} -> {1}; first changed line {2}" -f $beforeCount, $afterCount, $firstDiffText)
 }
 
 function Resolve-SafeFontSize {
@@ -1001,6 +1013,7 @@ function Set-TextRangeStyle {
         # write would flatten the emphasis hierarchy; preserve it like mixed fonts.
         $mixedFontSize = ($null -eq $beforeSize -and -not $ForceTargetSize)
         $safeSize = Resolve-SafeFontSize -TextRange $TextRange -TargetSize $Size -FileName $FileName -SlideNumber $SlideNumber -ShapeName $ShapeName -ForceTargetSize:$ForceTargetSize -MaxSize $MaxSize
+        $beforeLayout = Get-TextRangeLineLayout -TextRange $TextRange
         $font.Name = $script:Style.FontLatin
         $font.NameFarEast = $script:Style.FontChinese
         if (-not $FontOnly) {
@@ -1011,17 +1024,43 @@ function Set-TextRangeStyle {
                     -RiskLevel 'R0' -Result 'Skipped'
             } else {
                 $font.Size = $safeSize
-                $font.Bold = $(if ($Bold) { $script:MsoTrue } else { $script:MsoFalse })
-                $font.Fill.Visible = $script:MsoTrue
-                $font.Fill.ForeColor.RGB = $Color
+                # Emphasis colors and weight belong to the author: red/blue
+                # highlights and bold runs carry teaching semantics, so this
+                # pass only ever ADDS bold for titles and never writes a
+                # color (43 red and 14 blue runs were flattened to black in
+                # 18.2 v3 before this guard).
+                if ($Bold) { $font.Bold = $script:MsoTrue }
             }
         }
+        # Same-geometry re-wrap guard: sibling answer shapes anchor to the old
+        # break points, so any rendered line-layout change rolls every write
+        # of this function back instead of shipping the shifted layout.
+        $afterLayout = Get-TextRangeLineLayout -TextRange $TextRange
+        if (-not (Test-TextRangeLayoutUnchanged -Before $beforeLayout -After $afterLayout)) {
+            $font.Name = $beforeName
+            $font.NameFarEast = $beforeFarEast
+            if (-not $FontOnly -and -not $mixedFontSize) {
+                if ($null -ne $beforeSize) { $font.Size = $beforeSize }
+                if ($beforeBold -ne '') { $font.Bold = [int]$beforeBold }
+                if ($beforeColor -ne '') { $font.Fill.ForeColor.RGB = [int]$beforeColor }
+            }
+            if ($FileName -ne '') {
+                Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $ShapeName -Issue 'TextStyleSkippedLineRelayout' `
+                    -Details ("Target style {0}/{1} re-wrapped the shape ({2}); the original style and line layout were restored." -f $script:Style.FontLatin, $script:Style.FontChinese, (Get-TextRangeLayoutChangeText -Before $beforeLayout -After $afterLayout)) `
+                    -RuleId 'STYLE.TEXT.FONT' -Property $(if ($FontOnly) { 'FontName/NameFarEast' } else { 'FontName/NameFarEast/Size/Bold/Color' }) `
+                    -Before ("{0}|{1}|{2}|{3}|{4}" -f $beforeName, $beforeFarEast, $beforeSize, $beforeBold, $beforeColor) `
+                    -After ("{0}|{1}|{2}|{3}|{4}" -f $beforeName, $beforeFarEast, $beforeSize, $beforeBold, $beforeColor) `
+                    -RiskLevel 'R0' -Result 'Skipped'
+            }
+            return
+        }
         if ($FileName -ne '') {
+            $writtenProperties = $(if ($Bold) { 'FontName/NameFarEast/Size/Bold' } else { 'FontName/NameFarEast/Size' })
             Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $ShapeName -Issue 'TextStyleNormalized' `
-                -Details $(if ($FontOnly) { 'Font family normalized; size, emphasis, color, text content, and geometry preserved.' } else { 'Font family and safe font size normalized; text content preserved.' }) `
-                -RuleId 'STYLE.TEXT.FONT' -Property $(if ($FontOnly) { 'FontName/NameFarEast' } else { 'FontName/NameFarEast/Size/Bold/Color' }) `
+                -Details $(if ($FontOnly) { 'Font family normalized; size, emphasis, color, text content, and geometry preserved.' } else { 'Font family and safe font size normalized; author bold and color preserved; text content preserved.' }) `
+                -RuleId 'STYLE.TEXT.FONT' -Property $writtenProperties `
                 -Before ("{0}|{1}|{2}|{3}|{4}" -f $beforeName, $beforeFarEast, $beforeSize, $beforeBold, $beforeColor) `
-                -After $(if ($FontOnly -or $mixedFontSize) { "{0}|{1}|{2}|{3}|{4}" -f $script:Style.FontLatin, $script:Style.FontChinese, $beforeSize, $beforeBold, $beforeColor } else { "{0}|{1}|{2}|{3}|{4}" -f $script:Style.FontLatin, $script:Style.FontChinese, $safeSize, $Bold, $Color }) `
+                -After $(if ($FontOnly -or $mixedFontSize) { "{0}|{1}|{2}|{3}|{4}" -f $script:Style.FontLatin, $script:Style.FontChinese, $beforeSize, $beforeBold, $beforeColor } else { "{0}|{1}|{2}|{3}|{4}" -f $script:Style.FontLatin, $script:Style.FontChinese, $safeSize, $beforeBold, $beforeColor }) `
                 -RiskLevel 'R1' -Result 'Applied'
         }
     } catch {
@@ -1295,9 +1334,19 @@ function Get-AutoSizeGeometryDrift {
 }
 
 function Add-IntentionalGeometryChange {
+    # Keyed by PHYSICAL slide part name + shapeId so the XML geometry
+    # restore pass (which iterates physical part names) agrees on the key
+    # domain. $SlideNumber arrives as the COM presentation order and is
+    # translated through the sldIdLst map; the creation-order slideN.xml
+    # number drifts from the presentation order after reorders/deletes.
     param([int]$SlideNumber, [int]$ShapeId, [string]$Reason)
     if ($SlideNumber -le 0 -or $ShapeId -le 0) { return }
-    $script:IntentionalGeometryShapes["$SlideNumber|$ShapeId"] = $Reason
+    $partName = $null
+    if ($null -ne $script:PresentationSlidePartMap -and $script:PresentationSlidePartMap.ContainsKey([int]$SlideNumber)) {
+        $partName = [string]$script:PresentationSlidePartMap[[int]$SlideNumber]
+    }
+    $key = if ($partName) { "$partName|$ShapeId" } else { "$SlideNumber|$ShapeId" }
+    $script:IntentionalGeometryShapes[$key] = $Reason
 }
 
 function Get-GeometrySlideXmlNames {
@@ -1387,13 +1436,14 @@ function Get-SourceShapeGeometryMap {
         $zipStream = [System.IO.File]::Open($SourcePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
         $zip = New-Object System.IO.Compression.ZipArchive($zipStream, [System.IO.Compression.ZipArchiveMode]::Read)
         foreach ($entryName in @(Get-GeometrySlideXmlNames -PptxPath $SourcePath)) {
-            $slideNumber = 0
-            if ($entryName -notmatch '^ppt/slides/slide(\d+)\.xml$') { continue }
-            $slideNumber = [int]$Matches[1]
+            if ($entryName -notmatch '^ppt/slides/slide\d+\.xml$') { continue }
             $doc = Read-GeometrySlideXmlDocument -Zip $zip -EntryName $entryName
             if ($null -eq $doc) { continue }
             foreach ($shape in @(Get-ShapeGeometryFromXfrm -Document $doc)) {
-                $key = "$slideNumber|$($shape.ShapeId)"
+                # Keyed by physical part name so the restore pass (which also
+                # iterates part names) shares one key domain; normalize never
+                # renumbers parts between source and output.
+                $key = "$entryName|$($shape.ShapeId)"
                 if ($map.ContainsKey($key)) {
                     # Duplicate transform for one id (AlternateContent branches):
                     # conservation cannot be attributed unambiguously, so the
@@ -1466,7 +1516,7 @@ function Restore-SourceShapeGeometryOnce {
             if ($null -eq $doc) { continue }
             $changed = $false
             foreach ($shape in @(Get-ShapeGeometryFromXfrm -Document $doc)) {
-                $key = "$slideNumber|$($shape.ShapeId)"
+                $key = "$entryName|$($shape.ShapeId)"
                 if (-not $sourceMap.ContainsKey($key)) { continue }
                 $sourceGeometry = $sourceMap[$key]
                 if ($null -eq $sourceGeometry) { continue }
@@ -1628,7 +1678,24 @@ function Set-AutoSizeTextFontSafely {
 
     try {
         $beforeFit = Test-TextRangeFitsShape -Shape $Shape -TextRange $textRange -ShapeWidth $width -ShapeHeight $height
+        $beforeLayout = Get-TextRangeLineLayout -TextRange $textRange
         & $setFontFamily $script:Style.FontLatin $script:Style.FontChinese
+
+        # Same-geometry re-wrap guard.  The fit and drift checks below cannot
+        # see a re-wrap that keeps the box bounds and line count: the glyphs
+        # still slide sideways to new break points, and sibling shapes that
+        # anchor to the old break points (answer blanks) get overlapped.
+        $afterLayout = Get-TextRangeLineLayout -TextRange $textRange
+        if (-not (Test-TextRangeLayoutUnchanged -Before $beforeLayout -After $afterLayout)) {
+            $layoutChange = Get-TextRangeLayoutChangeText -Before $beforeLayout -After $afterLayout
+            & $setFontFamily '' '' -Rollback
+            Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
+                -Issue 'TextStyleSkippedLineRelayout' `
+                -Details ("Target font {0}/{1} re-wrapped the shape ({2}); the original font and line layout were rolled back." -f $script:Style.FontLatin, $script:Style.FontChinese, $layoutChange) `
+                -RuleId 'STYLE.TEXT.FONT' -Property 'FontName/NameFarEast' -Before $beforeSummary -After $beforeSummary `
+                -RiskLevel 'R0' -Result 'Skipped'
+            return
+        }
 
         # AutoSize protects the outer shape bounds, but it does not guarantee
         # that a newly selected font still fits inside those bounds after a
@@ -1783,14 +1850,19 @@ function Set-SectionTitleTextStyle {
         $isExtensionSection = Test-IsExtensionSectionText -Text $text
         $targetColor = if ($isExtensionSection) { $script:Style.ColorExtensionTitle } else { $script:Style.ColorSectionTitle }
         $issue = if ($isExtensionSection) { 'ExtensionSectionTitleStyleFixed' } else { 'SectionTitleStyleFixed' }
-        $details = if ($isExtensionSection) {
-            'Extension section title color and bold style normalized.'
-        } else {
-            'Section title color and bold style normalized.'
-        }
         $font = $Shape.TextFrame2.TextRange.Font
         $beforeBold = [string]$font.Bold
-        $beforeColor = [string]$font.Fill.ForeColor.RGB
+        $beforeColor = try { [string]$font.Fill.ForeColor.RGB } catch { '' }
+        # Author emphasis wins over the divider palette: when the title mixes
+        # bold or color states (mixed runs report -2 / empty), rewriting would
+        # flatten a deliberate emphasis pattern, so only the uniform case is
+        # normalized.
+        $mixedEmphasis = ($beforeBold -eq [string]$script:MsoMixed) -or [string]::IsNullOrEmpty($beforeColor)
+        if ($mixedEmphasis) {
+            Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $Shape.Name -Issue 'SectionTitleStyleSkippedMixedEmphasis' -Details 'Section title mixes bold/color emphasis; the author pattern is preserved.' `
+                -RuleId 'STYLE.SECTION_TITLE.EMPHASIS' -Property 'Bold/Color' -Before ("$beforeBold|$beforeColor") -RiskLevel 'R0' -Result 'Skipped'
+            return
+        }
         $font.Bold = $script:MsoTrue
         $font.Fill.Visible = $script:MsoTrue
         $font.Fill.ForeColor.RGB = $targetColor
@@ -1902,9 +1974,29 @@ function Expand-TextBoxWidthIfNeeded {
     }
 }
 
+function Test-IsLargeDisplayTextShape {
+    # Divider/cover display titles (80pt red "P=UI", section-name pages) are
+    # authored design, not body text: any size/bold/color rewrite destroys
+    # them (18.2 slides 14/28 were flattened to 32-38pt gray before this
+    # guard). Only family-level normalization on ordinary body text remains.
+    param($Shape)
+    try {
+        if ($Shape.TextFrame2.HasText -ne $script:MsoTrue) { return $false }
+        $size = Get-TextRangeFontSize $Shape.TextFrame2.TextRange
+        return ($null -ne $size -and $size -ge 60)
+    } catch { return $false }
+}
+
 function Normalize-TextShape {
     param($Shape, [string]$Text, [int]$SlideNumber, [string]$FileName, [bool]$IsVideoSlide, [bool]$IsSectionTitleSlide, [double]$SlideWidth, [switch]$FontOnly)
     if ([string]::IsNullOrWhiteSpace($Text)) { return }
+
+    if (Test-IsLargeDisplayTextShape -Shape $Shape) {
+        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName (Get-ShapeName $Shape) -Issue 'DisplayTextPreserved' `
+            -Details 'Large display text (>=60pt, divider/cover title) is preserved verbatim; divider styling is owned by the brand pass.' `
+            -RiskLevel 'R0' -Result 'Skipped'
+        return
+    }
 
     $isTitle = Test-IsTitleShape $Shape
     $isSecondaryTitle = (-not $isTitle -and (Test-IsSecondaryTitleShape $Shape))
@@ -1913,8 +2005,13 @@ function Normalize-TextShape {
     $maxSize = 0
     if (-not $IsSectionTitleSlide -and -not $isSecondaryTitle) {
         $currentSize = Get-TextRangeFontSize $Shape.TextFrame2.TextRange
+        # >=AuthorLargeTextFloor is an authored display-size line (formula
+        # callouts, example numbers at 44-55pt): capping it to body size would
+        # degrade the emphasis the same way the >=60pt guard prevents, just
+        # below that guard's threshold.
         $isDisplayTitle = (Test-IsPlaceholderTitleShape $Shape) -or `
-            ($null -ne $currentSize -and $currentSize -ge $script:Style.SizeDisplayTitleMin)
+            ($null -ne $currentSize -and $currentSize -ge $script:Style.SizeDisplayTitleMin) -or `
+            ($null -ne $currentSize -and $currentSize -ge $script:AuthorLargeTextFloor)
         if (-not $isDisplayTitle) { $maxSize = [double]$script:Style.SizeBodyMax }
     }
 
@@ -2128,6 +2225,11 @@ function Normalize-TableShape {
 }
 
 function Normalize-HighlightBox {
+    # Observation only: the yellow-family fill/border unification lives in
+    # Apply-PptxHighlightBoxStyle.ps1 (its own reviewed batch). Text color is
+    # never rewritten here — highlight text carries author emphasis (red
+    # keywords on yellow) and was flattened to body black by the pre-2026-09-21
+    # version of this function.
     param($Shape, [int]$SlideNumber = 0, [string]$FileName = '')
     if (-not (Test-StyleRuleEnabled -RuleId 'STYLE.HIGHLIGHT.TEXT_COLOR')) {
         Add-RuleSkippedReport -FileName $FileName -SlideNumber $SlideNumber -ShapeName (Get-ShapeName $Shape) `
@@ -2140,11 +2242,9 @@ function Normalize-HighlightBox {
             $rgb = $Shape.Fill.ForeColor.RGB
             if (Test-IsYellowishFill $rgb) {
                 if ($Shape.TextFrame2.HasText -eq $script:MsoTrue) {
-                    $beforeColor = [string]$Shape.TextFrame2.TextRange.Font.Fill.ForeColor.RGB
-                    $Shape.TextFrame2.TextRange.Font.Fill.ForeColor.RGB = $script:Style.ColorBody
                     if ($FileName -ne '') {
-                        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $Shape.Name -Issue 'HighlightTextColorFixed' -Details 'Yellow highlight text color was set to body color for readability.' `
-                            -RuleId 'STYLE.HIGHLIGHT.TEXT_COLOR' -Property 'Color' -Before $beforeColor -After ([string]$script:Style.ColorBody) -RiskLevel 'R1' -Result 'Applied'
+                        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $Shape.Name -Issue 'HighlightTextColorPreserved' -Details 'Yellow highlight text color is preserved; author emphasis colors are never rewritten.' `
+                            -RuleId 'STYLE.HIGHLIGHT.TEXT_COLOR' -Property 'Color' -RiskLevel 'R0' -Result 'Skipped'
                     }
                 } else {
                     if ($FileName -ne '') {
@@ -2154,6 +2254,93 @@ function Normalize-HighlightBox {
             }
         }
     } catch { }
+}
+
+function Get-SourceSlidePartMap {
+    # 1-based presentation order -> physical slide part name, for translating
+    # COM slide indexes to the physical-part key domain of the XML passes.
+    param([string]$SourcePath)
+    $map = @{}
+    if ([string]::IsNullOrWhiteSpace($SourcePath) -or -not (Test-Path -LiteralPath $SourcePath)) { return $map }
+    $zip = $null
+    $zipStream = $null
+    try {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $zipStream = [System.IO.File]::Open($SourcePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $zip = New-Object System.IO.Compression.ZipArchive($zipStream, [System.IO.Compression.ZipArchiveMode]::Read)
+        $map = Get-PresentationOrderSlidePartMap -Zip $zip
+    } catch {
+        # Empty map degrades Add-IntentionalGeometryChange to the legacy
+        # creation-order key; the geometry-conservation gate is the net.
+    } finally {
+        if ($null -ne $zip) { $zip.Dispose() }
+        if ($null -ne $zipStream) { $zipStream.Dispose() }
+    }
+    return $map
+}
+
+function Get-PictureFillShapeIds {
+    <#
+      Collects shape ids whose spPr carries a picture fill (blipFill) in the
+      SOURCE slide XML, per slide number. These shapes (usually MathType
+      formula bitmaps pasted as text-box fills with an invisible space run)
+      carry their visible content entirely in the fill bitmap: any COM write
+      marks the shape dirty and PowerPoint re-bakes the fill bitmap on save
+      with its own rasterizer, visibly degrading formula images (observed
+      0.6-28% pixel drift on 18.2). COM cannot report this fill reliably
+      (Fill.Type comes back msoFillMixed with Fill.Visible=false), so the
+      package XML is the only dependable signal.
+    #>
+    param([string]$SourcePath)
+    $map = @{}
+    if ([string]::IsNullOrWhiteSpace($SourcePath) -or -not (Test-Path -LiteralPath $SourcePath)) { return $map }
+    $zip = $null
+    $zipStream = $null
+    try {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $zipStream = [System.IO.File]::Open($SourcePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $zip = New-Object System.IO.Compression.ZipArchive($zipStream, [System.IO.Compression.ZipArchiveMode]::Read)
+        # Keys are 1-based PRESENTATION order (sldIdLst), matching the COM
+        # Slides.Item($i) domain of the main loop; slideN.xml names are
+        # creation order and drift after reorders/deletes.
+        $slidePartMap = Get-PresentationOrderSlidePartMap -Zip $zip
+        foreach ($slideEntryPair in @($slidePartMap.GetEnumerator() | Sort-Object Key)) {
+            $slideNumber = [int]$slideEntryPair.Key
+            $entryName = [string]$slideEntryPair.Value
+            $doc = Read-GeometrySlideXmlDocument -Zip $zip -EntryName $entryName
+            if ($null -eq $doc) { continue }
+            $ids = New-Object System.Collections.Generic.List[int]
+            foreach ($sp in @($doc.SelectNodes('//*[local-name()="sp"]'))) {
+                $blipFill = $sp.SelectSingleNode('./*[local-name()="spPr"]/*[local-name()="blipFill"]')
+                if ($null -eq $blipFill) { continue }
+                $cNvPr = $null
+                foreach ($candidate in @($sp.SelectNodes('.//*[local-name()="cNvPr"]'))) {
+                    $cNvPr = $candidate
+                    break
+                }
+                if ($null -eq $cNvPr) { continue }
+                $shapeId = 0
+                if (-not [int]::TryParse([string]$cNvPr.GetAttribute('id'), [ref]$shapeId)) { continue }
+                $ids.Add($shapeId)
+            }
+            if ($ids.Count -gt 0) { $map[$slideNumber] = $ids }
+        }
+    } catch {
+        # On any probe failure the safe default is an empty map: picture-fill
+        # detection must never block normalization of the rest of the deck.
+        # The invariant media gate is the downstream net if this degrades.
+    } finally {
+        if ($null -ne $zip) { $zip.Dispose() }
+        if ($null -ne $zipStream) { $zipStream.Dispose() }
+    }
+    return $map
+}
+
+function Test-PictureFillShapeId {
+    param($Map, [int]$SlideNumber, [int]$ShapeId)
+    if ($null -eq $Map -or $Map.Count -eq 0) { return $false }
+    if (-not $Map.ContainsKey($SlideNumber)) { return $false }
+    return @($Map[$SlideNumber]) -contains $ShapeId
 }
 
 function Clear-DecorativeEffects {
@@ -2178,11 +2365,18 @@ function Clear-DecorativeEffects {
     try { $before.GlowRadius = [string]$Shape.Glow.Radius } catch { }
     try { $before.SoftEdgeRadius = [string]$Shape.SoftEdge.Radius } catch { }
     try {
-        if ($Shape.Shadow.Visible -ne $script:MsoFalse) { $Shape.Shadow.Visible = $script:MsoFalse; $changed = $true }
-        if ([double]$Shape.Shadow.Transparency -ne 1) { $Shape.Shadow.Transparency = 1; $changed = $true }
-        if ([double]$Shape.Shadow.Blur -ne 0) { $Shape.Shadow.Blur = 0; $changed = $true }
-        if ([double]$Shape.Shadow.OffsetX -ne 0) { $Shape.Shadow.OffsetX = 0; $changed = $true }
-        if ([double]$Shape.Shadow.OffsetY -ne 0) { $Shape.Shadow.OffsetY = 0; $changed = $true }
+        if ($Shape.Shadow.Visible -eq $script:MsoTrue) {
+            # Sub-property writes are gated on a VISIBLE shadow: shadow-less
+            # shapes still report non-default Transparency/Blur/Offset reads,
+            # and every unconditional property put dirties the shape — which
+            # re-bakes picture fills on save (18.2) and needlessly touches
+            # OLE/media frames.
+            if ([double]$Shape.Shadow.Transparency -ne 1) { $Shape.Shadow.Transparency = 1; $changed = $true }
+            if ([double]$Shape.Shadow.Blur -ne 0) { $Shape.Shadow.Blur = 0; $changed = $true }
+            if ([double]$Shape.Shadow.OffsetX -ne 0) { $Shape.Shadow.OffsetX = 0; $changed = $true }
+            if ([double]$Shape.Shadow.OffsetY -ne 0) { $Shape.Shadow.OffsetY = 0; $changed = $true }
+            if ($before.ShadowVisible -ne 'False') { $Shape.Shadow.Visible = $script:MsoFalse; $changed = $true }
+        }
     } catch { }
     try { if ([double]$Shape.Glow.Radius -ne 0) { $Shape.Glow.Radius = 0; $changed = $true } } catch { }
     try { if ([double]$Shape.SoftEdge.Radius -ne 0) { $Shape.SoftEdge.Radius = 0; $changed = $true } } catch { }
@@ -2192,9 +2386,12 @@ function Clear-DecorativeEffects {
             try { $before.FontShadowVisible = [string]$font.Shadow.Visible } catch { }
             try { $before.FontShadowTransparency = [string]$font.Shadow.Transparency } catch { }
             try { $before.FontOutlineVisible = [string]$font.Line.Visible } catch { }
-            if ($font.Shadow.Visible -ne $script:MsoFalse) { $font.Shadow.Visible = $script:MsoFalse; $changed = $true }
-            if ([double]$font.Shadow.Transparency -ne 1) { $font.Shadow.Transparency = 1; $changed = $true }
-            if ($font.Line.Visible -ne $script:MsoFalse) { $font.Line.Visible = $script:MsoFalse; $changed = $true }
+            # Same visible-shadow gate as the shape-level pass: reads on a
+            # shadow-less font return non-ideal values that must not be written.
+            if ($font.Shadow.Visible -eq $script:MsoTrue) {
+                if ([double]$font.Shadow.Transparency -ne 1) { $font.Shadow.Transparency = 1; $changed = $true }
+                if ($before.FontShadowVisible -ne 'False') { $font.Shadow.Visible = $script:MsoFalse; $changed = $true }
+            }
         }
     } catch { }
     try { $after.ShadowVisible = [string]$Shape.Shadow.Visible } catch { }
@@ -2365,6 +2562,74 @@ function Export-PresentationImages {
     }
 }
 
+function Invoke-NormalizeSlideShape {
+    # One shape of the Normalize-Presentation pass. Returns nothing; every
+    # decision (skip classes included) is reported inside. Throws on dead/null
+    # COM yields so the caller's enumeration circuit breaker can count them.
+    param(
+        $Shape,
+        [int]$SlideNumber,
+        [string]$FileName,
+        [bool]$ReportOnly,
+        $PictureFillShapeIds,
+        [bool]$PreserveSlideStyle,
+        [bool]$IsVideo,
+        [bool]$IsSectionTitle,
+        [double]$SlideWidth
+    )
+    $shapeName = Get-ShapeName $Shape
+    if ($Shape.Type -eq $script:MsoGroup) {
+        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName -Issue 'GroupShapeSkipped' -Details 'Grouped shapes are not modified to avoid layout damage.'
+        return
+    }
+
+    if (-not $ReportOnly) {
+        if ($Shape.Type -eq $script:MsoTable -or (Test-ShapeHasTable $Shape)) {
+            Normalize-TableShape -Shape $Shape -SlideNumber $SlideNumber -FileName $FileName
+            return
+        }
+        if (Test-PictureFillShapeId -Map $PictureFillShapeIds -SlideNumber $SlideNumber -ShapeId ([int]$Shape.Id)) {
+            Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName -Issue 'PictureFillShapePreserved' -Details 'Picture-filled shape (formula bitmap carrier) is not modified; any write re-bakes the fill bitmap on save and visibly degrades the image.' -RiskLevel 'R0' -Result 'Skipped'
+            return
+        }
+        if ($Shape.Type -in @($script:MsoEmbeddedOle, $script:MsoLinkedOle, $script:MsoMedia)) {
+            # OLE formula frames and media frames carry their own
+            # rendered content: any property put dirties them and
+            # forces a save-time re-render/re-bake. Nothing in
+            # this pipeline needs to style them.
+            Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName -Issue 'EmbeddedObjectPreserved' -Details 'OLE/media frame is not modified; writes would dirty the frame and trigger a save-time re-render.' -RiskLevel 'R0' -Result 'Skipped'
+            return
+        }
+        Clear-DecorativeEffects -Shape $Shape -SlideNumber $SlideNumber -FileName $FileName
+    }
+
+    if ($Shape.Type -eq $script:MsoTextEffect) {
+        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName -Issue 'WordArtStylePreserved' -Details 'WordArt object detected; decorative effects are cleared but object is not converted.'
+    }
+
+    if (Test-IsLargePictureShape $Shape) {
+        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName -Issue 'RasterPicturePreserved' -Details 'Large picture detected; embedded text inside the bitmap is not rewritten automatically.'
+    }
+
+    $text = Get-ShapeText $Shape
+    if (-not [string]::IsNullOrWhiteSpace($text)) {
+        if ($ReportOnly -or $PreserveSlideStyle) {
+            if (Test-IsFormulaCandidateText $text) {
+                Add-FormulaCandidateReport -FileName $FileName -SlideNumber $SlideNumber -ShapeName $shapeName -Text $text | Out-Null
+            }
+            try {
+                $fontSize = $Shape.TextFrame2.TextRange.Font.Size
+                if ($fontSize -lt $script:Style.SizeMinimum) {
+                    Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName -Issue 'SmallText' -Details "$fontSize pt"
+                }
+            } catch { }
+        } else {
+            Normalize-TextShape -Shape $Shape -Text $text -SlideNumber $SlideNumber -FileName $FileName -IsVideoSlide $IsVideo -IsSectionTitleSlide $IsSectionTitle -SlideWidth $SlideWidth
+            Normalize-HighlightBox -Shape $Shape -SlideNumber $SlideNumber -FileName $FileName
+        }
+    }
+}
+
 function Normalize-Presentation {
     param($PowerPoint, [System.IO.FileInfo]$File)
 
@@ -2413,6 +2678,8 @@ function Normalize-Presentation {
             $PowerPoint.Presentations.Open($File.FullName, $(if ($ReportOnly) { $script:MsoTrue } else { $script:MsoFalse }), $script:MsoFalse, $script:MsoFalse)
         }
 
+        $pictureFillShapeIds = Get-PictureFillShapeIds -SourcePath $File.FullName
+        $script:PresentationSlidePartMap = Get-SourceSlidePartMap -SourcePath $File.FullName
         Add-PresentationPreflightReports -Presentation $pres -FileName $File.Name | Out-Null
         if ($UpdateMaster -and -not $ReportOnly) { Update-SlideMasterStyle -Presentation $pres -FileName $File.Name }
         $slideWidth = [double]$pres.PageSetup.SlideWidth
@@ -2442,49 +2709,54 @@ function Normalize-Presentation {
                 Disable-SlideAdvanceOnClick -Slide $slide -SlideNumber $i -FileName $File.Name
             }
 
+            # A transiently corrupted Shapes enumerator yields null/dead items
+            # for the rest of the collection (15.3 slide30 incident: 1747
+            # identical UnhandledFailure rows in ~2s, then normal slides). The
+            # circuit breaker stops the flood after a few consecutive failures
+            # and the indexed recovery pass re-processes the shapes the broken
+            # enumerator skipped, so one COM glitch can neither flood the
+            # report nor silently drop shapes from the normalized output.
+            $processedShapeIds = [System.Collections.Generic.HashSet[int]]::new()
+            $consecutiveShapeFailures = 0
+            $enumerationBrokenAfter = 0
             foreach ($shape in $slide.Shapes) {
                 try {
-                    $shapeName = Get-ShapeName $shape
-                    if ($shape.Type -eq $script:MsoGroup) {
-                        Add-ReportRow -File $File.Name -SlideNumber $i -ShapeName $shapeName -Issue 'GroupShapeSkipped' -Details 'Grouped shapes are not modified to avoid layout damage.'
-                        continue
-                    }
-
-                    if (-not $ReportOnly) {
-                        if ($shape.Type -eq $script:MsoTable -or (Test-ShapeHasTable $shape)) {
-                            Normalize-TableShape -Shape $shape -SlideNumber $i -FileName $File.Name
-                            continue
-                        }
-                        Clear-DecorativeEffects -Shape $shape -SlideNumber $i -FileName $File.Name
-                    }
-
-                    if ($shape.Type -eq $script:MsoTextEffect) {
-                        Add-ReportRow -File $File.Name -SlideNumber $i -ShapeName $shapeName -Issue 'WordArtStylePreserved' -Details 'WordArt object detected; decorative effects are cleared but object is not converted.'
-                    }
-
-                    if (Test-IsLargePictureShape $shape) {
-                        Add-ReportRow -File $File.Name -SlideNumber $i -ShapeName $shapeName -Issue 'RasterPicturePreserved' -Details 'Large picture detected; embedded text inside the bitmap is not rewritten automatically.'
-                    }
-
-                    $text = Get-ShapeText $shape
-                    if (-not [string]::IsNullOrWhiteSpace($text)) {
-                        if ($ReportOnly -or $preserveSlideStyle) {
-                            if (Test-IsFormulaCandidateText $text) {
-                                Add-FormulaCandidateReport -FileName $File.Name -SlideNumber $i -ShapeName $shapeName -Text $text | Out-Null
-                            }
-                            try {
-                                $fontSize = $shape.TextFrame2.TextRange.Font.Size
-                                if ($fontSize -lt $script:Style.SizeMinimum) {
-                                    Add-ReportRow -File $File.Name -SlideNumber $i -ShapeName $shapeName -Issue 'SmallText' -Details "$fontSize pt"
-                                }
-                            } catch { }
-                        } else {
-                            Normalize-TextShape -Shape $shape -Text $text -SlideNumber $i -FileName $File.Name -IsVideoSlide $isVideo -IsSectionTitleSlide $isSectionTitle -SlideWidth $slideWidth
-                            Normalize-HighlightBox -Shape $shape -SlideNumber $i -FileName $File.Name
-                        }
-                    }
+                    $shapeId = [int]$shape.Id
+                    if (-not $processedShapeIds.Add($shapeId)) { continue }
+                    Invoke-NormalizeSlideShape -Shape $shape -SlideNumber $i -FileName $File.Name -ReportOnly $ReportOnly.IsPresent -PictureFillShapeIds $pictureFillShapeIds -PreserveSlideStyle $preserveSlideStyle -IsVideo $isVideo -IsSectionTitle $isSectionTitle -SlideWidth $slideWidth
+                    $consecutiveShapeFailures = 0
                 } catch {
+                    $consecutiveShapeFailures++
+                    if ($consecutiveShapeFailures -ge 3) {
+                        $enumerationBrokenAfter = $processedShapeIds.Count
+                        break
+                    }
                     Add-ReportRow -File $File.Name -SlideNumber $i -ShapeName (Get-ShapeName $shape) -Issue (Get-ComFailureCategory $_) -Details (Format-ComFailureDetails $_)
+                }
+            }
+            if ($enumerationBrokenAfter -gt 0) {
+                $recoveredCount = 0
+                $unrecoverableNames = [System.Collections.Generic.List[string]]::new()
+                try {
+                    $slideShapeCount = [int](Invoke-WithComRetry { $slide.Shapes.Count } -MaxRetries 2)
+                } catch { $slideShapeCount = 0 }
+                for ($shapeIndex = 1; $shapeIndex -le $slideShapeCount; $shapeIndex++) {
+                    $shape = $null
+                    try { $shape = Invoke-WithComRetry { $slide.Shapes.Item($shapeIndex) } -MaxRetries 2 } catch { $shape = $null }
+                    if ($null -eq $shape) { $unrecoverableNames.Add("index $shapeIndex"); continue }
+                    try {
+                        $shapeId = [int]$shape.Id
+                        if (-not $processedShapeIds.Add($shapeId)) { continue }
+                        Invoke-NormalizeSlideShape -Shape $shape -SlideNumber $i -FileName $File.Name -ReportOnly $ReportOnly.IsPresent -PictureFillShapeIds $pictureFillShapeIds -PreserveSlideStyle $preserveSlideStyle -IsVideo $isVideo -IsSectionTitle $isSectionTitle -SlideWidth $slideWidth
+                        $recoveredCount++
+                    } catch {
+                        $unrecoverableNames.Add((Get-ShapeName $shape))
+                    }
+                }
+                if ($unrecoverableNames.Count -eq 0) {
+                    Add-ReportRow -File $File.Name -SlideNumber $i -ShapeName '(slide)' -Issue 'ShapeEnumerationRecovered' -Details "Shapes enumerator broke after $enumerationBrokenAfter shapes; indexed recovery pass re-processed $recoveredCount shape(s) with no residual gap." -RiskLevel 'R2' -Result 'Recovered'
+                } else {
+                    Add-ReportRow -File $File.Name -SlideNumber $i -ShapeName '(slide)' -Issue 'ShapeEnumerationCorrupted' -Details ("Shapes enumerator broke after $enumerationBrokenAfter shapes; $recoveredCount recovered, unrecoverable: " + ($unrecoverableNames -join ', ')) -RiskLevel 'R1' -Result 'Failed'
                 }
             }
             if (-not $ReportOnly -and -not $preserveSlideStyle) {

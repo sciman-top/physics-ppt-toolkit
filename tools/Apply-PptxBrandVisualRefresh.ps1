@@ -4,10 +4,11 @@
 
 .DESCRIPTION
   Only the cover, end, resource and link-hub pages carry the brand
-  background image (top-right icon baked in).  All other pages stay on
-  their original white background and get the brand icon as a uniform
-  45%-opacity watermark in the top-right corner, so every page has brand
-  coverage without competing with body text.
+  background image (top-right icon baked in).  Content pages keep their
+  original white background and carry no brand icon at all, by design:
+  brand coverage lives on the special and divider pages only (dividers
+  may downgrade to the 45%-opacity watermark variant when their own
+  text occupies the icon corner).
 
   Restyles the special pages with a gold/white/light-blue palette, unifies
   divider titles (same font, same size, semantic red/blue colour, centred
@@ -75,8 +76,10 @@ $stem = [System.IO.Path]::GetFileNameWithoutExtension($PptxPath)
 # normalized chain head is the primary input, so its '.normalized' suffix is
 # stripped as well: deliveries must keep the <deck>_v<N> directory convention
 # (a letter directly before _v<N> is a layout-gate violation).
-if ($stem.EndsWith('.brand')) { $stem = $stem.Substring(0, $stem.Length - '.brand'.Length) }
-if ($stem.EndsWith('.normalized')) { $stem = $stem.Substring(0, $stem.Length - '.normalized'.Length) }
+if ($stem.EndsWith('.brand.callout')) { $stem = $stem.Substring(0, $stem.Length - '.callout'.Length) }
+elseif ($stem.EndsWith('.callout')) { $stem = $stem.Substring(0, $stem.Length - '.callout'.Length) }
+elseif ($stem.EndsWith('.brand')) { $stem = $stem.Substring(0, $stem.Length - '.brand'.Length) }
+elseif ($stem.EndsWith('.normalized')) { $stem = $stem.Substring(0, $stem.Length - '.normalized'.Length) }
 $existing = @(Get-ChildItem -LiteralPath $OutputRoot -Directory -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -like "$stem`_v*" })
 $nextVersion = 1
@@ -147,9 +150,28 @@ function Test-DividerSlide {
     # table (19) or chart (3) disqualifies the slide — content can never sit
     # on a divider, and Update-DividerSlide never deletes shapes, so content
     # loss by misclassification is structurally impossible.
+    # Series dividers are ONE bare title (every 13.3/14.x divider carries
+    # exactly one text shape). Multi-shape symbol diagrams built purely from
+    # autoshapes (15.1 slide 34 charge circles "+ - +3 -3") and symbol-only
+    # text must never restyle: require exactly one text shape, and a title
+    # that is either a CJK headline (>=2 CJK chars, up to 20 chars — 18.2
+    # slide28 "额定功率、实际功率/伏安法测电功率" is 16) or a short formula
+    # divider like "P=UI" (18.2 slide14, <=6 chars with an '=' sign).
     param($Slide, [string]$SlideText)
-    if ([string]::IsNullOrWhiteSpace($SlideText) -or $SlideText.Length -gt 12) { return $false }
+    if ([string]::IsNullOrWhiteSpace($SlideText) -or $SlideText.Length -gt 20) { return $false }
+    $cjkCount = 0
+    foreach ($character in $SlideText.ToCharArray()) {
+        if ($character -ge [char]0x4E00 -and $character -le [char]0x9FFF) { $cjkCount++ }
+    }
+    $isCjkHeadline = ($cjkCount -ge 2)
+    # Short symbol dividers: "P=UI" (18.2 slide14) and "kW·h" (18.2 slide11)
+    # are section-transition pages with no CJK at all; a bare formula or unit
+    # (equal sign / dot / multiplication sign) within 6 characters is a
+    # divider, never body content.
+    $isFormulaDivider = ($SlideText.Length -le 6 -and $SlideText -match '[=·•×]')
+    if (-not ($isCjkHeadline -or $isFormulaDivider)) { return $false }
     $hasTitle = $false
+    $textShapeCount = 0
     foreach ($shape in @($Slide.Shapes)) {
         try {
             if ($shape.Name -eq 'sciman-brand-icon') { continue }
@@ -157,10 +179,13 @@ function Test-DividerSlide {
         } catch { }
         try {
             if ($shape.HasTextFrame -ne -1 -or $shape.TextFrame.HasText -ne -1) { continue }
-            if (([string]$shape.TextFrame.TextRange.Text).Trim().Length -gt 0) { $hasTitle = $true }
+            if (([string]$shape.TextFrame.TextRange.Text).Trim().Length -gt 0) {
+                $hasTitle = $true
+                $textShapeCount++
+            }
         } catch { }
     }
-    return $hasTitle
+    return ($hasTitle -and $textShapeCount -le 1)
 }
 
 function Get-SlideRole {
@@ -175,6 +200,10 @@ function Get-SlideRole {
 }
 
 function Remove-LegacyIconShapes {
+    # Only shapes that carry a legacy brand marker may be deleted. Text-less
+    # shapes (QR codes, partner logos, video poster frames) in the corner are
+    # real content: without a name/type whitelist this geometric rule deleted
+    # them silently. Deletions are logged per shape, not as a bare count.
     param($Slide, [System.Collections.Generic.List[string]]$Actions)
     $slideWidth = $Slide.Parent.PageSetup.SlideWidth
     $removed = 0
@@ -182,19 +211,24 @@ function Remove-LegacyIconShapes {
     for ($index = $shapes.Count - 1; $index -ge 0; $index--) {
         $shape = $shapes[$index]
         try {
+            $shapeName = ''
+            try { $shapeName = [string]$shape.Name } catch { }
+            $hasLegacyText = $false
             if ($shape.HasTextFrame -eq -1 -and $shape.TextFrame.HasText -eq -1) {
                 $text = [string]$shape.TextFrame.TextRange.Text
-                if (-not ($text -match 'sciman|逸居')) { continue }
+                $hasLegacyText = ($text -match 'sciman|逸居')
             }
+            $isNamedBrandShape = ($shapeName -eq 'sciman-brand-icon' -or $shapeName -match 'sciman|逸居')
+            if (-not $hasLegacyText -and -not $isNamedBrandShape) { continue }
             if ($shape.Left -gt ($slideWidth - 110) -and $shape.Top -lt 95 -and
                 $shape.Width -lt 150 -and $shape.Height -lt 150) {
+                $shapeType = -1
+                try { $shapeType = [int]$shape.Type } catch { }
                 $shape.Delete()
                 $removed++
+                $Actions.Add("RemovedLegacyIcon '{0}' (type {1})" -f $shapeName, $shapeType) | Out-Null
             }
         } catch { }
-    }
-    if ($removed -gt 0) {
-        $Actions.Add("RemovedLegacyIcon x$removed") | Out-Null
     }
 }
 

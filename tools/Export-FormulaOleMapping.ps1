@@ -191,7 +191,14 @@ foreach ($row in $goldRows) {
         }
     }
     $evidencePathTexts = @([string](Get-RowValue -Row $row -Name 'EvidencePath') -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
-    $fullEvidencePaths = @($evidencePathTexts | ForEach-Object { [System.IO.Path]::GetFullPath($_) })
+    # Relative evidence paths resolve against the GoldSet CSV's own directory,
+    # not the process CWD: the CSV lives inside the delivery tree and the CWD
+    # depends on how the operator invoked the toolkit.
+    $goldSetDir = [System.IO.Path]::GetDirectoryName($goldSetPath)
+    $fullEvidencePaths = @($evidencePathTexts | ForEach-Object {
+        if ([System.IO.Path]::IsPathRooted($_)) { [System.IO.Path]::GetFullPath($_) }
+        else { [System.IO.Path]::GetFullPath((Join-Path $goldSetDir $_)) }
+    })
     $missingEvidencePaths = @($fullEvidencePaths | Where-Object { -not (Test-Path -LiteralPath $_) })
     if ($fullEvidencePaths.Count -eq 0 -or $missingEvidencePaths.Count -gt 0) {
         $errors.Add("${rowLabel}: EvidencePath is missing or not found: $($missingEvidencePaths -join ',')") | Out-Null

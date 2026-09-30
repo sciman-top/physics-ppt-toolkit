@@ -50,7 +50,10 @@ function Get-PackageSnapshot {
                     } finally { $reader.Dispose() }
                 } catch { throw "Unable to read relationship part $($entry.FullName): $($_.Exception.Message)" }
             }
-            if ($entry.FullName -like 'ppt/media/*') {
+            if ($entry.FullName -like 'ppt/media/*' -or $entry.FullName -like 'ppt/embeddings/*') {
+                # embeddings are hashed too: a swapped/deleted OLE embedding
+                # (the formula-misattribution incident class) must change the
+                # canonical package form even though media files are untouched.
                 $stream = $null
                 try {
                     $stream = $entry.Open()
@@ -104,6 +107,35 @@ function Get-SafeComProperty {
     }
 }
 
+function Get-RunFormatFingerprint {
+    # Per-run color/bold fingerprint. Font family and size are legitimately
+    # rewritten by normalization and stay out of the fingerprint, but the
+    # author's emphasis colors and bold runs are protected semantics: a copy
+    # that flipped red to black must show up as a blocker even though the
+    # text content is unchanged (18.2 emphasis-color incident).
+    param($Shape, [ref]$ReadFailed)
+    try {
+        $textRange = $Shape.TextFrame2.TextRange
+        $lines = @()
+        foreach ($line in @($textRange.Lines())) {
+            foreach ($run in @($line.Runs())) {
+                $text = [string]$run.Text
+                if ([string]::IsNullOrWhiteSpace($text)) { continue }
+                $color = ''
+                try { $color = ('{0:X6}' -f ($run.Font.Fill.ForeColor.RGB -band 0xFFFFFF)) } catch { $color = 'inherit' }
+                $bold = ''
+                try { $bold = [string]$run.Font.Bold } catch { $bold = '?' }
+                $lines += ("{0}|{1}" -f $color, $bold)
+            }
+        }
+        if ($lines.Count -eq 0) { return $null }
+        return (($lines | Sort-Object -Unique) -join ';')
+    } catch {
+        $ReadFailed.Value = $true
+        return $null
+    }
+}
+
 function Get-ShapeSnapshot {
     param($Shape)
     $readFailed = $false
@@ -125,6 +157,10 @@ function Get-ShapeSnapshot {
             $cropBottom = [double](Get-SafeComProperty $Shape.PictureFormat 'CropBottom' $null ([ref]$readFailed))
         }
     } catch { $readFailed = $true }
+    $runFormats = $null
+    try {
+        if ($Shape.TextFrame2.HasText -eq -1) { $runFormats = Get-RunFormatFingerprint -Shape $Shape -ReadFailed ([ref]$readFailed) }
+    } catch { }
     [pscustomobject]@{
         id = [int](Get-SafeComProperty $Shape 'Id' 0 ([ref]$readFailed))
         name = [string](Get-SafeComProperty $Shape 'Name' '' ([ref]$readFailed))
@@ -141,6 +177,7 @@ function Get-ShapeSnapshot {
         cropRight = $cropRight
         cropTop = $cropTop
         cropBottom = $cropBottom
+        runFormats = $runFormats
         text = Get-SnapshotText $Shape ([ref]$readFailed)
         readStatus = if ($readFailed) { 'Unreadable' } else { 'Readable' }
     }

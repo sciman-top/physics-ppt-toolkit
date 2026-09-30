@@ -207,7 +207,7 @@ function Parse-FormulaAtom {
     while ($Index.Value -lt $Tokens.Count -and [string]$Tokens[$Index.Value].Text -in @('_', '^')) {
         $marker = [string]$Tokens[$Index.Value].Text
         $Index.Value++
-        if ($Index.Value -lt $Tokens.Count -and [string]$Tokens[$Index.Value].Text -in @('+', '-', '−', '×', '·', '∙', '*', '/')) {
+        if ($Index.Value -lt $Tokens.Count -and [string]$Tokens[$Index.Value].Text -in @('+', '-', '−', '×', '·', '⋅', '∙', '*', '/')) {
             throw "Sub/superscript must not begin with operator '$($Tokens[$Index.Value].Text)'; parenthesize it (10^(-3)) instead."
         }
         $scriptNode = Parse-FormulaAtom -Tokens $Tokens -Index $Index
@@ -245,7 +245,7 @@ function Parse-FormulaSequence {
             $Index.Value++
             if ($Index.Value -ge $Tokens.Count) { throw 'Fraction has no denominator.' }
             $nextText = [string]$Tokens[$Index.Value].Text
-            if ($nextText -in @('=', ')', '/', '×', '·', '∙', '*', '+', '-', '−')) {
+            if ($nextText -in @('=', ')', '/', '×', '·', '⋅', '∙', '*', '+', '-', '−')) {
                 throw 'Fraction has no denominator.'
             }
             # Denominator = the juxtaposed run after '/': implicit multiplication
@@ -255,7 +255,7 @@ function Parse-FormulaSequence {
             do {
                 $denominatorItems.Add((Parse-FormulaAtom -Tokens $Tokens -Index $Index)) | Out-Null
             } while ($Index.Value -lt $Tokens.Count -and
-                ( [string]$Tokens[$Index.Value].Text -notin @('=', ')', '×', '·', '∙', '*', '+', '-', '−', '<', '>', '≤', '≥') ))
+                ( [string]$Tokens[$Index.Value].Text -notin @('=', ')', '×', '·', '⋅', '∙', '*', '+', '-', '−', '<', '>', '≤', '≥') ))
             $right = if ($denominatorItems.Count -eq 1) { $denominatorItems[0] } else { [pscustomobject]@{ Kind = 'Sequence'; Items = @($denominatorItems.ToArray()) } }
             $left = if ($items.Count -eq 1) { $items[0] } else { [pscustomobject]@{ Kind = 'Sequence'; Items = @($items.ToArray()) } }
             # The fraction rejoins the current sequence instead of returning, so
@@ -288,12 +288,51 @@ function Parse-FormulaExpression {
     if ($Index.Value -lt $Tokens.Count -and [string]$Tokens[$Index.Value].Text -eq '=') {
         $Index.Value++
         if ($Index.Value -ge $Tokens.Count -or [string]$Tokens[$Index.Value].Text -eq ')') {
-            throw 'Equality has no right-hand expression.'
+            # Trailing equality (e.g. the derivation-link segment "P=W/t=")
+            # is a legitimate OLE fragment: the original MathType object ends
+            # with an equals sign that continues into the next object.
+            return [pscustomobject]@{ Kind = 'TrailingEquality'; Left = $left }
         }
         $right = Parse-FormulaExpression -Tokens $Tokens -Index $Index
         return [pscustomobject]@{ Kind = 'Equality'; Left = $left; Right = $right }
     }
     return $left
+}
+
+function Find-FormulaStructureIssue {
+    # Equality fragments are legal ONLY as: the whole expression, or the right
+    # side of an equality (derivation chains end with "a=b="). Everything else
+    # parses and round-trips but is not canonical: "a==b", "=a=", "(a=)",
+    # "a/(b=)" must be rejected per the §4.1 deterministic-rejection promise.
+    param($Node, [bool]$AllowLeadingEquality, [bool]$AllowTrailingEquality)
+    $kind = [string]$Node.Kind
+    if ($kind -eq 'LeadingEquality') {
+        if (-not $AllowLeadingEquality) { return 'LeadingEquality nested inside a larger expression' }
+        return (Find-FormulaStructureIssue -Node $Node.Right -AllowLeadingEquality $false -AllowTrailingEquality $false)
+    }
+    if ($kind -eq 'TrailingEquality') {
+        if (-not $AllowTrailingEquality) { return 'TrailingEquality nested inside a larger expression' }
+        return (Find-FormulaStructureIssue -Node $Node.Left -AllowLeadingEquality $false -AllowTrailingEquality $false)
+    }
+    if ($kind -eq 'Equality') {
+        $leftIssue = Find-FormulaStructureIssue -Node $Node.Left -AllowLeadingEquality $false -AllowTrailingEquality $false
+        if ($leftIssue) { return $leftIssue }
+        return (Find-FormulaStructureIssue -Node $Node.Right -AllowLeadingEquality $false -AllowTrailingEquality $true)
+    }
+    $children = @()
+    switch ($kind) {
+        'Sequence' { $children = @($Node.Items) }
+        'Group' { $children = @($Node.Inner) }
+        'Fraction' { $children = @($Node.Numerator, $Node.Denominator) }
+        'Subscript' { $children = @($Node.Base, $Node.Script) }
+        'Superscript' { $children = @($Node.Base, $Node.Script) }
+        default { return $null }
+    }
+    foreach ($child in $children) {
+        $childIssue = Find-FormulaStructureIssue -Node $child -AllowLeadingEquality $false -AllowTrailingEquality $false
+        if ($childIssue) { return $childIssue }
+    }
+    return $null
 }
 
 function Parse-FormulaAst {
@@ -305,6 +344,8 @@ function Parse-FormulaAst {
     $index = 0
     $ast = Parse-FormulaExpression -Tokens $tokens -Index ([ref]$index)
     if ($index -ne $tokens.Count) { throw "Unsupported trailing formula token '$($tokens[$index].Text)'." }
+    $structureIssue = Find-FormulaStructureIssue -Node $ast -AllowLeadingEquality $true -AllowTrailingEquality $true
+    if ($null -ne $structureIssue) { throw "Unsupported formula structure: $structureIssue." }
     return $ast
 }
 
@@ -316,7 +357,7 @@ function Get-FormulaTokenRole {
         if ($Token -in @('J', 'kg', 'Pa', 'N', 'W', 'Hz', '℃')) { return 'Unit' }
         return 'Variable'
     }
-    if ($Token -in @('+', '-', '−', '×', '⋅', '∙', '*', '=', ',', '.', '(', ')', '<', '>', '≤', '≥', '\/')) { return 'Operator' }
+    if ($Token -in @('+', '-', '−', '×', '·', '⋅', '∙', '*', '=', ',', '.', '(', ')', '<', '>', '≤', '≥', '\/')) { return 'Operator' }
     return 'Text'
 }
 
@@ -369,6 +410,15 @@ function Convert-AstToFormulaIrToken {
                 )
             }
         }
+        'TrailingEquality' {
+            return [ordered]@{
+                type = 'TrailingEquality'
+                children = @(
+                    (Convert-AstToFormulaIrToken -Node $Node.Left)
+                    ([ordered]@{ type = 'Operator'; text = '='; role = 'Operator' })
+                )
+            }
+        }
         'Group' {
             return [ordered]@{
                 type = 'Delimiter'
@@ -416,6 +466,9 @@ function Convert-AstToUnicodeMath {
         'LeadingEquality' {
             return ('=' + (Convert-AstToUnicodeMath -Node $Node.Right))
         }
+        'TrailingEquality' {
+            return ((Convert-AstToUnicodeMath -Node $Node.Left) + '=')
+        }
         'Group' {
             return ('(' + (Convert-AstToUnicodeMath -Node $Node.Inner) + ')')
         }
@@ -454,6 +507,7 @@ function Convert-FormulaTokenToTex {
         'μ' { return '\mu' }
         '×' { return '\times' }
         '⋅' { return '\cdot' }
+        '·' { return '\cdot' }
         '∙' { return '\cdot' }
         '−' { return '-' }
         default {
@@ -476,6 +530,9 @@ function Convert-AstToCanonicalTex {
         }
         'LeadingEquality' {
             return ('=' + (Convert-AstToCanonicalTex -Node $Node.Right))
+        }
+        'TrailingEquality' {
+            return ((Convert-AstToCanonicalTex -Node $Node.Left) + '=')
         }
         'Group' {
             return ('(' + (Convert-AstToCanonicalTex -Node $Node.Inner) + ')')
@@ -582,6 +639,11 @@ function Add-OmmlNode {
             Add-OmmlNode -Document $Document -Parent $Parent -Node $Node.Right -IsScript:$IsScript
             break
         }
+        'TrailingEquality' {
+            Add-OmmlNode -Document $Document -Parent $Parent -Node $Node.Left -IsScript:$IsScript
+            Add-OmmlRun -Document $Document -Parent $Parent -Text '=' -Role 'Operator' -IsScript:$IsScript
+            break
+        }
         'Group' {
             Add-OmmlRun -Document $Document -Parent $Parent -Text '(' -Role 'Operator' -IsScript:$IsScript
             Add-OmmlNode -Document $Document -Parent $Parent -Node $Node.Inner -IsScript:$IsScript
@@ -679,6 +741,11 @@ function Add-MathMlNode {
         'LeadingEquality' {
             Add-TextElement -Document $Document -Parent $Parent -Prefix '' -Name 'mo' -Namespace $script:NsMathMl -Text '=' | Out-Null
             Add-MathMlNode -Document $Document -Parent $Parent -Node $Node.Right
+            break
+        }
+        'TrailingEquality' {
+            Add-MathMlNode -Document $Document -Parent $Parent -Node $Node.Left
+            Add-TextElement -Document $Document -Parent $Parent -Prefix '' -Name 'mo' -Namespace $script:NsMathMl -Text '=' | Out-Null
             break
         }
         'Group' {

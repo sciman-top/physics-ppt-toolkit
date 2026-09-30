@@ -175,6 +175,37 @@ function Test-IsProtectedScopeNode {
     return $false
 }
 
+function Get-OleBlockShapeId {
+    # The replaced block is one of three layouts:
+    #   1. a bare p:graphicFrame whose mc:AlternateContent lives inside
+    #      a:graphicData (legacy authoring; 15.4电流的测量 slide5 class) —
+    #      the frame's own nvGraphicFramePr/cNvPr carries the id;
+    #   2. a top-level mc:AlternateContent whose direct child is a
+    #      graphicFrame;
+    #   3. a top-level mc:AlternateContent whose graphicFrame lives inside
+    #      mc:Choice (PowerPoint 2016+ layout).
+    # A direct-child XPath from the AC node matches nothing and silently broke
+    # cNvPr id reuse + the OleTimingDangling guard; the Choice branch is
+    # preferred and Fallback (same id) is skipped. Layout 1 must resolve the
+    # frame's own cNvPr, otherwise slide+shapeId mapping fails with
+    # OleIndexOutOfRange even though the carrier inventory saw the shape.
+    param($Block, $NsManager)
+    $ownIdNode = $null
+    if ($Block.LocalName -eq 'graphicFrame') {
+        $ownIdNode = $Block.SelectSingleNode('./*[local-name()="nvGraphicFramePr"]/*[local-name()="cNvPr"]', $NsManager)
+    }
+    if ($null -eq $ownIdNode) {
+        $ownIdNode = $Block.SelectSingleNode('./*[local-name()="graphicFrame"]/*[local-name()="nvGraphicFramePr"]/*[local-name()="cNvPr"]', $NsManager)
+    }
+    if ($null -eq $ownIdNode) {
+        $ownIdNode = $Block.SelectSingleNode('./*[local-name()="Choice"]//*[local-name()="nvGraphicFramePr"]/*[local-name()="cNvPr"]', $NsManager)
+    }
+    if ($null -eq $ownIdNode) { return 0 }
+    $blockId = 0
+    [void][int]::TryParse([string]$ownIdNode.GetAttribute('id'), [ref]$blockId)
+    return $blockId
+}
+
 function Get-OleInventory {
     # Deterministic global OLE ordering: presentation-order slide ascending,
     # then y, then x. Must stay in sync with the inventory that produced the
@@ -213,6 +244,7 @@ function Get-OleInventory {
                     Slide = [int]$slideNo
                     Part = $entryName
                     Node = $child
+                    ShapeId = Get-OleBlockShapeId -Block $child -NsManager $ns
                     ProgId = [string]$oleObj.GetAttribute('progId')
                     X = [int64]$off.GetAttribute('x')
                     Y = [int64]$off.GetAttribute('y')
@@ -235,7 +267,7 @@ function Get-OmmlRunRole {
         if ([string]$Text -in @('J', 'kg', 'Pa', 'N', 'W', 'Hz', '℃')) { return 'Unit' }
         return 'Variable'
     }
-    if ([string]$Text -in @('+', '-', '−', '×', '⋅', '∙', '*', '=', ',', '.', '(', ')', '<', '>', '≤', '≥')) { return 'Operator' }
+    if ([string]$Text -in @('+', '-', '−', '×', '·', '⋅', '∙', '*', '=', ',', '.', '(', ')', '<', '>', '≤', '≥')) { return 'Operator' }
     return 'Text'
 }
 
@@ -525,6 +557,10 @@ try {
     $inventory = Get-OleInventory -Zip $zip -DocsByPart $docsByPart -NssByPart $nssByPart
     $byIndex = @{}
     foreach ($item in $inventory) { $byIndex[[int]$item.Index] = $item }
+    $bySlideShape = @{}
+    foreach ($item in $inventory) {
+        if ([int]$item.ShapeId -gt 0) { $bySlideShape["{0}|{1}" -f [int]$item.Slide, [int]$item.ShapeId] = $item }
+    }
     $dirtyParts = @{}
     $usedIndexes = @{}
 
@@ -555,31 +591,70 @@ try {
 
         $targets = @()
         $ok = $true
-        foreach ($piece in @([string]$row.OleIndex -split ';')) {
-            $idx = 0
-            if (-not [int]::TryParse($piece.Trim(), [ref]$idx)) {
-                Add-ReportRow -Rows $reportRows -File $inputFileName -Slide $slideNo -Shape $name -Issue 'OleMappingInvalidIndex' -Details ("'{0}' in {1}" -f $piece, $rowLabel)
-                $ok = $false
-                break
+        # Primary identity is slide + shape id (stable across OLE inventories);
+        # the positional OleIndex is only a legacy fallback and can drift when
+        # the deck carries non-equation OLEs that this inventory counts but
+        # the mapping inventory did not.
+        $rowShapeIds = @()
+        if ($null -ne $row.PSObject.Properties['ShapeIds'] -and -not [string]::IsNullOrWhiteSpace([string]$row.ShapeIds)) {
+            $rowShapeIds = @([string]$row.ShapeIds -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+        }
+        $usedTargetKeys = @()
+        if (@($rowShapeIds).Count -gt 0) {
+            foreach ($piece in $rowShapeIds) {
+                $sid = 0
+                if (-not [int]::TryParse($piece, [ref]$sid)) {
+                    Add-ReportRow -Rows $reportRows -File $inputFileName -Slide $slideNo -Shape $name -Issue 'OleMappingInvalidShapeId' -Details ("'{0}' in {1}" -f $piece, $rowLabel)
+                    $ok = $false
+                    break
+                }
+                $targetKey = "{0}|{1}" -f $slideNo, $sid
+                if ($usedTargetKeys -contains $targetKey) {
+                    Add-ReportRow -Rows $reportRows -File $inputFileName -Slide $slideNo -Shape $name -Issue 'OleIndexReused' -Details ("shape {0} already targeted ({1})" -f $sid, $rowLabel)
+                    $ok = $false
+                    break
+                }
+                if (-not $bySlideShape.ContainsKey($targetKey)) {
+                    Add-ReportRow -Rows $reportRows -File $inputFileName -Slide $slideNo -Shape $name -Issue 'OleIndexOutOfRange' -Details ("slide {0} shape {1} not in inventory ({2})" -f $slideNo, $sid, $rowLabel)
+                    $ok = $false
+                    break
+                }
+                $item = $bySlideShape[$targetKey]
+                if ($item.ProgId -notlike 'Equation*') {
+                    Add-ReportRow -Rows $reportRows -File $inputFileName -Slide $slideNo -Shape $name -Issue 'OleNotEquationObject' -Details ("slide {0} shape {1} progId='{2}' ({3})" -f $slideNo, $sid, $item.ProgId, $rowLabel)
+                    $ok = $false
+                    break
+                }
+                $usedTargetKeys += $targetKey
+                $targets += $item
             }
-            if ($usedIndexes.ContainsKey($idx)) {
-                Add-ReportRow -Rows $reportRows -File $inputFileName -Slide $slideNo -Shape $name -Issue 'OleIndexReused' -Details ("index {0} already targeted ({1})" -f $idx, $rowLabel)
-                $ok = $false
-                break
+        } else {
+            foreach ($piece in @([string]$row.OleIndex -split ';')) {
+                $idx = 0
+                if (-not [int]::TryParse($piece.Trim(), [ref]$idx)) {
+                    Add-ReportRow -Rows $reportRows -File $inputFileName -Slide $slideNo -Shape $name -Issue 'OleMappingInvalidIndex' -Details ("'{0}' in {1}" -f $piece, $rowLabel)
+                    $ok = $false
+                    break
+                }
+                if ($usedIndexes.ContainsKey($idx)) {
+                    Add-ReportRow -Rows $reportRows -File $inputFileName -Slide $slideNo -Shape $name -Issue 'OleIndexReused' -Details ("index {0} already targeted ({1})" -f $idx, $rowLabel)
+                    $ok = $false
+                    break
+                }
+                if (-not $byIndex.ContainsKey($idx)) {
+                    Add-ReportRow -Rows $reportRows -File $inputFileName -Slide $slideNo -Shape $name -Issue 'OleIndexOutOfRange' -Details ("index {0} not in inventory ({1})" -f $idx, $rowLabel)
+                    $ok = $false
+                    break
+                }
+                $item = $byIndex[$idx]
+                if ($item.ProgId -notlike 'Equation*') {
+                    Add-ReportRow -Rows $reportRows -File $inputFileName -Slide $slideNo -Shape $name -Issue 'OleNotEquationObject' -Details ("index {0} progId='{1}' ({2})" -f $idx, $item.ProgId, $rowLabel)
+                    $ok = $false
+                    break
+                }
+                $null = $usedIndexes.Add($idx, $true)
+                $targets += $item
             }
-            if (-not $byIndex.ContainsKey($idx)) {
-                Add-ReportRow -Rows $reportRows -File $inputFileName -Slide $slideNo -Shape $name -Issue 'OleIndexOutOfRange' -Details ("index {0} not in inventory ({1})" -f $idx, $rowLabel)
-                $ok = $false
-                break
-            }
-            $item = $byIndex[$idx]
-            if ($item.ProgId -notlike 'Equation*') {
-                Add-ReportRow -Rows $reportRows -File $inputFileName -Slide $slideNo -Shape $name -Issue 'OleNotEquationObject' -Details ("index {0} progId='{1}' ({2})" -f $idx, $item.ProgId, $rowLabel)
-                $ok = $false
-                break
-            }
-            $null = $usedIndexes.Add($idx, $true)
-            $targets += $item
         }
         if (-not $ok) { continue }
         if (@($targets | Where-Object { [int]$_.Slide -ne $slideNo }).Count -gt 0) {
@@ -632,17 +707,22 @@ try {
             if (@($targets).Count -gt 1) {
                 $extraIds = @()
                 for ($t = 1; $t -lt @($targets).Count; $t++) {
-                    $ownIdNode = $targets[$t].Node.SelectSingleNode('./p:nvGraphicFramePr/p:cNvPr', $ns)
-                    if ($null -ne $ownIdNode) { $extraIds += [string]$ownIdNode.GetAttribute('id') }
+                    $extraId = [int]$targets[$t].ShapeId
+                    if ($extraId -gt 0) { $extraIds += [string]$extraId }
                 }
                 if (@($extraIds | Where-Object { $timingSpids -contains $_ }).Count -gt 0) {
                     Add-ReportRow -Rows $reportRows -File $inputFileName -Slide $slideNo -Shape $name -Issue 'OleTimingDangling' -Details ("merged targets carry animated spids ({0}); conversion skipped: {1}" -f ($extraIds -join ','), $rowLabel)
                     continue
                 }
             }
-            $reuseId = 0
-            $ownIdNode = $targets[0].Node.SelectSingleNode('./p:nvGraphicFramePr/p:cNvPr', $ns)
-            if ($null -ne $ownIdNode) { $null = [int]::TryParse([string]$ownIdNode.GetAttribute('id'), [ref]$reuseId) }
+            $reuseId = [int]$targets[0].ShapeId
+            if ($reuseId -le 0 -and $timingSpids.Count -gt 0) {
+                # Id extraction failed on this block layout; reusing is the only
+                # thing keeping existing animation spids valid, so refuse rather
+                # than strand them on a brand-new id.
+                Add-ReportRow -Rows $reportRows -File $inputFileName -Slide $slideNo -Shape $name -Issue 'OleTimingDangling' -Details ("block cNvPr id could not be resolved while the slide carries animations; conversion skipped: {0}" -f $rowLabel)
+                continue
+            }
             $maxId = 0
             foreach ($idNode in @($doc.SelectNodes('//*[@id]', $ns))) {
                 $candidateId = 0
