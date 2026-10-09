@@ -21,13 +21,6 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'PhysicsPpt.Common.ps1')
 
-function Get-Sha256Local { param([string]$Path) return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
-function Get-TextSha256Local {
-    param([string]$Text)
-    $sha = [Security.Cryptography.SHA256]::Create()
-    try { return ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text))).Replace('-', '').ToLowerInvariant()) }
-    finally { $sha.Dispose() }
-}
 function Require-Column { param($Rows, [string]$Name) if ($Rows.Count -eq 0 -or $null -eq $Rows[0].PSObject.Properties[$Name]) { throw "Adjudication CSV is missing required column: $Name" } }
 
 $inventoryPath = [IO.Path]::GetFullPath($CarrierInventoryJson)
@@ -46,10 +39,10 @@ if ([bool]$cropManifest.writeBackAllowed) { throw 'Crop manifest illegally enabl
 
 $sourcePath = [IO.Path]::GetFullPath([string]$inventory.input.path)
 if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) { throw "Inventory source PPTX not found: $sourcePath" }
-$sourceSha256 = Get-Sha256Local -Path $sourcePath
+$sourceSha256 = Get-FileSha256Hex -Path $sourcePath
 if ($sourceSha256 -ne ([string]$inventory.input.sha256).ToLowerInvariant()) { throw 'Inventory source PPTX hash does not match current input.' }
 if ($sourceSha256 -ne ([string]$cropManifest.input.sha256).ToLowerInvariant()) { throw 'Crop manifest is bound to a different source PPTX.' }
-$inventorySha256 = Get-Sha256Local -Path $inventoryPath
+$inventorySha256 = Get-FileSha256Hex -Path $inventoryPath
 if ($inventorySha256 -ne ([string]$cropManifest.inventory.sha256).ToLowerInvariant()) { throw 'Crop manifest inventory hash does not match current inventory.' }
 
 $cropCsvPath = Join-Path (Split-Path -Parent $cropManifestPath) 'ole-crops.csv'
@@ -87,7 +80,7 @@ foreach ($row in $rows) {
     if (([string]$row.CropPng) -ne [string]$crop.CropPng -or ([string]$row.CropSha256).ToLowerInvariant() -ne ([string]$crop.CropSha256).ToLowerInvariant()) { throw "Crop path or hash mismatch: $id" }
     if (([string]$row.PageSha256).ToLowerInvariant() -ne ([string]$crop.PageSha256).ToLowerInvariant()) { throw "Page hash mismatch: $id" }
     if (-not (Test-Path -LiteralPath ([string]$row.CropPng) -PathType Leaf)) { throw "Crop image not found: $id" }
-    if ((Get-Sha256Local -Path ([string]$row.CropPng)) -ne ([string]$row.CropSha256).ToLowerInvariant()) { throw "Crop image has drifted since export: $id" }
+    if ((Get-FileSha256Hex -Path ([string]$row.CropPng)) -ne ([string]$row.CropSha256).ToLowerInvariant()) { throw "Crop image has drifted since export: $id" }
     $status = [string]$row.Status
     $target = [string]$row.TargetCarrier
     if ($status -notin @('CandidateOnly', 'ManualRequired', 'OriginalKept')) { throw "Unsupported visual adjudication status '$status' for $id" }
@@ -125,8 +118,8 @@ $recordsSorted = @($outputRecords.ToArray() | Sort-Object recordId)
 $evidenceLines = New-Object System.Collections.Generic.List[string]
 $evidenceLines.Add("source|$sourceSha256") | Out-Null
 $evidenceLines.Add("inventory|$inventorySha256") | Out-Null
-$evidenceLines.Add("cropManifest|$(Get-Sha256Local -Path $cropManifestPath)") | Out-Null
-$evidenceLines.Add("adjudicationCsv|$(Get-Sha256Local -Path $adjudicationPath)") | Out-Null
+$evidenceLines.Add("cropManifest|$(Get-FileSha256Hex -Path $cropManifestPath)") | Out-Null
+$evidenceLines.Add("adjudicationCsv|$(Get-FileSha256Hex -Path $adjudicationPath)") | Out-Null
 foreach ($r in $recordsSorted) { $evidenceLines.Add("$($r.recordId)|$($r.source.sourceSha256)|$($r.crop.sha256)|$($r.crop.pageSha256)|$($r.proposal.status)|$($r.proposal.unicodeMath)|$($r.proposal.tex)") | Out-Null }
 $counts = [ordered]@{ total = $recordsSorted.Count; candidateOnly = @($recordsSorted | Where-Object { $_.proposal.status -eq 'CandidateOnly' }).Count; manualRequired = @($recordsSorted | Where-Object { $_.proposal.status -eq 'ManualRequired' }).Count; originalKept = @($recordsSorted | Where-Object { $_.proposal.status -eq 'OriginalKept' }).Count }
 $manifest = [ordered]@{
@@ -136,12 +129,12 @@ $manifest = [ordered]@{
     input = [ordered]@{
         sourcePptx = [ordered]@{ path = $sourcePath; sha256 = $sourceSha256 }
         inventory = [ordered]@{ path = $inventoryPath; sha256 = $inventorySha256 }
-        cropManifest = [ordered]@{ path = $cropManifestPath; sha256 = Get-Sha256Local -Path $cropManifestPath }
-        adjudicationCsv = [ordered]@{ path = $adjudicationPath; sha256 = Get-Sha256Local -Path $adjudicationPath }
+        cropManifest = [ordered]@{ path = $cropManifestPath; sha256 = Get-FileSha256Hex -Path $cropManifestPath }
+        adjudicationCsv = [ordered]@{ path = $adjudicationPath; sha256 = Get-FileSha256Hex -Path $adjudicationPath }
     }
     counts = $counts
     records = $recordsSorted
-    evidenceSetSha256 = Get-TextSha256Local -Text (($evidenceLines.ToArray() | Sort-Object) -join "`n")
+    evidenceSetSha256 = Get-TextSha256Hex -Text (($evidenceLines.ToArray() | Sort-Object) -join "`n")
 }
 $jsonPath = Join-Path $outputPath 'formula-ole-visual-adjudication-proposal.json'
 $csvPath = Join-Path $outputPath 'formula-ole-visual-adjudication-proposal.csv'

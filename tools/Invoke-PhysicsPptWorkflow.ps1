@@ -202,39 +202,6 @@ function Get-DefaultOutputRoot {
     return Join-Path $reportsRoot $safeSource
 }
 
-function New-VersionedDeliveryRoot {
-    # Versioned delivery layout: reports/<source>_v<N>/ keeps every delivered
-    # generation in its own directory; the highest _vN is the newest. The
-    # directory name is exactly the source file stem (no __pptx style
-    # extension suffix) so deliveries match the <deck>_v<N> convention.
-    param([System.IO.FileSystemInfo]$InputItem)
-    $stem = if ($InputItem.PSIsContainer) {
-        $InputItem.Name
-    } else {
-        [System.IO.Path]::GetFileNameWithoutExtension($InputItem.Name)
-    }
-    $parent = Join-Path (Split-Path -Parent $PSScriptRoot) 'reports'
-    if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
-    for ($attempt = 0; $attempt -lt 100; $attempt++) {
-        $maxVersion = if (Test-Path -LiteralPath (Join-Path $parent $stem)) { 1 } else { 0 }
-        foreach ($dir in @(Get-ChildItem -LiteralPath $parent -Directory -ErrorAction SilentlyContinue)) {
-            if ($dir.Name -match ('^' + [regex]::Escape($stem) + '_v(\d+)$')) {
-                $maxVersion = [Math]::Max($maxVersion, [int]$Matches[1])
-            }
-        }
-        $candidate = Join-Path $parent ('{0}_v{1}' -f $stem, ($maxVersion + 1))
-        try {
-            # No -Force: directory creation is the atomic claim under normal
-            # Windows filesystem semantics; a concurrent winner causes retry.
-            New-Item -ItemType Directory -Path $candidate -ErrorAction Stop | Out-Null
-            return $candidate
-        } catch {
-            if (-not (Test-Path -LiteralPath $candidate -PathType Container)) { throw }
-        }
-    }
-    throw "Unable to claim a unique versioned delivery directory under $parent."
-}
-
 function Convert-ReportCsv {
     param([string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) { return @() }

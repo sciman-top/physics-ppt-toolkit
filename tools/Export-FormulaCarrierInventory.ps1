@@ -46,16 +46,6 @@ $script:MsoTextBox = 17
 $script:MsoMedia = 16
 $script:EmuPerPoint = 12700.0
 
-function Get-Sha256Text {
-    param([AllowEmptyString()][string]$Text)
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
-        return ([System.BitConverter]::ToString($sha.ComputeHash($bytes)) -replace '-', '').ToLowerInvariant()
-    } finally {
-        $sha.Dispose()
-    }
-}
 
 function Get-ZipEntryEvidence {
     param(
@@ -98,17 +88,6 @@ function Convert-ToDouble {
     return 0.0
 }
 
-function Get-RowValue {
-    param(
-        [object]$Row,
-        [string]$Name,
-        [object]$Default = ''
-    )
-    if ($null -eq $Row) { return $Default }
-    $property = $Row.PSObject.Properties[$Name]
-    if ($null -eq $property -or $null -eq $property.Value) { return $Default }
-    return $property.Value
-}
 
 function Get-ImageEvidenceMap {
     param([string]$CsvPath)
@@ -354,7 +333,7 @@ function Get-CanonicalForText {
     $name = Get-FormulaRuleValue -Rule $match -Name 'name' -Default 'formula'
     $unicodeMath = Get-FormulaRuleValue -Rule $match -Name 'targetUnicodeMath'
     $tex = Get-FormulaRuleValue -Rule $match -Name 'targetTex'
-    $canonicalHash = Get-Sha256Text -Text ("$name|$unicodeMath|$tex")
+    $canonicalHash = Get-TextSha256Hex -Text ("$name|$unicodeMath|$tex")
     return [pscustomobject]@{
         Match = $match
         Canonical = [ordered]@{
@@ -449,7 +428,7 @@ try {
                 }
                 if ($null -ne $mediaEvidenceCache[$mediaPath]) { $mediaEvidence.Add($mediaEvidenceCache[$mediaPath]) | Out-Null }
             }
-            $xmlHash = Get-Sha256Text -Text ([string]$child.OuterXml)
+            $xmlHash = Get-TextSha256Hex -Text ([string]$child.OuterXml)
             $packageByKey["$slideNo|$shapeId"] = [pscustomobject]@{
                 Slide = $slideNo
                 ShapeId = $shapeId
@@ -600,9 +579,9 @@ foreach ($signal in @($packageByKey.Values | Sort-Object Slide, @{ Expression = 
     $sourceHash = if ($mediaHashes.Count -eq 1 -and $carrier -in @('FormulaImage', 'MixedImage')) {
         $mediaHashes[0]
     } elseif ($mediaHashes.Count -gt 0 -and $carrier -in @('FormulaImage', 'MixedImage')) {
-        Get-Sha256Text -Text (($mediaHashes | Sort-Object) -join '|')
+        Get-TextSha256Hex -Text (($mediaHashes | Sort-Object) -join '|')
     } elseif ($carrier -eq 'TextFormula') {
-        Get-Sha256Text -Text (Get-NormalizedFormulaText -Text $text)
+        Get-TextSha256Hex -Text (Get-NormalizedFormulaText -Text $text)
     } else {
         $signal.XmlSha256
     }

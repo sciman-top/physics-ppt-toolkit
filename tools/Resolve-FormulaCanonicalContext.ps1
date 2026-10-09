@@ -31,12 +31,6 @@ function Normalize-FormulaSourceText {
     if ($null -eq $Text) { return '' }
     return (($Text -replace '\s+', '') -replace '[∙·•*]', '×' -replace '−', '-')
 }
-function Get-Sha256TextLocal {
-    param([string]$Text)
-    $sha = [Security.Cryptography.SHA256]::Create()
-    try { return ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text))).Replace('-', '').ToLowerInvariant()) }
-    finally { $sha.Dispose() }
-}
 
 $CandidateCsv = [IO.Path]::GetFullPath($CandidateCsv)
 $ContextMapCsv = [IO.Path]::GetFullPath($ContextMapCsv)
@@ -137,7 +131,7 @@ $csvPath = Join-Path $OutputDir 'formula-context-resolution.csv'
 $jsonPath = Join-Path $OutputDir 'formula-context-resolution.json'
 Write-Utf8BomCsv -InputObject $results.ToArray() -Path $csvPath
 $evidenceRows = @($results.ToArray() | ForEach-Object { "$($_.CandidateId)|$($_.SourceSha256)|$($_.DecisionStatus)|$($_.CanonicalSource)|$($_.TargetUnicodeMath)" } | Sort-Object)
-$evidenceSetSha256 = Get-Sha256TextLocal -Text ($evidenceRows -join "`n")
+$evidenceSetSha256 = Get-TextSha256Hex -Text ($evidenceRows -join "`n")
 $manifest = [ordered]@{
     schemaVersion = 1
     generatedAt = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'

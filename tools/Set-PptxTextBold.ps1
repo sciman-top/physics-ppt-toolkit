@@ -35,36 +35,6 @@ $ErrorActionPreference = 'Stop'
 
 $script:NsA = 'http://schemas.openxmlformats.org/drawingml/2006/main'
 
-function Convert-XmlDocumentToString {
-    param([System.Xml.XmlDocument]$Document)
-    $settings = New-Object System.Xml.XmlWriterSettings
-    $settings.Indent = $true
-    $settings.OmitXmlDeclaration = $true
-    $builder = New-Object System.Text.StringBuilder
-    $writer = [System.Xml.XmlWriter]::Create($builder, $settings)
-    try {
-        $Document.Save($writer)
-    } finally {
-        if ($null -ne $writer) { $writer.Dispose() }
-    }
-    return $builder.ToString()
-}
-
-function Write-ZipEntryText {
-    param($Zip, [string]$EntryName, [string]$Text)
-    $entry = $Zip.GetEntry($EntryName)
-    if ($null -eq $entry) { throw "Zip entry not found: $EntryName" }
-    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    $bytes = $utf8NoBom.GetBytes($Text)
-    $entry.Delete() | Out-Null
-    $newEntry = $Zip.CreateEntry($EntryName)
-    $stream = $newEntry.Open()
-    try {
-        $stream.Write($bytes, 0, $bytes.Length)
-    } finally {
-        $stream.Dispose()
-    }
-}
 
 $InputPath = [System.IO.Path]::GetFullPath($InputPath)
 $OutputPath = [System.IO.Path]::GetFullPath($OutputPath)

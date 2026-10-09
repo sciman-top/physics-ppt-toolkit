@@ -126,13 +126,7 @@ if ($stem.EndsWith('.brand.callout')) { $stem = $stem.Substring(0, $stem.Length 
 elseif ($stem.EndsWith('.brand')) { $stem = $stem.Substring(0, $stem.Length - '.brand'.Length) }
 elseif ($stem.EndsWith('.callout')) { $stem = $stem.Substring(0, $stem.Length - '.callout'.Length) }
 if ($stem.EndsWith('.normalized')) { $stem = $stem.Substring(0, $stem.Length - '.normalized'.Length) }
-$existing = @(Get-ChildItem -LiteralPath $OutputRoot -Directory -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -like "$stem`_v*" })
-$nextVersion = 1
-foreach ($dir in $existing) {
-    if ($dir.Name -match '_v(\d+)$') { $nextVersion = [Math]::Max($nextVersion, [int]$Matches[1] + 1) }
-}
-$deliveryRoot = Join-Path $OutputRoot ("$stem`_v$nextVersion")
+$deliveryRoot = New-VersionedDeliveryRoot -Stem $stem -ReportsRoot $OutputRoot
 $deliveryDir = Join-Path $deliveryRoot '01_交付物'
 $reportDir = Join-Path $deliveryRoot '00_检查报告'
 $backupDir = Join-Path $deliveryRoot '03_原始备份'

@@ -68,17 +68,6 @@ function Convert-ToInt64 {
     return [int64]0
 }
 
-function Get-RowValue {
-    param(
-        [object]$Row,
-        [string]$Name,
-        [object]$Default = ''
-    )
-    $property = $Row.PSObject.Properties[$Name]
-    if ($null -eq $property -or $null -eq $property.Value) { return $Default }
-    return $property.Value
-}
-
 function Get-FormulaImageAssessment {
     param([object]$Row)
 

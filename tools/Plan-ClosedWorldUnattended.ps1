@@ -23,13 +23,6 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'PhysicsPpt.Common.ps1')
 
-function Get-FileSha256Local { param([string]$Path) return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
-function Get-TextSha256Local {
-    param([string]$Text)
-    $sha = [Security.Cryptography.SHA256]::Create()
-    try { return ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text))).Replace('-', '').ToLowerInvariant()) }
-    finally { $sha.Dispose() }
-}
 function Get-RecordKey { param($Source) return ('{0}|{1}|{2}|{3}' -f [string]$Source.carrier, [string]$Source.slide, [string]$Source.shapeId, ([string]$Source.sourceSha256).ToLowerInvariant()) }
 
 foreach ($name in @('CarrierInventoryJson', 'GoldSetManifestJson', 'ContextResolutionJson', 'RecognitionEvaluationJson')) {
@@ -56,7 +49,7 @@ if ($goldSourceHash -notmatch '^[a-f0-9]{64}$' -or $goldSourceHash -ne $sourceHa
     throw "GoldSet source hash does not match carrier inventory: gold=$goldSourceHash inventory=$sourceHash"
 }
 $recognitionGoldSetHash = ([string]$recognition.inputs.goldSetManifestSha256).ToLowerInvariant()
-$actualGoldSetManifestHash = Get-FileSha256Local -Path $GoldSetManifestJson
+$actualGoldSetManifestHash = Get-FileSha256Hex -Path $GoldSetManifestJson
 if ($recognitionGoldSetHash -notmatch '^[a-f0-9]{64}$' -or $recognitionGoldSetHash -ne $actualGoldSetManifestHash) {
     throw "Recognition evaluation is not bound to the supplied GoldSet manifest: evaluation=$recognitionGoldSetHash manifest=$actualGoldSetManifestHash"
 }
@@ -74,7 +67,7 @@ foreach ($contextResult in @($context.results)) {
 if (-not [string]::IsNullOrWhiteSpace($ReferencePptxPath)) {
     $ReferencePptxPath = [IO.Path]::GetFullPath($ReferencePptxPath)
     if (-not (Test-Path -LiteralPath $ReferencePptxPath -PathType Leaf)) { throw "Reference PPTX not found: $ReferencePptxPath" }
-    if ((Get-FileSha256Local -Path $ReferencePptxPath) -ne $sourceHash) { throw 'Reference PPTX hash does not match the carrier inventory.' }
+    if ((Get-FileSha256Hex -Path $ReferencePptxPath) -ne $sourceHash) { throw 'Reference PPTX hash does not match the carrier inventory.' }
 }
 
 $contextByKey = @{}
@@ -144,18 +137,18 @@ $circuitBreaker = [ordered]@{
 }
 $inputEvidence = New-Object System.Collections.Generic.List[object]
 foreach ($inputPath in @($CarrierInventoryJson, $GoldSetManifestJson, $ContextResolutionJson, $RecognitionEvaluationJson)) {
-    $inputEvidence.Add([ordered]@{ path = $inputPath; sha256 = Get-FileSha256Local -Path $inputPath }) | Out-Null
+    $inputEvidence.Add([ordered]@{ path = $inputPath; sha256 = Get-FileSha256Hex -Path $inputPath }) | Out-Null
 }
 $evidenceRows = @($inputEvidence | ForEach-Object { "$($_.path)|$($_.sha256)" }) + @($results | ForEach-Object { "$($_.recordId)|$($_.decision.status)|$($_.decision.targetCarrier)|$($_.source.sourceSha256)" })
 $manifest = [ordered]@{
     schemaVersion = 1
     generatedAt = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     policy = [ordered]@{ requestedMode = 'ClosedWorldUnattended'; writeBackAllowed = $false; planOnly = $true; sourcePptxSha256 = $sourceHash }
-    referencePptx = if ($ReferencePptxPath) { [ordered]@{ path = $ReferencePptxPath; sha256 = Get-FileSha256Local -Path $ReferencePptxPath } } else { $null }
+    referencePptx = if ($ReferencePptxPath) { [ordered]@{ path = $ReferencePptxPath; sha256 = Get-FileSha256Hex -Path $ReferencePptxPath } } else { $null }
     inputs = @($inputEvidence.ToArray())
     circuitBreaker = $circuitBreaker
     counts = $counts
-    evidenceSetSha256 = Get-TextSha256Local -Text (($evidenceRows | Sort-Object) -join "`n")
+    evidenceSetSha256 = Get-TextSha256Hex -Text (($evidenceRows | Sort-Object) -join "`n")
     results = @($results.ToArray())
 }
 $csvRows = @($results | ForEach-Object { [pscustomobject]@{ RecordId = $_.recordId; Carrier = $_.source.carrier; Slide = $_.source.slide; ShapeId = $_.source.shapeId; DecisionStatus = $_.decision.status; TargetCarrier = $_.decision.targetCarrier; WriteBackAllowed = $_.decision.writeBackAllowed; ContextMatchCount = $_.context.matchCount; Reason = $_.decision.reason } })

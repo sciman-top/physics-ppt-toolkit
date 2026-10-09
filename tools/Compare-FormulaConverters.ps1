@@ -38,14 +38,6 @@ $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'PhysicsPpt.Common.ps1')
 
-function Get-RowValue {
-    param([object]$Row, [string]$Name, [object]$Default = '')
-    if ($null -eq $Row) { return $Default }
-    $property = $Row.PSObject.Properties[$Name]
-    if ($null -eq $property -or $null -eq $property.Value) { return $Default }
-    return $property.Value
-}
-
 function Resolve-Pandoc {
     param([string]$Requested)
     if (-not [string]::IsNullOrWhiteSpace($Requested)) {

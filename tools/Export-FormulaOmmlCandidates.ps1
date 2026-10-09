@@ -796,20 +796,6 @@ function New-MathMlFragment {
     return $doc
 }
 
-function Convert-XmlDocumentToString {
-    param([System.Xml.XmlDocument]$Document)
-    $settings = New-Object System.Xml.XmlWriterSettings
-    $settings.Indent = $true
-    $settings.OmitXmlDeclaration = $true
-    $builder = New-Object System.Text.StringBuilder
-    $writer = [System.Xml.XmlWriter]::Create($builder, $settings)
-    try {
-        $Document.Save($writer)
-    } finally {
-        if ($null -ne $writer) { $writer.Dispose() }
-    }
-    return $builder.ToString()
-}
 
 $FormulaReviewCsv = [System.IO.Path]::GetFullPath($FormulaReviewCsv)
 $OutputDir = [System.IO.Path]::GetFullPath($OutputDir)

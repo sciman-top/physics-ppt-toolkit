@@ -105,31 +105,10 @@ function Write-Report {
     [System.IO.File]::WriteAllLines($Path, $csvLines, $utf8Bom)
 }
 
-function Write-ZipEntryText {
-    param(
-        [System.IO.Compression.ZipArchive]$Zip,
-        [string]$EntryName,
-        [string]$Text
-    )
-    $entry = $Zip.GetEntry($EntryName)
-    if ($null -ne $entry) { $entry.Delete() }
-    $newEntry = $Zip.CreateEntry($EntryName, [System.IO.Compression.CompressionLevel]::Optimal)
-    $stream = $null
-    $writer = $null
-    try {
-    $stream = $newEntry.Open()
-    # XML parts are written without BOM to match PowerPoint's own output;
-    # Read-ZipEntryText detects either encoding on the read side.
-    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    $writer = New-Object System.IO.StreamWriter($stream, $utf8NoBom)
-        $writer.Write($Text)
-    } finally {
-        if ($null -ne $writer) { $writer.Dispose() }
-        if ($null -ne $stream) { $stream.Dispose() }
-    }
-}
-
-function Convert-XmlDocumentToString {
+function Convert-SlideXmlPackageText {
+    # Slide-part flavor of Convert-XmlDocumentToString: this script writes
+    # parts that must carry the standalone XML declaration and stay unindented,
+    # matching the byte layout PowerPoint restores from Fallback content.
     param([System.Xml.XmlDocument]$Document)
     $settings = New-Object System.Xml.XmlWriterSettings
     $settings.Indent = $false
@@ -152,44 +131,6 @@ function New-NamespaceManager {
     return ,$ns
 }
 
-function Get-SlidePartNameMap {
-    <#
-      Map 1-based presentation-order slide numbers to their zip part names.
-      slideN.xml file numbers follow creation order, not presentation order,
-      so this mapping must go through ppt/presentation.xml sldIdLst + rels.
-    #>
-    param([System.IO.Compression.ZipArchive]$Zip)
-    $map = @{}
-    $presText = Read-ZipEntryText -Zip $Zip -EntryName 'ppt/presentation.xml'
-    $relsText = Read-ZipEntryText -Zip $Zip -EntryName 'ppt/_rels/presentation.xml.rels'
-    if ([string]::IsNullOrWhiteSpace($presText) -or [string]::IsNullOrWhiteSpace($relsText)) { return $map }
-
-    $presDoc = New-Object System.Xml.XmlDocument
-    $presDoc.PreserveWhitespace = $false
-    $presDoc.LoadXml($presText)
-    $relsDoc = New-Object System.Xml.XmlDocument
-    $relsDoc.PreserveWhitespace = $false
-    $relsDoc.LoadXml($relsText)
-
-    $relTargets = @{}
-    foreach ($rel in $relsDoc.GetElementsByTagName('Relationship')) {
-        $id = [string]$rel.GetAttribute('Id')
-        if (-not [string]::IsNullOrWhiteSpace($id)) {
-            $relTargets[$id] = [string]$rel.GetAttribute('Target')
-        }
-    }
-
-    $index = 0
-    foreach ($sldId in $presDoc.SelectNodes('//*[local-name()="sldId"]')) {
-        $index++
-        $rid = [string]$sldId.GetAttribute('id', $script:NsR)
-        if ([string]::IsNullOrWhiteSpace($rid) -or -not $relTargets.ContainsKey($rid)) { continue }
-        $target = Resolve-PackageTarget -SourcePart 'ppt/presentation.xml' -Target $relTargets[$rid]
-        if ([string]::IsNullOrWhiteSpace($target)) { continue }
-        $map[$index] = $target
-    }
-    return $map
-}
 
 function Get-ShapeText {
     param([System.Xml.XmlElement]$Shape, [System.Xml.XmlNamespaceManager]$NamespaceManager)
@@ -377,7 +318,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zip = $null
 try {
     $zip = [System.IO.Compression.ZipFile]::Open($OutputPath, [System.IO.Compression.ZipArchiveMode]::Update)
-    $slidePartMap = Get-SlidePartNameMap -Zip $zip
+    $slidePartMap = Get-PresentationOrderSlidePartMap -Zip $zip
     foreach ($row in $reviewRows) {
         if ([string]$row.Slide -notmatch '^\d+$') {
             Add-ReportRow -Rows $reportRows -File $row.File -Slide 0 -Shape ([string]$row.Shape) -Issue 'FormulaRowInvalidSlide' -Details ("Slide='{0}'" -f $row.Slide)
@@ -455,7 +396,7 @@ try {
 
             Replace-ParagraphWithOmml -SlideDocument $slideDoc -Paragraph $paragraph -OmmlFragmentPath $fragmentPath
             Wrap-ShapeInAlternateContent -SlideDocument $slideDoc -Shape $shape -FallbackShape $fallbackShape
-            Write-ZipEntryText -Zip $zip -EntryName $entryName -Text (Convert-XmlDocumentToString -Document $slideDoc)
+            Write-ZipEntryText -Zip $zip -EntryName $entryName -Text (Convert-SlideXmlPackageText -Document $slideDoc) -CreateIfMissing
             Add-ReportRow -Rows $reportRows -File $row.File -Slide $slideNo -Shape $shapeName -Issue 'FormulaOmmlInserted' -Details ("fragment={0}; targetUnicodeMath={1}" -f $fragmentPath, $candidate.TargetUnicodeMath)
         } catch {
             Add-ReportRow -Rows $reportRows -File $row.File -Slide $slideNo -Shape $shapeName -Issue 'FormulaOmmlInsertFailed' -Details $_.Exception.Message

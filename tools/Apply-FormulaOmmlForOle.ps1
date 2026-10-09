@@ -110,21 +110,6 @@ function Write-Report {
     [System.IO.File]::WriteAllLines($Path, $csvLines, $utf8Bom)
 }
 
-function Write-ZipEntryText {
-    param($Zip, [string]$EntryName, [string]$Text)
-    $entry = $Zip.GetEntry($EntryName)
-    if ($null -eq $entry) { throw "Zip entry not found: $EntryName" }
-    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    $bytes = $utf8NoBom.GetBytes($Text)
-    $entry.Delete() | Out-Null
-    $newEntry = $Zip.CreateEntry($EntryName)
-    $stream = $newEntry.Open()
-    try {
-        $stream.Write($bytes, 0, $bytes.Length)
-    } finally {
-        $stream.Dispose()
-    }
-}
 
 function New-NamespaceManager {
     param([System.Xml.XmlDocument]$Document)
@@ -138,30 +123,6 @@ function New-NamespaceManager {
     return ,$ns
 }
 
-function Get-SlidePartNameMap {
-    param($Zip)
-    $presEntry = $Zip.GetEntry('ppt/presentation.xml')
-    if ($null -eq $presEntry) { throw 'ppt/presentation.xml missing' }
-    $reader = New-Object System.IO.StreamReader($presEntry.Open(), [System.Text.Encoding]::UTF8)
-    $presText = $reader.ReadToEnd()
-    $reader.Dispose()
-    $relsEntry = $Zip.GetEntry('ppt/_rels/presentation.xml.rels')
-    $reader = New-Object System.IO.StreamReader($relsEntry.Open(), [System.Text.Encoding]::UTF8)
-    $relsText = $reader.ReadToEnd()
-    $reader.Dispose()
-    $ridToPart = @{}
-    foreach ($match in [regex]::Matches($relsText, 'Id="(rId\d+)"[^>]*Target="(slides/slide\d+\.xml)"')) {
-        $ridToPart[$match.Groups[1].Value] = 'ppt/' + $match.Groups[2].Value
-    }
-    $map = @{}
-    $order = 0
-    foreach ($match in [regex]::Matches($presText, '<p:sldId[^>]*r:id="(rId\d+)"')) {
-        $order++
-        $rid = $match.Groups[1].Value
-        if ($ridToPart.ContainsKey($rid)) { $map[$order] = $ridToPart[$rid] }
-    }
-    return $map
-}
 
 function Test-IsProtectedScopeNode {
     # Shapes inside groups (invariant: groups are never modified) and inside
@@ -211,7 +172,7 @@ function Get-OleInventory {
     # then y, then x. Must stay in sync with the inventory that produced the
     # mapping CSV (Export-FormulaOleInventory ordering).
     param($Zip, [hashtable]$DocsByPart, [hashtable]$NssByPart)
-    $slidePartMap = Get-SlidePartNameMap -Zip $Zip
+    $slidePartMap = Get-PresentationOrderSlidePartMap -Zip $Zip
     $inventory = New-Object System.Collections.Generic.List[object]
     foreach ($slideNo in ($slidePartMap.Keys | Sort-Object)) {
         $entryName = [string]$slidePartMap[$slideNo]
@@ -498,20 +459,6 @@ function New-OleReplacementAlternateContent {
     return $alternate
 }
 
-function Convert-XmlDocumentToString {
-    param([System.Xml.XmlDocument]$Document)
-    $settings = New-Object System.Xml.XmlWriterSettings
-    $settings.Indent = $true
-    $settings.OmitXmlDeclaration = $true
-    $builder = New-Object System.Text.StringBuilder
-    $writer = [System.Xml.XmlWriter]::Create($builder, $settings)
-    try {
-        $Document.Save($writer)
-    } finally {
-        if ($null -ne $writer) { $writer.Dispose() }
-    }
-    return $builder.ToString()
-}
 
 $InputPath = [System.IO.Path]::GetFullPath($InputPath)
 $MappingCsv = [System.IO.Path]::GetFullPath($MappingCsv)

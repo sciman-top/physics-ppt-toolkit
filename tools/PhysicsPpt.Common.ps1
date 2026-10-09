@@ -565,6 +565,113 @@ function Resolve-PackageTarget {
     return Resolve-PackagePath -PackagePath $combined
 }
 
+function New-VersionedDeliveryRoot {
+    # Atomic claim of <root>/<stem>_v<N>: the highest _vN is the newest
+    # generation, and the directory creation itself is the claim under normal
+    # Windows filesystem semantics — a concurrent winner causes a re-scan
+    # retry. Callers either pass -InputItem (stem = file stem / directory
+    # name) or an already suffix-stripped -Stem plus -ReportsRoot.
+    param(
+        [System.IO.FileSystemInfo]$InputItem,
+        [string]$Stem = '',
+        [string]$ReportsRoot = ''
+    )
+    if ([string]::IsNullOrWhiteSpace($Stem)) {
+        if ($null -eq $InputItem) { throw 'New-VersionedDeliveryRoot requires -InputItem or -Stem.' }
+        $Stem = if ($InputItem.PSIsContainer) { $InputItem.Name } else { [System.IO.Path]::GetFileNameWithoutExtension($InputItem.Name) }
+    }
+    if ([string]::IsNullOrWhiteSpace($ReportsRoot)) { $ReportsRoot = Join-Path (Split-Path -Parent $PSScriptRoot) 'reports' }
+    if (-not (Test-Path -LiteralPath $ReportsRoot)) { New-Item -ItemType Directory -Path $ReportsRoot -Force | Out-Null }
+    for ($attempt = 0; $attempt -lt 100; $attempt++) {
+        $maxVersion = if (Test-Path -LiteralPath (Join-Path $ReportsRoot $Stem)) { 1 } else { 0 }
+        foreach ($dir in @(Get-ChildItem -LiteralPath $ReportsRoot -Directory -ErrorAction SilentlyContinue)) {
+            if ($dir.Name -match ('^' + [regex]::Escape($Stem) + '_v(\d+)$')) {
+                $maxVersion = [Math]::Max($maxVersion, [int]$Matches[1])
+            }
+        }
+        $candidate = Join-Path $ReportsRoot ('{0}_v{1}' -f $Stem, ($maxVersion + 1))
+        try {
+            New-Item -ItemType Directory -Path $candidate -ErrorAction Stop | Out-Null
+            return $candidate
+        } catch {
+            if (-not (Test-Path -LiteralPath $candidate -PathType Container)) { throw }
+        }
+    }
+    throw "Unable to claim a unique versioned delivery directory under $ReportsRoot."
+}
+
+function Convert-XmlDocumentToString {
+    # Canonical part serialization shared by the PPTX write-back scripts:
+    # indented, XML declaration omitted (Write-ZipEntryText decides the
+    # package-level declaration policy).
+    param([System.Xml.XmlDocument]$Document)
+    $settings = New-Object System.Xml.XmlWriterSettings
+    $settings.Indent = $true
+    $settings.OmitXmlDeclaration = $true
+    $builder = New-Object System.Text.StringBuilder
+    $writer = [System.Xml.XmlWriter]::Create($builder, $settings)
+    try {
+        $Document.Save($writer)
+    } finally {
+        if ($null -ne $writer) { $writer.Dispose() }
+    }
+    return $builder.ToString()
+}
+
+function Write-ZipEntryText {
+    # Idempotent XML-part write: UTF-8 without BOM to match PowerPoint's own
+    # output; Read-ZipEntryText detects either encoding on the read side.
+    # Replace-only unless -CreateIfMissing, so a wrong entry name fails loud
+    # instead of silently appending a new part.
+    param(
+        [System.IO.Compression.ZipArchive]$Zip,
+        [string]$EntryName,
+        [string]$Text,
+        [switch]$CreateIfMissing
+    )
+    $entry = $Zip.GetEntry($EntryName)
+    if ($null -eq $entry) {
+        if (-not $CreateIfMissing) { throw "Zip entry not found: $EntryName" }
+    } else {
+        $entry.Delete() | Out-Null
+    }
+    $newEntry = $Zip.CreateEntry($EntryName, [System.IO.Compression.CompressionLevel]::Optimal)
+    $stream = $newEntry.Open()
+    try {
+        $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($Text)
+        $stream.Write($bytes, 0, $bytes.Length)
+    } finally {
+        $stream.Dispose()
+    }
+}
+
+function Get-RowValue {
+    param(
+        [object]$Row,
+        [string]$Name,
+        [object]$Default = ''
+    )
+    if ($null -eq $Row) { return $Default }
+    $property = $Row.PSObject.Properties[$Name]
+    if ($null -eq $property -or $null -eq $property.Value) { return $Default }
+    return $property.Value
+}
+
+function Get-FileSha256Hex {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Get-TextSha256Hex {
+    param([Parameter(Mandatory = $true)][string]$Text)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Text))) -replace '-', '').ToLowerInvariant()
+    } finally {
+        $sha.Dispose()
+    }
+}
+
 function Test-PathInsideDirectory {
     param(
         [string]$ChildPath,
@@ -574,7 +681,6 @@ function Test-PathInsideDirectory {
     if ([string]::IsNullOrWhiteSpace($ChildPath) -or [string]::IsNullOrWhiteSpace($ParentPath)) {
         return $false
     }
-
     $childFull = [System.IO.Path]::GetFullPath($ChildPath).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
     $parentFull = [System.IO.Path]::GetFullPath($ParentPath).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
     if ($childFull.Equals($parentFull, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }

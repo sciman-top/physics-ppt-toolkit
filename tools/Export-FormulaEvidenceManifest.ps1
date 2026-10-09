@@ -43,17 +43,6 @@ $ErrorActionPreference = 'Stop'
 
 $script:Sha256Pattern = '^[A-Fa-f0-9]{64}$'
 
-function Get-Sha256TextLocal {
-    param([Parameter(Mandatory = $true)][string]$Text)
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($Text)
-        return ([System.BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
-    } finally {
-        $sha.Dispose()
-    }
-}
-
 function Get-RelativeManifestPath {
     param(
         [Parameter(Mandatory = $true)][string]$BaseDirectory,
@@ -231,7 +220,7 @@ foreach ($record in $records) {
     $evidenceHashInput += [string]$record.source.sourceSha256
     foreach ($entry in @($record.evidence.packageEntries)) { $evidenceHashInput += [string]$entry.sha256 }
 }
-$evidenceSetSha256 = Get-Sha256TextLocal -Text (($evidenceHashInput -join "`n"))
+$evidenceSetSha256 = Get-TextSha256Hex -Text (($evidenceHashInput -join "`n"))
 
 $manifest = [ordered]@{
     schemaVersion = 1
