@@ -91,8 +91,10 @@ Copy-Item -LiteralPath $InputPath -Destination $OutputPath -Force
 $pp = $null
 $pres = $null
 try {
-    $pp = New-PowerPointApplication
-    $pres = $pp.Presentations.Open($OutputPath, $script:MsoFalse, $script:MsoFalse, $script:MsoFalse)
+    # Application start and Open reject transiently while a previous
+    # automation instance is still tearing down; use the shared COM retry.
+    $pp = Invoke-WithComRetry -MaxRetries 3 -DelayMs 1500 -Action { New-PowerPointApplication }
+    $pres = Invoke-WithComRetry -MaxRetries 3 -DelayMs 1500 -Action { $pp.Presentations.Open($OutputPath, $script:MsoFalse, $script:MsoFalse, $script:MsoFalse) }
     $slideWidth = [double]$pres.PageSetup.SlideWidth
     $slideHeight = [double]$pres.PageSetup.SlideHeight
 

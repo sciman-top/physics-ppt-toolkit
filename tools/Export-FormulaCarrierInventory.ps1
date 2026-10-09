@@ -456,8 +456,10 @@ $ppt = $null
 $pres = $null
 $comMap = @{}
 try {
-    $ppt = New-PowerPointApplication
-    $pres = $ppt.Presentations.Open($inputFullPath, $true, $false, $false)
+    # Application start and Open reject transiently while a previous
+    # automation instance is still tearing down; use the shared COM retry.
+    $ppt = Invoke-WithComRetry -MaxRetries 3 -DelayMs 1500 -Action { New-PowerPointApplication }
+    $pres = Invoke-WithComRetry -MaxRetries 3 -DelayMs 1500 -Action { $ppt.Presentations.Open($inputFullPath, $true, $false, $false) }
     $comMap = Get-ComShapeMap -Presentation $pres
 }
 finally {

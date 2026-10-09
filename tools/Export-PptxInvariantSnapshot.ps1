@@ -290,8 +290,12 @@ $outputFullPath = [System.IO.Path]::GetFullPath($OutputPath)
 $powerPoint = $null
 $presentation = $null
 try {
-    $powerPoint = New-PowerPointApplication
-    $presentation = $powerPoint.Presentations.Open($inputFullPath, -1, -1, 0)
+    # Application start and Open are the two calls that reject transiently
+    # (RPC_E_CALL_REJECTED) while a previous automation instance is still
+    # tearing down; this tool runs right after Normalize quits PowerPoint in
+    # the workflow, so both get the shared COM retry.
+    $powerPoint = Invoke-WithComRetry -MaxRetries 3 -DelayMs 1500 -Action { New-PowerPointApplication }
+    $presentation = Invoke-WithComRetry -MaxRetries 3 -DelayMs 1500 -Action { $powerPoint.Presentations.Open($inputFullPath, -1, -1, 0) }
     $slides = @()
     for ($i = 1; $i -le $presentation.Slides.Count; $i++) {
         $slides += Get-SlideSnapshot -Slide $presentation.Slides.Item($i) -Index $i
