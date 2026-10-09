@@ -433,8 +433,6 @@ if (-not $?) { throw 'Formula context resolver fixture test failed.' }
 if (-not $?) { throw 'Formula OLE visual adjudication fixture test failed.' }
 & (Join-Path $root 'tools\Test-FormulaOfficeMathValidator.ps1')
 if (-not $?) { throw 'FormulaOfficeMathValidator fault-injection test failed.' }
-& (Join-Path $root 'tools\Test-FormulaPowerPointRepairHandling.ps1')
-if (-not $?) { throw 'PowerPoint repair-handling probe failed.' }
 & (Join-Path $root 'tools\Test-ClosedWorldCircuitBreaker.ps1')
 if (-not $?) { throw 'Closed-world false-acceptance circuit-breaker test failed.' }
 

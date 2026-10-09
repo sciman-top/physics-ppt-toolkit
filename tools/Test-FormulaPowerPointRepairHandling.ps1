@@ -9,6 +9,10 @@
   COM automation cannot prove what a human-facing "Open and Repair" dialog did,
   so a successful open is deliberately recorded as ManualRequired rather than
   Passed. The source fixture is hash-checked before and after the probe.
+
+  This probe launches the real PowerPoint COM host, so it is a standalone
+  diagnostic to run explicitly (it is not part of the PowerPoint-free minimum
+  gate Test-ToolkitFiles.ps1).
 #>
 [CmdletBinding()]
 param(
