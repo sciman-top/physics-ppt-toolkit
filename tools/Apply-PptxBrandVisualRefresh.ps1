@@ -109,7 +109,7 @@ if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
     Copy-Item -LiteralPath $PptxPath -Destination $workingPptx -Force
 }
 
-# --- palette: named roles resolved to hex by Convert-HexToRgbLong ----------
+# --- palette: named roles resolved to hex by Resolve-ColorSpecToRgbLong ----------
 # DividerRed/DividerBlue ARE the sanctioned config palette (emphasisRed /
 # sectionTitle) read live from config so dividers stay consistent with the
 # normalization toolkit; the remaining roles are brand-specific design
@@ -136,7 +136,7 @@ $script:Palette = @{
     DividerBlue  = [string]$brandConfig.colors.sectionTitle
 }
 
-function Convert-HexToRgbLong {
+function Resolve-ColorSpecToRgbLong {
     param([Parameter(Mandatory = $true)][string]$ColorSpec)
     if ($script:Palette.ContainsKey($ColorSpec)) {
         $ColorSpec = $script:Palette[$ColorSpec]
@@ -280,7 +280,7 @@ function Set-ParagraphLook {
         [string]$LatinFont = '微软雅黑',
         [int]$Bold = -2
     )
-    $Paragraph.Font.Color.RGB = Convert-HexToRgbLong $ColorSpec
+    $Paragraph.Font.Color.RGB = Resolve-ColorSpecToRgbLong $ColorSpec
     if ($Size -gt 0) { $Paragraph.Font.Size = $Size }
     if (-not [string]::IsNullOrWhiteSpace($FarEastFont)) { $Paragraph.Font.NameFarEast = $FarEastFont }
     if (-not [string]::IsNullOrWhiteSpace($LatinFont)) { $Paragraph.Font.Name = $LatinFont }
@@ -297,7 +297,7 @@ function Protect-KeptRuns {
         $index = $text.IndexOf($ExactText)
         if ($index -ge 0) {
             $characters = $Paragraph.Characters($index + 1, $ExactText.Length)
-            $characters.Font.Color.RGB = Convert-HexToRgbLong $ColorSpec
+            $characters.Font.Color.RGB = Resolve-ColorSpecToRgbLong $ColorSpec
             $characters.Font.Bold = -1
         }
     } catch { }
@@ -314,15 +314,15 @@ function Set-InfoLabelSplit {
         if ($separator -lt 0) { $separator = $text.IndexOf(':') }
         if ($separator -ge 0) {
             $label = $Paragraph.Characters(1, $separator + 1)
-            $label.Font.Color.RGB = Convert-HexToRgbLong $LabelColor
+            $label.Font.Color.RGB = Resolve-ColorSpecToRgbLong $LabelColor
             $label.Font.Bold = -1
             if ($text.Length -gt $separator + 1) {
                 $value = $Paragraph.Characters($separator + 2, $text.Length - $separator - 1)
-                $value.Font.Color.RGB = Convert-HexToRgbLong $ValueColor
+                $value.Font.Color.RGB = Resolve-ColorSpecToRgbLong $ValueColor
                 $value.Font.Bold = 0
             }
         } else {
-            $Paragraph.Font.Color.RGB = Convert-HexToRgbLong $ValueColor
+            $Paragraph.Font.Color.RGB = Resolve-ColorSpecToRgbLong $ValueColor
         }
     } catch { }
 }
@@ -608,9 +608,9 @@ function Update-DividerSlide {
             $textRange = $shape.TextFrame.TextRange
             $isSectionMark = ($trimmed -match '^(第[0-9０-９]+课时|拓展)$')
             if ($isSectionMark) {
-                $textRange.Font.Color.RGB = Convert-HexToRgbLong 'DividerRed'
+                $textRange.Font.Color.RGB = Resolve-ColorSpecToRgbLong 'DividerRed'
             } else {
-                $textRange.Font.Color.RGB = Convert-HexToRgbLong 'DividerBlue'
+                $textRange.Font.Color.RGB = Resolve-ColorSpecToRgbLong 'DividerBlue'
             }
             # Decorative voice matching the special pages: 华文行楷 for the
             # big standalone title, sized up from the old 54pt 雅黑 baseline.

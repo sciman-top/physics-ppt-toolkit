@@ -98,12 +98,8 @@ function Add-ReportRow {
     }) | Out-Null
 }
 
-function Write-Report {
-    param([System.Collections.Generic.List[object]]$Rows, [string]$Path)
-    $utf8Bom = New-Object System.Text.UTF8Encoding($true)
-    $csvLines = $Rows | ConvertTo-Csv -NoTypeInformation
-    [System.IO.File]::WriteAllLines($Path, $csvLines, $utf8Bom)
-}
+# Write-Report was a private re-implementation of the shared
+# Write-Utf8BomCsv (PhysicsPpt.Common.ps1) — call the shared one directly.
 
 function Convert-SlideXmlPackageText {
     # Slide-part flavor of Convert-XmlDocumentToString: this script writes
@@ -123,7 +119,7 @@ function Convert-SlideXmlPackageText {
     return "<?xml version=`"1.0`" encoding=`"UTF-8`" standalone=`"yes`"?>`r`n$($builder.ToString())"
 }
 
-function New-NamespaceManager {
+function New-TextScanNamespaceManager {
     param([System.Xml.XmlDocument]$Document)
     $ns = New-Object System.Xml.XmlNamespaceManager($Document.NameTable)
     $ns.AddNamespace('a', $script:NsA) | Out-Null
@@ -132,7 +128,7 @@ function New-NamespaceManager {
 }
 
 
-function Get-ShapeText {
+function Get-ShapeTextXml {
     param([System.Xml.XmlElement]$Shape, [System.Xml.XmlNamespaceManager]$NamespaceManager)
     $texts = New-Object System.Collections.Generic.List[string]
     foreach ($node in @($Shape.SelectNodes('.//a:t', $NamespaceManager))) {
@@ -165,7 +161,7 @@ function Find-TargetShape {
     $textMatches = New-Object System.Collections.Generic.List[object]
     foreach ($shape in @($Document.SelectNodes('//p:sp', $NamespaceManager))) {
         if (Test-IsProtectedScopeShape -Shape $shape) { continue }
-        $shapeNorm = Get-NormalizedFormulaText -Text (Get-ShapeText -Shape $shape -NamespaceManager $NamespaceManager)
+        $shapeNorm = Get-NormalizedFormulaText -Text (Get-ShapeTextXml -Shape $shape -NamespaceManager $NamespaceManager)
         $textHit = (-not [string]::IsNullOrWhiteSpace($formulaNorm) -and $shapeNorm.Contains($formulaNorm))
         $nameNode = $shape.SelectSingleNode('./p:nvSpPr/p:cNvPr', $NamespaceManager)
         $nameHit = ($null -ne $nameNode -and [string]$nameNode.GetAttribute('name') -eq $ShapeName)
@@ -307,7 +303,7 @@ foreach ($candidate in $candidateRows) {
 $reportRows = New-Object System.Collections.Generic.List[object]
 if ($reviewRows.Count -eq 0) {
     Add-ReportRow -Rows $reportRows -File $reviewFileNameForMatch -Slide 0 -Shape '(presentation)' -Issue 'NoFormulaWhitelistCandidate' -Details 'No matching ReviewWhitelistConversion rows found.'
-    Write-Report -Rows $reportRows -Path $ReportPath
+    Write-Utf8BomCsv -InputObject $reportRows -Path $ReportPath
     Write-Host "Report saved: $ReportPath"
     return
 }
@@ -375,7 +371,7 @@ try {
             $slideDoc = New-Object System.Xml.XmlDocument
             $slideDoc.PreserveWhitespace = $true
             $slideDoc.LoadXml($slideText)
-            $ns = New-NamespaceManager -Document $slideDoc
+            $ns = New-TextScanNamespaceManager -Document $slideDoc
             $shape = Find-TargetShape -Document $slideDoc -NamespaceManager $ns -ShapeName $shapeName -FormulaText ([string]$row.FormulaText)
             if ($null -eq $shape) {
                 Add-ReportRow -Rows $reportRows -File $row.File -Slide $slideNo -Shape $shapeName -Issue 'FormulaShapeNotFound' -Details ([string]$row.FormulaText)
@@ -407,6 +403,6 @@ try {
 }
 
 Add-ReportRow -Rows $reportRows -File $inputFileName -Slide 0 -Shape '(presentation)' -Issue 'SavedAs' -Details $OutputPath
-Write-Report -Rows $reportRows -Path $ReportPath
+Write-Utf8BomCsv -InputObject $reportRows -Path $ReportPath
 Write-Host "Report saved: $ReportPath"
 Write-Host "Output saved: $OutputPath"

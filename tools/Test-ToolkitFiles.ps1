@@ -197,6 +197,9 @@ $invalidFormulaIrIssues = @(Test-FormulaIrFixtureContract -Record $invalidFormul
 if ($invalidFormulaIrIssues.Count -eq 0) { throw 'Invalid FormulaIR fixture was accepted.' }
 
 # --- 2b. UnicodeMath parser fixture contract (executes the exporter's own parser) ---
+# Common is dotted early because the extracted parser functions call shared
+# classifiers (Get-PhysicsTokenRole); section 8 re-dots it harmlessly.
+. (Join-Path $root 'tools\PhysicsPpt.Common.ps1')
 $unicodeMathValidPath = Join-Path $root 'examples\fixtures\formula-unicodemath.valid.json'
 $unicodeMathInvalidPath = Join-Path $root 'examples\fixtures\formula-unicodemath.invalid.json'
 $unicodeMathValid = Get-Content -LiteralPath $unicodeMathValidPath -Raw -Encoding UTF8 | ConvertFrom-Json

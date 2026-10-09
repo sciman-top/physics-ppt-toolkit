@@ -17,22 +17,8 @@ function Get-PageNumber {
     return 0
 }
 
-function Test-UsablePageImage {
-    param([string]$Path)
-
-    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
-    $image = $null
-    try {
-        if ((Get-Item -LiteralPath $Path).Length -le 0) { return $false }
-        Add-Type -AssemblyName System.Drawing
-        $image = [System.Drawing.Image]::FromFile($Path)
-        return ($image.Width -gt 0 -and $image.Height -gt 0)
-    } catch {
-        return $false
-    } finally {
-        if ($null -ne $image) { $image.Dispose() }
-    }
-}
+# Test-UsablePageImage is shared and comes from PhysicsPpt.Common.ps1
+# (dot-sourced above) — do not re-declare it here.
 
 function Get-PageImageInventory {
     param([string]$Directory)

@@ -95,18 +95,8 @@ function Get-PropertySum {
     return $sum
 }
 
-function Test-UsablePageImage {
-    param([string]$Path)
-
-    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
-    try {
-        if ((Get-Item -LiteralPath $Path).Length -le 0) { return $false }
-        $info = Get-BasicImageInfo -Path $Path
-        return ($info.Width -gt 0 -and $info.Height -gt 0)
-    } catch {
-        return $false
-    }
-}
+# Test-UsablePageImage is shared and comes from PhysicsPpt.Common.ps1
+# (dot-sourced above) — do not re-declare it here.
 
 function Get-AuditIssueMaps {
     param($Rows)

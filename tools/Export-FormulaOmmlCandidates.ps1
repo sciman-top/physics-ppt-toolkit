@@ -350,15 +350,11 @@ function Parse-FormulaAst {
 }
 
 function Get-FormulaTokenRole {
+    # Gate contract: the gate extracts and executes parser functions from this
+    # file, so this name must stay defined here. The canonical classification
+    # table is Get-PhysicsTokenRole in PhysicsPpt.Common.ps1 — do not fork it.
     param([string]$Token)
-    if ($Token -cmatch '^[0-9]+(?:\.[0-9]+)?$') { return 'Number' }
-    if ($Token -cmatch '^[\u3400-\u9FFF]$') { return 'Chinese' }
-    if ($Token -cmatch '^[A-Za-z]+$' -or $Token -cmatch '^[\u0370-\u03FF]$') {
-        if ($Token -in @('J', 'kg', 'Pa', 'N', 'W', 'Hz', '℃')) { return 'Unit' }
-        return 'Variable'
-    }
-    if ($Token -in @('+', '-', '−', '×', '·', '⋅', '∙', '*', '=', ',', '.', '(', ')', '<', '>', '≤', '≥', '\/')) { return 'Operator' }
-    return 'Text'
+    return (Get-PhysicsTokenRole -Token $Token)
 }
 
 function Convert-AstToFormulaIrToken {

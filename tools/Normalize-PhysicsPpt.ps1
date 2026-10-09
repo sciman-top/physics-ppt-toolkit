@@ -357,27 +357,6 @@ function Get-NormalizeSignature {
     return [pscustomobject]@{ Signature = $signature; Payload = $payload }
 }
 
-function Test-PageImageSet {
-    param([string]$Directory, [int]$ExpectedCount)
-    if ($ExpectedCount -le 0 -or [string]::IsNullOrWhiteSpace($Directory) -or -not (Test-Path -LiteralPath $Directory)) { return $false }
-    $files = @(Get-ChildItem -LiteralPath $Directory -Filter '*.png' -File)
-    $numbers = New-Object System.Collections.Generic.List[int]
-    foreach ($file in $files) {
-        if ($file.BaseName -notmatch '^page-(\d+)$') { return $false }
-        if ($file.Length -le 0) { return $false }
-        try {
-            $imageInfo = Get-BasicImageInfo -Path $file.FullName
-            if ($imageInfo.Width -le 0 -or $imageInfo.Height -le 0) { return $false }
-        } catch {
-            return $false
-        }
-        $numbers.Add([int]$Matches[1]) | Out-Null
-    }
-    if ($numbers.Count -ne $ExpectedCount -or @($numbers | Sort-Object -Unique).Count -ne $numbers.Count) { return $false }
-    $numbers = @($numbers | Sort-Object)
-    return (($numbers | ForEach-Object { [string]$_ }) -join ',') -eq ((1..$ExpectedCount) -join ',')
-}
-
 function Test-ShapeUsesAutomaticSizing {
     param($Shape)
     try {
@@ -401,25 +380,8 @@ function Restart-PowerPointApplication {
     return Restart-PowerPointApplicationInternal -Current $Current -DelayMs $FileRetryDelayMs
 }
 
-function Get-ShapeText {
-    param($Shape)
-    try {
-        if ($null -ne $Shape.TextFrame2 -and $Shape.TextFrame2.HasText -eq $script:MsoTrue) {
-            return [string]$Shape.TextFrame2.TextRange.Text
-        }
-    } catch { }
-    return ''
-}
-
-function Get-ShapeName {
-    param($Shape)
-    try {
-        if ($null -ne $Shape -and -not [string]::IsNullOrWhiteSpace([string]$Shape.Name)) {
-            return [string]$Shape.Name
-        }
-    } catch { }
-    return '(unknown)'
-}
+# Get-ShapeTextCom / Get-ShapeName / Test-PageImageSet are shared and come
+# from PhysicsPpt.Common.ps1 (dot-sourced above) — do not re-declare them here.
 
 function Test-ShapeHasTable {
     param($Shape)
@@ -445,7 +407,7 @@ function Test-IsTitleShape {
     # Primary: PowerPoint placeholder type (most reliable)
     if (Test-IsPlaceholderTitleShape $Shape) { return $true }
     # Fallback heuristic: short text near the top of the slide
-    $text = Get-ShapeText $Shape
+    $text = Get-ShapeTextCom $Shape
     if ($text.Length -le 24 -and $Shape.Top -lt 90) { return $true }
     return $false
 }
@@ -457,7 +419,7 @@ function Test-IsSectionTitleSlide {
     $hasLargeVisual = $false
     foreach ($shape in $Slide.Shapes) {
         try {
-            $text = Get-ShapeText $shape
+            $text = Get-ShapeTextCom $shape
             if ($shape.TextFrame2.HasText -eq $script:MsoTrue -and -not [string]::IsNullOrWhiteSpace($text)) {
                 $textShapes++
                 $mainText = $text
@@ -481,7 +443,7 @@ function Get-SlideTextSummary {
     $textShapeCount = 0
     foreach ($shape in $Slide.Shapes) {
         try {
-            $text = Get-ShapeText $shape
+            $text = Get-ShapeTextCom $shape
             if (-not [string]::IsNullOrWhiteSpace($text)) {
                 $textShapeCount++
                 [void]$textBuilder.AppendLine($text)
@@ -623,7 +585,7 @@ function Test-IsVideoSlide {
         try {
             if ($shape.Type -eq $script:MsoMedia) { return $true }
         } catch { }
-        $text = Get-ShapeText $shape
+        $text = Get-ShapeTextCom $shape
         if ($null -ne $script:VideoKeywordPattern -and $text -match $script:VideoKeywordPattern) { return $true }
     }
     return $false
@@ -1846,7 +1808,7 @@ function Set-SectionTitleTextStyle {
         return
     }
     try {
-        $text = Get-ShapeText $Shape
+        $text = Get-ShapeTextCom $Shape
         $isExtensionSection = Test-IsExtensionSectionText -Text $text
         $targetColor = if ($isExtensionSection) { $script:Style.ColorExtensionTitle } else { $script:Style.ColorSectionTitle }
         $issue = if ($isExtensionSection) { 'ExtensionSectionTitleStyleFixed' } else { 'SectionTitleStyleFixed' }
@@ -2119,7 +2081,7 @@ function Get-TextShapeInfos {
         try {
             if ($shape.Type -eq $script:MsoGroup) { continue }
             if ($shape.TextFrame2.HasText -ne $script:MsoTrue) { continue }
-            $text = Get-ShapeText $shape
+            $text = Get-ShapeTextCom $shape
             if ([string]::IsNullOrWhiteSpace($text)) { continue }
             $left = [double]$shape.Left
             $top = [double]$shape.Top
@@ -2488,7 +2450,7 @@ function Update-SlideMasterStyle {
     try {
         $master = $Presentation.SlideMaster
         foreach ($shape in $master.Shapes) {
-            $text = Get-ShapeText $shape
+            $text = Get-ShapeTextCom $shape
             if ([string]::IsNullOrWhiteSpace($text)) { continue }
             $isTitle = Test-IsTitleShape $shape
             Set-TextRangeStyle -TextRange $shape.TextFrame2.TextRange `
@@ -2617,7 +2579,7 @@ function Invoke-NormalizeSlideShape {
         Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName -Issue 'RasterPicturePreserved' -Details 'Large picture detected; embedded text inside the bitmap is not rewritten automatically.'
     }
 
-    $text = Get-ShapeText $Shape
+    $text = Get-ShapeTextCom $Shape
     if (-not [string]::IsNullOrWhiteSpace($text)) {
         if ($ReportOnly -or $PreserveSlideStyle) {
             if (Test-IsFormulaCandidateText $text) {
@@ -2659,7 +2621,7 @@ function Normalize-Presentation {
         $cacheOutputReady = (Test-Path -LiteralPath $outFile) -and (Get-Item -LiteralPath $outFile).Length -gt 0
         $cacheArtifactsReady = $NoPdf -or ((Test-Path -LiteralPath $pdfFile) -and ((Get-Item -LiteralPath $pdfFile).Length -gt 0))
         if (-not [string]::IsNullOrWhiteSpace($ImageOutputDir)) {
-            $cacheArtifactsReady = $cacheArtifactsReady -and (Test-PageImageSet -Directory $cacheImageDir -ExpectedCount $cacheExpectedSlides)
+            $cacheArtifactsReady = $cacheArtifactsReady -and (Test-PageImageSet -ImageDir $cacheImageDir -ExpectedCount $cacheExpectedSlides)
         }
         if ($null -ne $cache -and $cacheOutputReady -and [string]$cache.signature -eq $signature.Signature -and
             [string]$cache.outputPath -eq $outFile -and $cacheArtifactsReady) {
@@ -2790,7 +2752,7 @@ function Normalize-Presentation {
             $cacheImageDir = if ([string]::IsNullOrWhiteSpace($ImageOutputDir)) { '' } else { Join-Path $ImageOutputDir $safeName }
             $cacheReady = (Test-Path -LiteralPath $outFile) -and (Get-Item -LiteralPath $outFile).Length -gt 0 -and $fileFailureIssues.Count -eq 0 -and
                 ($NoPdf -or ((Test-Path -LiteralPath $pdfFile) -and (Get-Item -LiteralPath $pdfFile).Length -gt 0)) -and
-                ([string]::IsNullOrWhiteSpace($ImageOutputDir) -or (Test-PageImageSet -Directory $cacheImageDir -ExpectedCount ([int]$pres.Slides.Count)))
+                ([string]::IsNullOrWhiteSpace($ImageOutputDir) -or (Test-PageImageSet -ImageDir $cacheImageDir -ExpectedCount ([int]$pres.Slides.Count)))
             if ($cacheReady) {
                 $cacheRecord = [ordered]@{
                     schemaVersion = 1

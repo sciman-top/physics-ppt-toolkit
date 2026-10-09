@@ -202,7 +202,7 @@ function Get-SlideRelationshipMap {
     return $map
 }
 
-function Test-IsFormulaCandidateText {
+function Test-IsFormulaCarrierText {
     param([string]$Text)
     $normalized = Get-NormalizedFormulaText -Text $Text
     if ([string]::IsNullOrWhiteSpace($normalized) -or $normalized.Length -gt 80) { return $false }
@@ -237,7 +237,7 @@ function Get-FormulaProfile {
     if ($hasUnexpectedChinese) { $reasons.Add('unexpected-chinese-text') | Out-Null }
     $risk = if ($reasons.Count -eq 0 -and ($hasEquation -or $hasDivision -or $hasKnownSubscript)) { 'LowRiskStandaloneText' } else { 'ReviewOnly' }
     return [pscustomobject]@{
-        IsCandidate = (Test-IsFormulaCandidateText -Text $Text)
+        IsCandidate = (Test-IsFormulaCarrierText -Text $Text)
         Normalized = $normalized
         Kind = $kind
         Risk = $risk

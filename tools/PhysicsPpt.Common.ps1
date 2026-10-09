@@ -73,6 +73,22 @@ function Get-NormalizedFormulaText {
     return (($Text -replace '\s+', '') -replace '＝', '=').Trim()
 }
 
+function Get-PhysicsTokenRole {
+    # Single source of truth for formula token classification (tokenizer §4.1
+    # roles). Export-FormulaOmmlCandidates.ps1 keeps a same-name wrapper in
+    # its own file because the toolkit gate extracts and executes the parser
+    # from there; the unit and operator tables below must not be forked.
+    param([string]$Token)
+    if ($Token -cmatch '^[0-9]+(?:\.[0-9]+)?$') { return 'Number' }
+    if ($Token -cmatch '^[\u3400-\u9FFF]$') { return 'Chinese' }
+    if ($Token -cmatch '^[A-Za-z]+$' -or $Token -cmatch '^[\u0370-\u03FF]$') {
+        if ($Token -in @('J', 'kg', 'Pa', 'N', 'W', 'Hz', '℃')) { return 'Unit' }
+        return 'Variable'
+    }
+    if ($Token -in @('+', '-', '−', '×', '·', '⋅', '∙', '*', '=', ',', '.', '(', ')', '<', '>', '≤', '≥', '\/')) { return 'Operator' }
+    return 'Text'
+}
+
 function Get-FormulaDetailValue {
     param([string]$Details, [string]$Key)
     if ([string]::IsNullOrWhiteSpace($Details)) { return '' }
@@ -386,6 +402,60 @@ function Get-BasicImageInfo {
     } finally {
         if ($null -ne $image) { $image.Dispose() }
     }
+}
+
+function Get-ShapeTextCom {
+    # COM shape text via TextFrame2. The XML-level counterpart
+    # (Get-ShapeTextXml in Apply-FormulaOmmlWhitelist.ps1) reads a:t nodes
+    # instead; the two are deliberately distinct — never merge them.
+    param($Shape)
+    try {
+        if ($null -ne $Shape.TextFrame2 -and $Shape.TextFrame2.HasText -eq -1) {
+            return [string]$Shape.TextFrame2.TextRange.Text
+        }
+    } catch { }
+    return ''
+}
+
+function Get-ShapeName {
+    param($Shape)
+    try {
+        if ($null -ne $Shape -and -not [string]::IsNullOrWhiteSpace([string]$Shape.Name)) {
+            return [string]$Shape.Name
+        }
+    } catch { }
+    return '(unknown)'
+}
+
+function Test-UsablePageImage {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    try {
+        if ((Get-Item -LiteralPath $Path).Length -le 0) { return $false }
+        $info = Get-BasicImageInfo -Path $Path
+        return ($info.Width -gt 0 -and $info.Height -gt 0)
+    } catch {
+        return $false
+    }
+}
+
+function Test-PageImageSet {
+    # Strict page-N.png completeness check: exactly one usable image per slide
+    # number 1..ExpectedCount. Guards reuse caches and review packets.
+    param([string]$ImageDir, [int]$ExpectedCount)
+
+    if ($ExpectedCount -le 0 -or [string]::IsNullOrWhiteSpace($ImageDir) -or -not (Test-Path -LiteralPath $ImageDir -PathType Container)) { return $false }
+    $files = @(Get-ChildItem -LiteralPath $ImageDir -Filter '*.png' -File)
+    $numbers = New-Object System.Collections.Generic.List[int]
+    foreach ($file in $files) {
+        if ($file.BaseName -notmatch '^page-(\d+)$') { return $false }
+        if (-not (Test-UsablePageImage -Path $file.FullName)) { return $false }
+        $numbers.Add([int]$Matches[1]) | Out-Null
+    }
+    if ($numbers.Count -ne $ExpectedCount -or @($numbers | Sort-Object -Unique).Count -ne $numbers.Count) { return $false }
+    $numbers = @($numbers | Sort-Object)
+    return (($numbers | ForEach-Object { [string]$_ }) -join ',') -eq ((1..$ExpectedCount) -join ',')
 }
 
 function Get-ImageDeltaPercent {

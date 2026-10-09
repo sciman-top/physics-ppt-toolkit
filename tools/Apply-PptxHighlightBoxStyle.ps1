@@ -161,7 +161,7 @@ if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
 $reportRows = New-Object System.Collections.Generic.List[object]
 $script:counters = @{ Changed = 0; AlreadyApplied = 0; GroupsSkipped = 0; Failed = 0 }
 
-function Get-ShapeSnapshot {
+function Get-ShapeStyleSnapshot {
     param($Shape)
     $fillRgb = -1
     $lineRgb = -1
@@ -233,7 +233,7 @@ function Set-HighlightBoxStyle {
     param($Shape, [int]$SlideNumber, [string]$ShapeName, [string]$Class)
     $isConclusion = $Class -eq 'Conclusion'
     $targetFill = if ($isConclusion) { $rgbConclusionFill } else { $rgbChipFill }
-    $before = Get-ShapeSnapshot -Shape $Shape
+    $before = Get-ShapeStyleSnapshot -Shape $Shape
     try {
         # Geometry first: it is the assignment most likely to be refused, and
         # failing before any write keeps the shape free of half-applied styles.
@@ -284,7 +284,7 @@ function Set-HighlightBoxStyle {
             -Result 'Failed' -Details ([string]$_.Exception.Message)
         return
     }
-    $after = Get-ShapeSnapshot -Shape $Shape
+    $after = Get-ShapeStyleSnapshot -Shape $Shape
     $changed = ($before.Fill -ne $after.Fill) -or ($before.LineColor -ne $after.LineColor) -or
         ([Math]::Abs($before.LineWeightPt - $after.LineWeightPt) -gt 0.01) -or
         ([Math]::Abs($before.CornerAdj - $after.CornerAdj) -gt 0.001)

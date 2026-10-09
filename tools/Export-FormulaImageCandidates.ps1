@@ -47,7 +47,7 @@ $ErrorActionPreference = 'Stop'
 # Convert-ToSafePathSegment comes from PhysicsPpt.Common.ps1; the shared version
 # preserves dots (deliverable convention, e.g. "13.2内能") instead of collapsing them.
 
-function Convert-ToDouble {
+function Convert-ToDoubleLenient {
     param([object]$Value)
     $text = [string]$Value
     if ([string]::IsNullOrWhiteSpace($text)) { return 0.0 }
@@ -73,10 +73,10 @@ function Get-FormulaImageAssessment {
 
     $score = 0
     $reasons = New-Object System.Collections.Generic.List[string]
-    $edgeDensity = Convert-ToDouble (Get-RowValue -Row $Row -Name 'EdgeDensity')
-    $colorDiversity = Convert-ToDouble (Get-RowValue -Row $Row -Name 'ColorDiversity')
-    $grayRatio = Convert-ToDouble (Get-RowValue -Row $Row -Name 'GrayRatio')
-    $transparentRatio = Convert-ToDouble (Get-RowValue -Row $Row -Name 'TransparentRatio')
+    $edgeDensity = Convert-ToDoubleLenient (Get-RowValue -Row $Row -Name 'EdgeDensity')
+    $colorDiversity = Convert-ToDoubleLenient (Get-RowValue -Row $Row -Name 'ColorDiversity')
+    $grayRatio = Convert-ToDoubleLenient (Get-RowValue -Row $Row -Name 'GrayRatio')
+    $transparentRatio = Convert-ToDoubleLenient (Get-RowValue -Row $Row -Name 'TransparentRatio')
     $uniqueColorBins = Convert-ToInt64 (Get-RowValue -Row $Row -Name 'UniqueColorBins')
     $pixels = Convert-ToInt64 (Get-RowValue -Row $Row -Name 'Pixels')
     $width = Convert-ToInt64 (Get-RowValue -Row $Row -Name 'Width')

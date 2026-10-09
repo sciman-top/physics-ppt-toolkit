@@ -91,23 +91,8 @@ function Add-AuditRow {
     }) | Out-Null
 }
 
-function Get-ShapeText {
-    param($Shape)
-    try {
-        if ($null -ne $Shape.TextFrame2 -and $Shape.TextFrame2.HasText -eq $script:MsoTrue) {
-            return [string]$Shape.TextFrame2.TextRange.Text
-        }
-    } catch { }
-    return ''
-}
-
-function Get-ShapeName {
-    param($Shape)
-    try {
-        if (-not [string]::IsNullOrWhiteSpace([string]$Shape.Name)) { return [string]$Shape.Name }
-    } catch { }
-    return '(unknown)'
-}
+# Get-ShapeTextCom / Get-ShapeName are shared and come from
+# PhysicsPpt.Common.ps1 (dot-sourced above) — do not re-declare them here.
 
 function Get-ShapeTypeName {
     param($Shape)
@@ -410,7 +395,7 @@ try {
                 $height = [double]$shape.Height
                 $right = $left + $width
                 $bottom = $top + $height
-                $text = Get-ShapeText -Shape $shape
+                $text = Get-ShapeTextCom -Shape $shape
                 $fontSize = Get-TextFontSize -Shape $shape
                 $fontName = Get-TextFontName -Shape $shape
                 $hasText = -not [string]::IsNullOrWhiteSpace($text)

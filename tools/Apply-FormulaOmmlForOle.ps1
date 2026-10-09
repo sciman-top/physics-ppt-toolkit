@@ -99,19 +99,10 @@ function Add-ReportRow {
     }) | Out-Null
 }
 
-function Write-Report {
-    param($Rows, [string]$Path)
-    $parent = Split-Path -Parent $Path
-    if (-not [string]::IsNullOrWhiteSpace($parent) -and -not (Test-Path -LiteralPath $parent)) {
-        New-Item -ItemType Directory -Path $parent -Force | Out-Null
-    }
-    $utf8Bom = New-Object System.Text.UTF8Encoding($true)
-    $csvLines = @($Rows | ConvertTo-Csv -NoTypeInformation | ForEach-Object { [string]$_ })
-    [System.IO.File]::WriteAllLines($Path, $csvLines, $utf8Bom)
-}
+# Write-Report duplicated the shared Write-Utf8BomCsv (PhysicsPpt.Common.ps1),
+# which also creates the parent directory — call the shared one directly.
 
-
-function New-NamespaceManager {
+function New-SlideXmlNamespaceManager {
     param([System.Xml.XmlDocument]$Document)
     $ns = New-Object System.Xml.XmlNamespaceManager($Document.NameTable)
     $ns.AddNamespace('a', $script:NsA)
@@ -179,7 +170,7 @@ function Get-OleInventory {
         $doc = New-Object System.Xml.XmlDocument
         $doc.PreserveWhitespace = $true
         $doc.LoadXml((Read-ZipEntryText -Zip $Zip -EntryName $entryName))
-        $ns = New-NamespaceManager -Document $doc
+        $ns = New-SlideXmlNamespaceManager -Document $doc
         $DocsByPart[$entryName] = $doc
         $NssByPart[$entryName] = $ns
         # Target OLE blocks at spTree level only. PowerPoint 2016+ stores each
@@ -220,17 +211,8 @@ function Get-OleInventory {
     return $sorted
 }
 
-function Get-OmmlRunRole {
-    param([string]$Text)
-    if ([string]$Text -cmatch '^[0-9]+(?:\.[0-9]+)?$') { return 'Number' }
-    if ([string]$Text -cmatch '^[\u3400-\u9FFF]$') { return 'Chinese' }
-    if ([string]$Text -cmatch '^[A-Za-z]+$' -or [string]$Text -cmatch '^[\u0370-\u03FF]$') {
-        if ([string]$Text -in @('J', 'kg', 'Pa', 'N', 'W', 'Hz', '℃')) { return 'Unit' }
-        return 'Variable'
-    }
-    if ([string]$Text -in @('+', '-', '−', '×', '·', '⋅', '∙', '*', '=', ',', '.', '(', ')', '<', '>', '≤', '≥')) { return 'Operator' }
-    return 'Text'
-}
+# Run-role classification is shared: Get-PhysicsTokenRole in
+# PhysicsPpt.Common.ps1 (same table the OMML exporter's tokenizer uses).
 
 function Convert-OmmlFragmentDocument {
     # Restyle an exporter fragment to the deck-native math convention.  The
@@ -251,7 +233,7 @@ function Convert-OmmlFragmentDocument {
     $frag = New-Object System.Xml.XmlDocument
     $frag.PreserveWhitespace = $false
     $frag.Load($FragmentPath)
-    $ns = New-NamespaceManager -Document $frag
+    $ns = New-SlideXmlNamespaceManager -Document $frag
 
     foreach ($run in @($frag.SelectNodes('//m:r', $ns))) {
         $mRPr = $run.SelectSingleNode('./m:rPr', $ns)
@@ -270,7 +252,7 @@ function Convert-OmmlFragmentDocument {
         }
         $runTextNode = $run.SelectSingleNode('./m:t', $ns)
         $runText = if ($null -ne $runTextNode) { [string]$runTextNode.InnerText } else { '' }
-        $role = Get-OmmlRunRole -Text $runText
+        $role = Get-PhysicsTokenRole -Token $runText
 
         $isSubscript = $false
         $ancestor = $run.ParentNode
@@ -694,5 +676,5 @@ try {
 }
 
 Add-ReportRow -Rows $reportRows -File $inputFileName -Slide 0 -Shape '(presentation)' -Issue 'SavedAs' -Details $OutputPath
-Write-Report -Rows $reportRows -Path $ReportPath
+Write-Utf8BomCsv -InputObject $reportRows -Path $ReportPath
 Write-Host "Report saved: $ReportPath"

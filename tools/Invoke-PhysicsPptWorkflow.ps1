@@ -811,36 +811,10 @@ function Get-PageImageCount {
     return @(Get-ChildItem -LiteralPath $ImageDir -Filter 'page-*.png' -File).Count
 }
 
-function Test-UsablePageImage {
-    param([string]$Path)
+# Test-UsablePageImage / Test-PageImageSet are shared and come from
+# PhysicsPpt.Common.ps1 (dot-sourced above) — do not re-declare them here.
 
-    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
-    try {
-        if ((Get-Item -LiteralPath $Path).Length -le 0) { return $false }
-        $info = Get-BasicImageInfo -Path $Path
-        return ($info.Width -gt 0 -and $info.Height -gt 0)
-    } catch {
-        return $false
-    }
-}
-
-function Test-PageImageSet {
-    param([string]$ImageDir, [int]$ExpectedCount)
-
-    if ($ExpectedCount -le 0 -or [string]::IsNullOrWhiteSpace($ImageDir) -or -not (Test-Path -LiteralPath $ImageDir -PathType Container)) { return $false }
-    $files = @(Get-ChildItem -LiteralPath $ImageDir -Filter '*.png' -File)
-    $numbers = New-Object System.Collections.Generic.List[int]
-    foreach ($file in $files) {
-        if ($file.BaseName -notmatch '^page-(\d+)$') { return $false }
-        if (-not (Test-UsablePageImage -Path $file.FullName)) { return $false }
-        $numbers.Add([int]$Matches[1]) | Out-Null
-    }
-    if ($numbers.Count -ne $ExpectedCount -or @($numbers | Sort-Object -Unique).Count -ne $numbers.Count) { return $false }
-    $numbers = @($numbers | Sort-Object)
-    return (($numbers | ForEach-Object { [string]$_ }) -join ',') -eq ((1..$ExpectedCount) -join ',')
-}
-
-function Get-FileSha256 {
+function Get-FileSha256OrNull {
     param([string]$Path)
     if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '' }
     try { return (Get-FileSha256Hex -Path $Path) } catch { return '' }
@@ -1055,7 +1029,7 @@ function Test-PreparedPacketMatchesCurrent {
                 $packetPath = [string](Get-ObjectPropertyValue -Object $packetPage -PropertyName $pair[0] -DefaultValue '')
                 if (-not [string]::Equals($packetPath, $pair[1], [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
                 $packetHash = [string](Get-ObjectPropertyValue -Object $packetPage -PropertyName $pair[2] -DefaultValue '')
-                if ([string]::IsNullOrWhiteSpace($packetHash) -or (Get-FileSha256 -Path $pair[1]) -ne $packetHash) { return $false }
+                if ([string]::IsNullOrWhiteSpace($packetHash) -or (Get-FileSha256OrNull -Path $pair[1]) -ne $packetHash) { return $false }
             }
         }
     }
@@ -1103,18 +1077,18 @@ function Get-ExistingPreparedAiEvidence {
         $matchingKey = @($preparedByInput.Keys | Where-Object { [string]::Equals([string]$_, $file.FullName, [System.StringComparison]::OrdinalIgnoreCase) })
         if ($matchingKey.Count -ne 1) { return $empty }
         $preparedFile = $preparedByInput[$matchingKey[0]]
-        if ([string](Get-ObjectPropertyValue -Object $preparedFile -PropertyName 'inputSha256' -DefaultValue '') -ne (Get-FileSha256 -Path $file.FullName)) { return $empty }
+        if ([string](Get-ObjectPropertyValue -Object $preparedFile -PropertyName 'inputSha256' -DefaultValue '') -ne (Get-FileSha256OrNull -Path $file.FullName)) { return $empty }
 
         $normalizedPath = [string](Get-ObjectPropertyValue -Object $preparedFile -PropertyName 'normalizedPptx' -DefaultValue '')
         $normalizedHash = [string](Get-ObjectPropertyValue -Object $preparedFile -PropertyName 'normalizedPptxSha256' -DefaultValue '')
         if ([string]::IsNullOrWhiteSpace($normalizedPath) -or [string]::IsNullOrWhiteSpace($normalizedHash) -or
-            (Get-FileSha256 -Path $normalizedPath) -ne $normalizedHash) { return $empty }
+            (Get-FileSha256OrNull -Path $normalizedPath) -ne $normalizedHash) { return $empty }
 
         if ($Mode -in @('NormalizeAndPdf', 'ForceRebuild')) {
             $pdfPath = [string](Get-ObjectPropertyValue -Object $preparedFile -PropertyName 'pdf' -DefaultValue '')
             $pdfHash = [string](Get-ObjectPropertyValue -Object $preparedFile -PropertyName 'pdfSha256' -DefaultValue '')
             if ([string]::IsNullOrWhiteSpace($pdfPath) -or [string]::IsNullOrWhiteSpace($pdfHash) -or
-                (Get-FileSha256 -Path $pdfPath) -ne $pdfHash) { return $empty }
+                (Get-FileSha256OrNull -Path $pdfPath) -ne $pdfHash) { return $empty }
         }
 
         $validation = Get-ObjectPropertyValue -Object $preparedFile -PropertyName 'validation' -DefaultValue $null
@@ -1513,13 +1487,13 @@ function New-Manifest {
                 displayName = $identity.displayName
                 outputStem = $safeName
             inputBytes = Get-FileLength -Path $file.FullName
-            inputSha256 = Get-FileSha256 -Path $file.FullName
+            inputSha256 = Get-FileSha256OrNull -Path $file.FullName
             normalizedPptx = if ($saved) { $pptxPath } elseif ($Mode -eq 'CheckOnly') { $null } else { $pptxPath }
             normalizedPptxBytes = Get-FileLength -Path $pptxPath
-            normalizedPptxSha256 = Get-FileSha256 -Path $pptxPath
+            normalizedPptxSha256 = Get-FileSha256OrNull -Path $pptxPath
             pdf = if ($pdf) { $pdfPath } elseif ($Mode -in @('CheckOnly', 'SafeNormalize')) { $null } else { $pdfPath }
             pdfBytes = Get-FileLength -Path $pdfPath
-            pdfSha256 = Get-FileSha256 -Path $pdfPath
+            pdfSha256 = Get-FileSha256OrNull -Path $pdfPath
             pageImages = if ($images) { $imageDir } elseif ($Mode -eq 'CheckOnly' -or -not $IncludeReviewArtifacts) { $null } else { $imageDir }
             sourcePageImages = if ($IncludeReviewArtifacts) { $sourceImageDir } else { $null }
             contactSheet = $contactSheet
@@ -2888,7 +2862,7 @@ if ($BrandRefresh -or $HighlightBox) {
                 $expectedSlides = Get-ObjectPropertyValue -Object (Get-ObjectPropertyValue -Object $mf -PropertyName 'validation' -DefaultValue $null) -PropertyName 'expectedSlides' -DefaultValue $null
                 $mf.pdf = $finalPdf
                 $mf.pdfBytes = Get-FileLength -Path $finalPdf
-                $mf.pdfSha256 = Get-FileSha256 -Path $finalPdf
+                $mf.pdfSha256 = Get-FileSha256OrNull -Path $finalPdf
                 $validation = Get-ObjectPropertyValue -Object $mf -PropertyName 'validation' -DefaultValue $null
                 if ($null -ne $validation) {
                     $validation.pdfPageCount = $finalPdfPageCount
