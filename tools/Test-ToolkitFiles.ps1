@@ -559,6 +559,14 @@ foreach ($rule in $formulaWhitelist) {
     } catch {
         throw "Config formulaWhitelist sourcePattern is invalid: $($rule.sourcePattern)"
     }
+    # Every target must render through the canonical parser: a config typo
+    # would otherwise only fail closed mid-production batch.
+    $renderThrew = $false
+    $ommlFragment = $null
+    try { $ommlFragment = New-OmmlFragment -UnicodeMath ([string]$rule.targetUnicodeMath) } catch { $renderThrew = $true }
+    if ($renderThrew -or $null -eq $ommlFragment -or $ommlFragment.OuterXml -notmatch ':oMath') {
+        throw ("Config formulaWhitelist targetUnicodeMath is not renderable by the canonical parser: {0} => {1}" -f $rule.name, $rule.targetUnicodeMath)
+    }
 }
 
 # Strong layout constraint for reports/: the root may only contain versioned
@@ -1077,6 +1085,39 @@ foreach ($oleIdCase in $oleIdProbeCases) {
         throw ("OLE block id probe failed for {0}: expected id {1}, got {2}." -f $oleIdCase[0], $oleIdCase[2], $oleIdActual)
     }
 }
+
+# Line-layout guard decision probe: the wrap-point comparison is the last
+# defense against same-geometry re-wraps that hide sibling answer text
+# (slide 16 blank-collision class). The COM capture (Lines()) is real-host
+# only, but the decision semantics must hold: an unavailable probe stays
+# inert, and any line-count or per-line text change is a relayout.
+$layoutDecisionText = ''
+foreach ($layoutFnName in @('Test-TextRangeLayoutUnchanged', 'Get-TextRangeLayoutChangeText', 'Get-AutoSizeGeometryDrift')) {
+    $layoutFnAst = $normalizeReorderAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $layoutFnName }, $true) | Select-Object -First 1
+    if ($null -eq $layoutFnAst) { throw "Normalize guard function not found for the behavioral probe: $layoutFnName" }
+    $layoutDecisionText += "`n" + $layoutFnAst.Extent.Text
+}
+Invoke-Expression $layoutDecisionText
+$layoutBefore = @('答：', 'A', 'B')
+if (-not (Test-TextRangeLayoutUnchanged -Before $layoutBefore -After @('答：', 'A', 'B'))) { throw 'Line-layout probe: identical layouts must be unchanged.' }
+if (-not (Test-TextRangeLayoutUnchanged -Before $null -After $null)) { throw 'Line-layout probe: an unavailable capture must stay inert (unchanged).' }
+if (Test-TextRangeLayoutUnchanged -Before $layoutBefore -After @('答：', 'A')) { throw 'Line-layout probe: line-count change must be detected as a relayout.' }
+if (Test-TextRangeLayoutUnchanged -Before $layoutBefore -After @('答：', 'A、', 'B')) { throw 'Line-layout probe: same-count per-line text change must be detected as a relayout.' }
+$layoutCountChangeText = Get-TextRangeLayoutChangeText -Before $layoutBefore -After @('答：', 'A')
+if ($layoutCountChangeText -notmatch 'rendered lines 3 -> 2; first changed line 3') { throw "Line-layout probe: unexpected count-change report: $layoutCountChangeText" }
+$layoutTextChangeReport = Get-TextRangeLayoutChangeText -Before $layoutBefore -After @('答：', 'A、', 'B')
+if ($layoutTextChangeReport -notmatch 'first changed line 2') { throw "Line-layout probe: unexpected same-count change report: $layoutTextChangeReport" }
+
+# AutoSize geometry drift probe: the rollback trigger measures the max
+# per-axis delta across Left/Top/Width/Height. A partial-axis rewrite or an
+# average would silently let an AutoSize reflow through (18.2 AutoSize class).
+$driftShape = [pscustomobject]@{ Left = 100.0; Top = 50.0; Width = 300.0; Height = 80.0 }
+$zeroDrift = Get-AutoSizeGeometryDrift -Shape $driftShape -Left 100.0 -Top 50.0 -Width 300.0 -Height 80.0
+if ([Math]::Abs([double]$zeroDrift) -gt 0.0) { throw 'Geometry drift probe: identical geometry must yield zero drift.' }
+$axisDrift = Get-AutoSizeGeometryDrift -Shape $driftShape -Left 100.06 -Top 50.0 -Width 300.0 -Height 80.0
+if ([Math]::Abs([double]$axisDrift - 0.06) -gt 0.000001) { throw "Geometry drift probe: single-axis drift mismatch: $axisDrift" }
+$maxAxisDrift = Get-AutoSizeGeometryDrift -Shape $driftShape -Left 99.0 -Top 50.0 -Width 300.5 -Height 80.0
+if ([Math]::Abs([double]$maxAxisDrift - 1.0) -gt 0.000001) { throw "Geometry drift probe: max-across-axes semantics violated: $maxAxisDrift" }
 
 $aiImportContent = Get-Content -LiteralPath (Join-Path $root 'tools\Import-PptxAiReviewResult.ps1') -Raw -Encoding UTF8
 if ($aiImportContent -match 'PowerPoint\.Application|Presentations\.Open|SaveAs|Normalize-PhysicsPpt') { throw 'AI review import must remain read-only and must not access PPTX automation.' }
