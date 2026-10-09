@@ -16,35 +16,36 @@ A Windows toolkit for normalizing, auditing, and exporting junior-high physics P
 
 ```text
 physics-ppt-toolkit/
-├─ README.md
-├─ docs/
+├─ README.md / AGENTS.md / CLAUDE.md
+├─ docs/                                  13 篇规范、SOP 与路线图
+│  ├─ 产品需求与工程路线图.md            产品边界单一事实源
 │  ├─ 初中物理PPT统一排版规范.md
 │  ├─ 使用方法.md
-│  ├─ GitHub远端迁移说明.md
-│  ├─ PPT母版制作说明.md
 │  ├─ 自动化边界与风险控制.md
-│  └─ 公式处理说明.md
+│  ├─ 编码与兼容性规范.md
+│  ├─ PPT母版制作说明.md
+│  ├─ GitHub远端迁移说明.md
+│  └─ 公式四篇（处理说明 / OLE转换执行计划 / 识别转换实施计划 / 排版优化路线图）
+│     与 媒体优化路线图、公式GoldSet编制SOP
 ├─ config/
-│  ├─ physics-ppt-style.config.json
-│  ├─ presentation-snapshot.schema.json
-│  └─ invariant-comparison.schema.json
-├─ tools/
-│  ├─ Normalize-PhysicsPpt.ps1
-│  ├─ Report-PhysicsPptStyle.ps1
-│  ├─ Invoke-PhysicsPptWorkflow.ps1
-│  ├─ Export-PptxInvariantSnapshot.ps1
-│  ├─ Compare-PptxInvariantSnapshot.ps1
-│  ├─ Export-PptxAiReviewPacket.ps1
-│  ├─ Build-PptxAiReviewResult.ps1
-│  ├─ Import-PptxAiReviewResult.ps1
-│  └─ Test-ToolkitFiles.ps1
-├─ vba/
-│  ├─ PhysicsPptCommon.bas
-│  ├─ PhysicsPptNormalize.bas
-│  ├─ PhysicsPptReportOnly.bas
-│  └─ ApplyPhysicsPptMasterStyle.bas
-└─ examples/
-   └─ sample-run-commands.ps1
+│  ├─ physics-ppt-style.config.json       样式运行配置（含公式白名单）
+│  └─ *.schema.json                       快照/证据类 schema（按功能启用）
+├─ tools/                                 PowerShell 工具链
+│  ├─ Invoke-PhysicsPptWorkflow.ps1       工作流编排入口
+│  ├─ Normalize-PhysicsPpt.ps1            核心规范化实现
+│  ├─ PhysicsPpt.Common.ps1               COM 边界与公共助手
+│  ├─ Apply-PptxBrandVisualRefresh.ps1    品牌视觉刷新（链式步骤）
+│  ├─ Apply-PptxHighlightBoxStyle.ps1     强调框统一（链式步骤）
+│  ├─ Export-Pptx* / Compare-Pptx*        视觉审查、不变量快照与 AI 复核包
+│  ├─ *Formula*.ps1                       公式盘点/候选/白名单/OMML 写回管线
+│  ├─ FormulaOfficeMathValidator/         .NET Open XML 结构校验器
+│  ├─ Optimize-PptxMedia.ps1              媒体优化（按功能启用）
+│  └─ Test-ToolkitFiles.ps1               最低门禁
+├─ vba/                                   离线 VBA 备用实现（不读取 JSON）
+├─ examples/                              示例命令与测试 fixture
+├─ manual/                                宿主 AI 只读视觉复核 skill
+├─ PPTX/                                  真实样本资产
+└─ 一键*.cmd                              三个一键入口
 ```
 
 ---
@@ -80,10 +81,10 @@ cd .\physics-ppt-toolkit
   -OpenGeneratedPptx
 ```
 
-默认输出到 `reports/<源PPTX文件名>/`（每个源 PPT 一个同名目录，最终交付物在其 `01_交付物/` 中一眼可见），结构如下：
+默认输出到版次化交付目录 `reports/<课件身份>_v<N>/`：每次运行自动原子认领下一个版次号，目录号最大的即最新交付，旧版目录保留作回滚对照。`reports/` 为版次化交付专用根（只允许 `<课件身份>_v<N>` 目录与 `_archive`，门禁强制检查）；需要自定义输出位置时用 `-OutputRoot` 显式指向 `reports/` 之外的目录。单个交付目录结构如下（节选）：
 
 ```text
-reports/13.2内能（王耀强）/
+reports/13.2内能（王耀强）_v12/
 ├─ 00_检查报告/
 ├─ 01_交付物/   （规范化 PPTX 与同名导出 PDF 同目录）
 ├─ 03_原始备份/

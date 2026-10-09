@@ -2,17 +2,17 @@
 
 本文说明如何把 Physics PPT Toolkit 迁移到 GitHub，并在另一台电脑上拉取使用。
 
+> **状态（2026-10-09）**：迁移已完成。远端 `origin` 已配置为 `https://github.com/sciman-top/physics-ppt-toolkit.git` 并与本地 `main` 同步。第 2–6 节保留作迁移前的历史快照与建仓方法记录；第 7–8 节（新电脑拉取与验证、回滚）仍然适用。
+
 ## 1. 推荐仓库名
 
 - GitHub 仓库名：`physics-ppt-toolkit`
 - 显示名：`Physics PPT Toolkit`
 - 简介：`Windows toolkit for normalizing, auditing, and exporting junior-high physics PowerPoint lessons.`
 
-## 2. 当前仓库状态
+## 2. 迁移前状态快照
 
-截至 2026-06-29，本地仓库存在以下迁移风险：
-
-- 当前没有配置 Git 远端。
+截至 2026-06-29（迁移决策时），本地仓库存在以下风险：
 - GitHub CLI `gh` 已安装，但需要先完成 `gh auth login`。
 - Git LFS 已安装。
 - Git 对象库约 `7.47 GiB`。
