@@ -565,6 +565,27 @@ function Resolve-PackageTarget {
     return Resolve-PackagePath -PackagePath $combined
 }
 
+function Get-CanonicalDeckStem {
+    # Strip workflow stage suffixes (.normalized/.brand/.callout) from a deck
+    # file name, repeatedly, so compound lineage names (X.brand.callout) and
+    # re-run inputs resolve to the clean <deck> stem. Deliveries must keep the
+    # reports/<deck>_v<N> convention: a letter directly before _v<N> is a
+    # layout-gate violation, which a half-stripped stem would produce.
+    param([Parameter(Mandatory = $true)][string]$FileName)
+    $stem = [System.IO.Path]::GetFileNameWithoutExtension($FileName)
+    $changed = $true
+    while ($changed) {
+        $changed = $false
+        foreach ($stageSuffix in @('.normalized', '.brand', '.callout')) {
+            if ($stem.EndsWith($stageSuffix)) {
+                $stem = $stem.Substring(0, $stem.Length - $stageSuffix.Length)
+                $changed = $true
+            }
+        }
+    }
+    return $stem
+}
+
 function New-VersionedDeliveryRoot {
     # Atomic claim of <root>/<stem>_v<N>: the highest _vN is the newest
     # generation, and the directory creation itself is the claim under normal

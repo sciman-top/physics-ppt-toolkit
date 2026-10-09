@@ -934,6 +934,29 @@ foreach ($oleMappingIrToken in @('ApprovedMathTypeOleGoldSet', 'CandidateOnly', 
 $commonLibContent = Get-Content -LiteralPath (Join-Path $root 'tools\PhysicsPpt.Common.ps1') -Raw -Encoding UTF8
 if ($commonLibContent -notmatch [regex]::Escape('function Get-OleEquationCjkFingerprint')) { throw 'Common library is missing Get-OleEquationCjkFingerprint.' }
 $fingerprintCommonAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'tools\PhysicsPpt.Common.ps1'), [ref]$null, [ref]$null)
+
+# Deck-stem canonicalization probe: stage-suffix stripping must fully resolve
+# compound lineage names (X.brand.callout) to the clean stem. A half-stripped
+# stem (X.brand) yields reports/X.brand_v<N>, a layout-gate violation
+# (a letter directly before _vN).
+$stemFunctionAst = $fingerprintCommonAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-CanonicalDeckStem' }, $true) | Select-Object -First 1
+if ($null -eq $stemFunctionAst) { throw 'Get-CanonicalDeckStem function definition not found for the behavioral probe.' }
+Invoke-Expression $stemFunctionAst.Extent.Text
+$stemProbeCases = @(
+    @('plain deck stem', '13.3比热容（王耀强）.pptx', '13.3比热容（王耀强）'),
+    @('normalized input', 'X.normalized.pptx', 'X'),
+    @('brand input', 'X.brand.pptx', 'X'),
+    @('callout input', 'X.callout.pptx', 'X'),
+    @('compound lineage input', 'X.brand.callout.pptx', 'X'),
+    @('full lineage input', 'X.normalized.brand.callout.pptx', 'X')
+)
+foreach ($stemCase in $stemProbeCases) {
+    $stemActual = Get-CanonicalDeckStem -FileName ([string]$stemCase[1])
+    if ([string]$stemActual -cne [string]$stemCase[2]) {
+        throw ("Deck-stem probe failed for {0}: expected '{1}', got '{2}'." -f $stemCase[0], $stemCase[2], $stemActual)
+    }
+}
+
 $fingerprintFunctionAst = $fingerprintCommonAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-OleEquationCjkFingerprint' }, $true) | Select-Object -First 1
 if ($null -eq $fingerprintFunctionAst) { throw 'Get-OleEquationCjkFingerprint function definition not found for the behavioral probe.' }
 Invoke-Expression $fingerprintFunctionAst.Extent.Text

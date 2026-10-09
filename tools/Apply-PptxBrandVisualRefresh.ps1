@@ -74,16 +74,12 @@ if (-not (Test-Path -LiteralPath $PptxPath)) {
     throw "Input PPTX not found: $PptxPath"
 }
 
-$stem = [System.IO.Path]::GetFileNameWithoutExtension($PptxPath)
+$stem = Get-CanonicalDeckStem -FileName $PptxPath
 # Re-running on an already branded file keeps the canonical output name and
-# the same version lineage instead of compounding '.brand.brand'. The
-# normalized chain head is the primary input, so its '.normalized' suffix is
-# stripped as well: deliveries must keep the <deck>_v<N> directory convention
-# (a letter directly before _v<N> is a layout-gate violation).
-if ($stem.EndsWith('.brand.callout')) { $stem = $stem.Substring(0, $stem.Length - '.callout'.Length) }
-elseif ($stem.EndsWith('.callout')) { $stem = $stem.Substring(0, $stem.Length - '.callout'.Length) }
-elseif ($stem.EndsWith('.brand')) { $stem = $stem.Substring(0, $stem.Length - '.brand'.Length) }
-elseif ($stem.EndsWith('.normalized')) { $stem = $stem.Substring(0, $stem.Length - '.normalized'.Length) }
+# the same version lineage instead of compounding '.brand.brand'; compound
+# lineage names (X.brand.callout) resolve fully so the delivery directory
+# stays in the reports/<deck>_v<N> layout (a letter directly before _v<N> is
+# a layout-gate violation).
 if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
     $OutputPath = [System.IO.Path]::GetFullPath($OutputPath)
     $deliveryRoot = Split-Path -Parent (Split-Path -Parent $OutputPath)

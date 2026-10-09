@@ -1889,6 +1889,12 @@ function Set-SectionTitleTextStyle {
         $font.Bold = $script:MsoTrue
         $font.Fill.Visible = $script:MsoTrue
         $font.Fill.ForeColor.RGB = $targetColor
+        $targetColorHex = if ($isExtensionSection) { $script:Style.ColorExtensionTitleHex } else { $script:Style.ColorSectionTitleHex }
+        $details = if ($isExtensionSection) {
+            "Extension section title bolded and colored to the configured extensionTitle palette ($targetColorHex); author text preserved."
+        } else {
+            "Section title bolded and colored to the configured sectionTitle palette ($targetColorHex); author text preserved."
+        }
         Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $Shape.Name -Issue $issue -Details $details `
             -RuleId 'STYLE.SECTION_TITLE.EMPHASIS' -Property 'Bold/Color' -Before ("$beforeBold|$beforeColor") -After ("$($script:MsoTrue)|$targetColor") -RiskLevel 'R1' -Result 'Applied'
     } catch {
