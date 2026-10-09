@@ -49,41 +49,23 @@ $required = @(
     'config\formula-ir.schema.json',
     'config\formula-evidence-manifest.schema.json',
     'config\formula-goldset.schema.json',
-    'config\formula-recognition-result.schema.json',
-    'config\formula-recognition.adapters.json',
-    'config\formula-converter-supply-chain.schema.json',
-    'config\formula-host-compatibility-receipt.schema.json',
-    'config\formula-host-compatibility-matrix.schema.json',
     'config\formula-goldset-evidence-availability.schema.json',
     'config\formula-ole-visual-adjudication.schema.json',
     'config\presentation-snapshot.schema.json',
     'config\invariant-comparison.schema.json',
     'tools\Normalize-PhysicsPpt.ps1',
-    'tools\Apply-FormulaSvgWhitelist.ps1',
     'tools\Export-FormulaOmmlCandidates.ps1',
-    'tools\Export-FormulaIrFromOleMapping.ps1',
     'tools\Test-FormulaIr.ps1',
-    'tools\Run-FormulaRecognitionAdapter.ps1',
-    'tools\Measure-FormulaRecognitionAdapters.ps1',
-    'tools\Test-FormulaRecognitionAdapter.ps1',
     'tools\Resolve-FormulaCanonicalContext.ps1',
     'tools\Test-FormulaCanonicalContext.ps1',
-    'tools\Export-FormulaConverterSupplyChain.ps1',
-    'tools\Plan-FormulaFallbackSvg.ps1',
-    'tools\Test-FormulaFallbackSvg.ps1',
     'tools\Test-FormulaOfficeMathValidator.ps1',
     'tools\Test-ClosedWorldCircuitBreaker.ps1',
     'tools\Plan-ClosedWorldUnattended.ps1',
-    'tools\Export-FormulaOleStructuredSourceProbe.ps1',
-    'tools\Export-FormulaDecisionSummary.ps1',
-    'tools\Export-FormulaHostCompatibilityReceipt.ps1',
-    'tools\Export-FormulaHostCompatibilityMatrix.ps1',
     'tools\Test-FormulaPowerPointRepairHandling.ps1',
     'tools\Apply-FormulaOmmlWhitelist.ps1',
     'tools\Apply-FormulaOmmlForOle.ps1',
     'tools\Set-PptxTextBold.ps1',
     'tools\Export-FormulaGoldSet.ps1',
-    'tools\Run-FormulaRecognitionAdapter.ps1',
     'tools\Invoke-FormulaOleBatch.ps1',
     'tools\Export-FormulaWhitelistSuggestions.ps1',
     'tools\Export-FormulaImageCandidates.ps1',
@@ -95,8 +77,6 @@ $required = @(
     'tools\Export-FormulaOleVisualAdjudication.ps1',
     'tools\Test-FormulaOleVisualAdjudication.ps1',
     'tools\Export-FormulaEvidenceManifest.ps1',
-    'tools\Invoke-FormulaImageOcrProbe.ps1',
-    'tools\formula_image_ocr_probe.py',
     'tools\PhysicsPpt.Common.ps1',
     'tools\Export-PptxVisualAudit.ps1',
     'tools\Export-PptxVisualConfirmation.ps1',
@@ -112,7 +92,6 @@ $required = @(
     'tools\Export-PptxImageCandidates.ps1',
     'tools\Invoke-PptxImageEnhancementProbe.ps1',
     'tools\Apply-PptxImageEnhancement.ps1',
-    'tools\Render-FormulaSvg.mjs',
     'tools\Export-PptxExternalLinks.ps1',
     'tools\Export-PptxInvariantSnapshot.ps1',
     'tools\Compare-PptxInvariantSnapshot.ps1',
@@ -134,9 +113,6 @@ $required = @(
     'examples\fixtures\minimal-physics-sample.pptx',
     'examples\fixtures\formula-ir.valid.json',
     'examples\fixtures\formula-ir.invalid.json',
-    'examples\fixtures\formula-adapter-valid-runner.ps1',
-    'examples\fixtures\formula-adapter-invalid-runner.ps1',
-    'examples\fixtures\formula-adapter-timeout-runner.ps1',
     'examples\fixtures\formula-unicodemath.valid.json',
     'examples\fixtures\formula-unicodemath.invalid.json',
     'examples\fixtures\formula-goldset.sample.csv',
@@ -201,72 +177,15 @@ if ([string]$evidenceSchema.title -ne 'Physics PPT formula evidence manifest' -o
     [int]$evidenceSchema.properties.schemaVersion.const -ne 1) {
     throw 'Formula evidence manifest schema metadata is invalid.'
 }
-$adapterConfigPath = Join-Path $root 'config\formula-recognition.adapters.json'
-$adapterConfig = Get-Content -LiteralPath $adapterConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
-if ([int]$adapterConfig.schemaVersion -ne 1 -or [bool]$adapterConfig.writeBackAllowed) {
-    throw 'Formula recognition adapter config must be schemaVersion 1 with writeBackAllowed=false.'
-}
-if (@($adapterConfig.adapters).Count -lt 4) { throw 'Formula recognition adapter config must register the four comparison adapters.' }
-$adapterResultSchemaPath = Join-Path $root 'config\formula-recognition-result.schema.json'
-$adapterResultSchema = Get-Content -LiteralPath $adapterResultSchemaPath -Raw -Encoding UTF8 | ConvertFrom-Json
-if ([string]$adapterResultSchema.title -ne 'Physics PPT formula recognition adapter result' -or $adapterResultSchema.properties.writeBackAllowed.const -ne $false) {
-    throw 'Formula recognition adapter result schema does not enforce writeBackAllowed=false.'
-}
-$adapterScript = Get-Content -LiteralPath (Join-Path $root 'tools\Run-FormulaRecognitionAdapter.ps1') -Raw -Encoding UTF8
-foreach ($adapterToken in @('Unavailable', 'InvalidOutput', 'Timeout', 'writeBackAllowed = $false', 'RunnerArgumentList')) {
-    if ($adapterScript -notmatch [regex]::Escape($adapterToken)) { throw "Formula recognition adapter is missing required safety token: $adapterToken" }
-}
-$adapterEvaluationScript = Get-Content -LiteralPath (Join-Path $root 'tools\Measure-FormulaRecognitionAdapters.ps1') -Raw -Encoding UTF8
-foreach ($evaluationToken in @('CandidateOnlyNoAvailableAdapter', 'exactFormulaIrMatch', 'falseAcceptCount', 'Get-Sha256FileLocal', 'writeBackAllowed')) {
-    if ($adapterEvaluationScript -notmatch [regex]::Escape($evaluationToken)) { throw "Formula recognition evaluation is missing required safety token: $evaluationToken" }
-}
 $contextResolverScript = Get-Content -LiteralPath (Join-Path $root 'tools\Resolve-FormulaCanonicalContext.ps1') -Raw -Encoding UTF8
 foreach ($contextToken in @('ManualRequired', 'CandidateOnly', 'SourceSha256', 'sourceContextRequiredForGoldSet', 'writeBackAllowed = $false')) {
     if ($contextResolverScript -notmatch [regex]::Escape($contextToken)) { throw "Formula context resolver is missing required safety token: $contextToken" }
-}
-$supplyChainSchema = Get-Content -LiteralPath (Join-Path $root 'config\formula-converter-supply-chain.schema.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-if ([string]$supplyChainSchema.title -ne 'Physics PPT formula converter supply chain manifest' -or [int]$supplyChainSchema.properties.schemaVersion.const -ne 1) {
-    throw 'Formula converter supply-chain schema metadata is invalid.'
-}
-$supplyChainScript = Get-Content -LiteralPath (Join-Path $root 'tools\Export-FormulaConverterSupplyChain.ps1') -Raw -Encoding UTF8
-foreach ($supplyToken in @('Pandoc', 'MathJax', 'NotAdopted', 'package-lock.json', 'writesPptx = $false')) {
-    if ($supplyChainScript -notmatch [regex]::Escape($supplyToken)) { throw "Formula converter supply-chain exporter is missing required token: $supplyToken" }
-}
-$hostReceiptSchema = Get-Content -LiteralPath (Join-Path $root 'config\formula-host-compatibility-receipt.schema.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-if ([string]$hostReceiptSchema.title -ne 'Physics PPT formula host compatibility receipt' -or
-    [int]$hostReceiptSchema.properties.schemaVersion.const -ne 1 -or
-    [bool]$hostReceiptSchema.properties.policy.properties.writeBackAllowed.const) {
-    throw 'Formula host compatibility receipt schema metadata is invalid.'
-}
-$hostReceiptScript = Get-Content -LiteralPath (Join-Path $root 'tools\Export-FormulaHostCompatibilityReceipt.ps1') -Raw -Encoding UTF8
-foreach ($hostReceiptToken in @('formula-host-compatibility-receipt.json', 'SaveAsPdfFallback', 'Unavailable', 'NotEvaluated', 'writeBackAllowed = $false')) {
-    if ($hostReceiptScript -notmatch [regex]::Escape($hostReceiptToken)) {
-        throw "Formula host compatibility receipt exporter is missing required token: $hostReceiptToken"
-    }
-}
-$hostMatrixSchema = Get-Content -LiteralPath (Join-Path $root 'config\formula-host-compatibility-matrix.schema.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-if ([string]$hostMatrixSchema.title -ne 'Physics PPT formula host compatibility matrix' -or
-    [int]$hostMatrixSchema.properties.schemaVersion.const -ne 1 -or
-    [bool]$hostMatrixSchema.properties.policy.properties.migrationExpansionAllowed.const) {
-    throw 'Formula host compatibility matrix schema metadata is invalid.'
-}
-$hostMatrixScript = Get-Content -LiteralPath (Join-Path $root 'tools\Export-FormulaHostCompatibilityMatrix.ps1') -Raw -Encoding UTF8
-foreach ($hostMatrixToken in @('Export-FormulaHostCompatibilityReceipt.ps1', 'Group-Object -Property host', 'migrationExpansionAllowed = $false', 'WPS is unavailable', 'Physical projection')) {
-    if ($hostMatrixScript -notmatch [regex]::Escape($hostMatrixToken)) {
-        throw "Formula host compatibility matrix exporter is missing required token: $hostMatrixToken"
-    }
 }
 $goldSetEvidenceSchema = Get-Content -LiteralPath (Join-Path $root 'config\formula-goldset-evidence-availability.schema.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 if ([string]$goldSetEvidenceSchema.title -ne 'Physics PPT formula GoldSet evidence availability receipt' -or
     [int]$goldSetEvidenceSchema.properties.schemaVersion.const -ne 1 -or
     [bool]$goldSetEvidenceSchema.properties.policy.properties.writeBackAllowed.const) {
     throw 'Formula GoldSet evidence availability schema metadata is invalid.'
-}
-$goldSetEvidenceScript = Get-Content -LiteralPath (Join-Path $root 'tools\Export-FormulaGoldSetEvidenceAvailability.ps1') -Raw -Encoding UTF8
-foreach ($goldSetEvidenceToken in @('GoldSetManifestPath', 'EvidenceRoot', 'Get-Sha256Local', 'Available', 'Missing', 'writeBackAllowed = $false')) {
-    if ($goldSetEvidenceScript -notmatch [regex]::Escape($goldSetEvidenceToken)) {
-        throw "Formula GoldSet evidence availability exporter is missing required token: $goldSetEvidenceToken"
-    }
 }
 $oleVisualAdjudicationSchema = Get-Content -LiteralPath (Join-Path $root 'config\formula-ole-visual-adjudication.schema.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 if ([string]$oleVisualAdjudicationSchema.title -ne 'Physics PPT current MathType/OLE visual adjudication proposal' -or
@@ -285,10 +204,6 @@ foreach ($oleVisualAdjudicationTestToken in @('drifted-adjudication.csv', 'Drift
     if ($oleVisualAdjudicationTestScript -notmatch [regex]::Escape($oleVisualAdjudicationTestToken)) {
         throw "Formula OLE visual adjudication test is missing required token: $oleVisualAdjudicationTestToken"
     }
-}
-$fallbackPlannerScript = Get-Content -LiteralPath (Join-Path $root 'tools\Plan-FormulaFallbackSvg.ps1') -Raw -Encoding UTF8
-foreach ($fallbackToken in @('FallbackSvg', 'OriginalKept', 'originalPreservedOnFailure', 'writeBackAllowed = $false')) {
-    if ($fallbackPlannerScript -notmatch [regex]::Escape($fallbackToken)) { throw "Formula fallback planner is missing required safety token: $fallbackToken" }
 }
 foreach ($evidenceRequired in @('schemaVersion', 'generatedAt', 'policy', 'input', 'inventory', 'counts', 'records')) {
     if ($evidenceRequired -notin @($evidenceSchema.required)) {
@@ -317,12 +232,6 @@ $ommlCandidateScript = Get-Content -LiteralPath (Join-Path $root 'tools\Export-F
 foreach ($formulaIrToken in @('Convert-AstToFormulaIrToken', 'formulaIrDir', 'FormulaIrStatus', 'CandidateOnly')) {
     if ($ommlCandidateScript -notmatch [regex]::Escape($formulaIrToken)) {
         throw "OMML candidate exporter is missing FormulaIR token contract: $formulaIrToken"
-    }
-}
-$oleIrScript = Get-Content -LiteralPath (Join-Path $root 'tools\Export-FormulaIrFromOleMapping.ps1') -Raw -Encoding UTF8
-foreach ($oleIrToken in @('ApprovedMathTypeOleGoldSet', 'CandidateOnly', 'writeBackAllowed = $false', 'Export-FormulaOmmlCandidates.ps1')) {
-    if ($oleIrScript -notmatch [regex]::Escape($oleIrToken)) {
-        throw "OLE FormulaIR bridge is missing required token: $oleIrToken"
     }
 }
 $workflowScript = Get-Content -LiteralPath (Join-Path $root 'tools\Invoke-PhysicsPptWorkflow.ps1') -Raw -Encoding UTF8
@@ -462,7 +371,7 @@ $slashFragmentXml = (New-OmmlFragment -UnicodeMath 'J\/(kg·℃)').OuterXml
 if ($slashFragmentXml -match '<m:f>') { throw 'Linear slash OMML regression: J\/(kg·℃) produced a stacked fraction.' }
 if ($slashFragmentXml -notmatch '>/<') { throw 'Linear slash OMML regression: escaped slash run text is missing.' }
 
-# --- 2c. Formula recognition gold set / adapter transport contract ---
+# --- 2c. Formula recognition gold set contract ---
 $goldSetSchemaPath = Join-Path $root 'config\formula-goldset.schema.json'
 $goldSetSchema = Get-Content -LiteralPath $goldSetSchemaPath -Raw -Encoding UTF8 | ConvertFrom-Json
 if ([string]$goldSetSchema.title -ne 'Physics PPT formula recognition gold set' -or
@@ -475,48 +384,13 @@ foreach ($goldSetRequired in @('schemaVersion', 'generatedAt', 'input', 'policy'
 if ([bool]$goldSetSchema.properties.policy.properties.writeBackAllowed.const) { throw 'Formula gold set schema must keep writeBackAllowed=false.' }
 if ([string]$goldSetSchema.properties.policy.properties.reviewRequirement.const -ne 'HumanReviewed') { throw 'Formula gold set schema must require HumanReviewed review.' }
 
-$recognitionResultSchemaPath = Join-Path $root 'config\formula-recognition-result.schema.json'
-$recognitionResultSchema = Get-Content -LiteralPath $recognitionResultSchemaPath -Raw -Encoding UTF8 | ConvertFrom-Json
-if ([string]$recognitionResultSchema.title -ne 'Physics PPT formula recognition adapter result' -or
-    [int]$recognitionResultSchema.properties.schemaVersion.const -ne 1) {
-    throw 'Formula recognition result schema metadata is invalid.'
-}
-foreach ($statusValue in @('Passed', 'Unavailable', 'Failed', 'InvalidOutput', 'Timeout')) {
-    if ($statusValue -notin @($recognitionResultSchema.properties.status.enum)) { throw "Formula recognition result schema status enum is missing: $statusValue" }
-}
-if ([bool]$recognitionResultSchema.properties.writeBackAllowed.const) { throw 'Formula recognition result schema must keep writeBackAllowed=false.' }
-
-$adapterConfigPath = Join-Path $root 'config\formula-recognition.adapters.json'
-$adapterConfig = Get-Content -LiteralPath $adapterConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
-if ([int]$adapterConfig.schemaVersion -ne 1) { throw 'Formula recognition adapter config schemaVersion must be 1.' }
-if ([string]$adapterConfig.defaultAdapter -ne 'None') { throw 'Formula recognition adapter config must keep defaultAdapter=None.' }
-if ([bool]$adapterConfig.writeBackAllowed) { throw 'Formula recognition adapter config must keep writeBackAllowed=false.' }
-if (@($adapterConfig.adapters).Count -lt 1) { throw 'Formula recognition adapter config must declare at least one adapter entry.' }
-foreach ($adapterEntry in @($adapterConfig.adapters)) {
-    foreach ($adapterField in @('id', 'status', 'entrypoint', 'outputContract', 'licenseStatus', 'disabledReason')) {
-        $adapterFieldProperty = $adapterEntry.PSObject.Properties[$adapterField]
-        if ($null -eq $adapterFieldProperty -or [string]::IsNullOrWhiteSpace([string]$adapterFieldProperty.Value)) {
-            throw "Formula recognition adapter '$($adapterEntry.id)' is missing field: $adapterField"
-        }
-    }
-    if ([string]$adapterEntry.outputContract -ne 'formula-recognition-result.schema.json') {
-        throw "Formula recognition adapter '$($adapterEntry.id)' must bind the result schema contract."
-    }
-    if ([string]$adapterEntry.licenseStatus -ne 'VerifyBeforeInstall') {
-        throw "Formula recognition adapter '$($adapterEntry.id)' must keep licenseStatus=VerifyBeforeInstall until provisioned."
-    }
-}
-
+# The exporter covers both parameter sets: GoldSet construction and the
+# evidence-availability verification mode (former standalone availability
+# exporter). Evidence-availability receipts keep their schema above.
 $goldSetScript = Get-Content -LiteralPath (Join-Path $root 'tools\Export-FormulaGoldSet.ps1') -Raw -Encoding UTF8
-foreach ($goldSetToken in @('writeBackAllowed = $false', 'HumanReviewed', 'MixedNonIsolatable', 'formula-goldset-manifest.json', 'evidenceSetSha256')) {
+foreach ($goldSetToken in @('writeBackAllowed = $false', 'HumanReviewed', 'MixedNonIsolatable', 'formula-goldset-manifest.json', 'evidenceSetSha256', 'GoldSetManifestPath', 'EvidenceRoot', 'Available', 'Missing')) {
     if ($goldSetScript -notmatch [regex]::Escape($goldSetToken)) {
         throw "Formula gold set exporter is missing required contract token: $goldSetToken"
-    }
-}
-$adapterTransportScript = Get-Content -LiteralPath (Join-Path $root 'tools\Run-FormulaRecognitionAdapter.ps1') -Raw -Encoding UTF8
-foreach ($adapterTransportToken in @('Unavailable', 'InvalidOutput', 'Timeout', 'writeBackAllowed', 'RunnerArgumentList', 'schemaVersion')) {
-    if ($adapterTransportScript -notmatch [regex]::Escape($adapterTransportToken)) {
-        throw "Formula recognition adapter transport is missing required contract token: $adapterTransportToken"
     }
 }
 $oleBatchScript = Get-Content -LiteralPath (Join-Path $root 'tools\Invoke-FormulaOleBatch.ps1') -Raw -Encoding UTF8
@@ -543,24 +417,6 @@ foreach ($closedWorldToken in @('ClosedWorldUnattended', 'planOnly', 'circuitBre
         throw "Closed-world planner is missing required safety token: $closedWorldToken"
     }
 }
-$oleSourceProbeScript = Get-Content -LiteralPath (Join-Path $root 'tools\Export-FormulaOleStructuredSourceProbe.ps1') -Raw -Encoding UTF8
-foreach ($oleSourceProbeToken in @('read-only', 'mtefParsed = $false', 'OriginalKept', 'structuredSourceStatus')) {
-    if ($oleSourceProbeScript -notmatch [regex]::Escape($oleSourceProbeToken)) {
-        throw "MathType structured-source probe is missing required safety token: $oleSourceProbeToken"
-    }
-}
-$decisionSummaryScript = Get-Content -LiteralPath (Join-Path $root 'tools\Export-FormulaDecisionSummary.ps1') -Raw -Encoding UTF8
-foreach ($decisionSummaryToken in @('NativeKept', 'Converted', 'FallbackSvg', 'OriginalKept', 'ManualRequired', 'Skipped', 'Failed', 'evidenceSetSha256')) {
-    if ($decisionSummaryScript -notmatch [regex]::Escape($decisionSummaryToken)) {
-        throw "Formula decision summary is missing terminal-state/evidence token: $decisionSummaryToken"
-    }
-}
-$hostCompatibilityScript = Get-Content -LiteralPath (Join-Path $root 'tools\Export-FormulaHostCompatibilityReceipt.ps1') -Raw -Encoding UTF8
-foreach ($hostCompatibilityToken in @('Microsoft PowerPoint COM', 'WPS Office', 'Physical projector or extended display', 'writeBackAllowed = $false', 'inputModified = $false')) {
-    if ($hostCompatibilityScript -notmatch [regex]::Escape($hostCompatibilityToken)) {
-        throw "Formula host compatibility receipt is missing required boundary token: $hostCompatibilityToken"
-    }
-}
 $goldSetSampleRows = @(Import-Csv -LiteralPath (Join-Path $root 'examples\fixtures\formula-goldset.sample.csv'))
 if ($goldSetSampleRows.Count -lt 1) { throw 'Formula gold set sample fixture must contain at least one row.' }
 $goldSetSampleHeader = @($goldSetSampleRows[0].PSObject.Properties.Name)
@@ -571,59 +427,8 @@ foreach ($goldSetSampleRow in $goldSetSampleRows) {
     if ([string]$goldSetSampleRow.ReviewStatus -notin @('Draft', 'Approved')) { throw 'Formula gold set sample fixture has invalid ReviewStatus.' }
 }
 
-# Exercise the adapter transport boundary end to end: no runner, missing
-# runner, failed runner, invalid runner output, slow runner and a trusted
-# runner must each produce a deterministic, non-write-back JSON result.
-$adapterToolPath = Join-Path $root 'tools\Run-FormulaRecognitionAdapter.ps1'
-$adapterProbeDir = Join-Path ([IO.Path]::GetTempPath()) ("physics-ppt-adapter-probe-" + [Guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path $adapterProbeDir -Force | Out-Null
-$adapterProbeImage = Join-Path $adapterProbeDir 'probe.png'
-[IO.File]::WriteAllBytes($adapterProbeImage, [byte[]](0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A))
-$runnerHost = (Get-Process -Id $PID).Path
-$fixtureRunnerScripts = @{
-    'passed.ps1'  = "`$null = [Console]::In.ReadToEnd()`n`$result = [ordered]@{ status = 'Passed'; candidates = @(@{ raw = 'W_{\text{总}}=Fs'; score = 0.93; status = 'Candidate' }); diagnostics = [ordered]@{ reason = 'fixture runner completed' } }`n`$result | ConvertTo-Json -Depth 6"
-    'invalid.ps1' = "`$null = [Console]::In.ReadToEnd()`nWrite-Output 'definitely not json'"
-    'failed.ps1'  = "`$null = [Console]::In.ReadToEnd()`nexit 4"
-    'slow.ps1'    = "`$null = [Console]::In.ReadToEnd()`nStart-Sleep -Seconds 30"
-}
-try {
-    foreach ($fixtureName in $fixtureRunnerScripts.Keys) {
-        [IO.File]::WriteAllText((Join-Path $adapterProbeDir $fixtureName), $fixtureRunnerScripts[$fixtureName], (New-Object Text.UTF8Encoding($false)))
-    }
-    $expectedInputSha256 = (Get-FileHash -LiteralPath $adapterProbeImage -Algorithm SHA256).Hash.ToLowerInvariant()
-    $adapterProbes = @(
-        @{ Name = 'no-runner';        Args = @{};                                                                                        Expected = 'Unavailable' },
-        @{ Name = 'missing-runner';   Args = @{ RunnerPath = (Join-Path $adapterProbeDir 'does-not-exist.ps1') };                        Expected = 'Unavailable' },
-        @{ Name = 'failed-runner';    Args = @{ RunnerPath = $runnerHost; RunnerArgumentList = @('-NoProfile', '-NonInteractive', '-File', (Join-Path $adapterProbeDir 'failed.ps1')) }; Expected = 'Failed' },
-        @{ Name = 'invalid-runner';   Args = @{ RunnerPath = $runnerHost; RunnerArgumentList = @('-NoProfile', '-NonInteractive', '-File', (Join-Path $adapterProbeDir 'invalid.ps1')) }; Expected = 'InvalidOutput' },
-        @{ Name = 'timeout-runner';   Args = @{ RunnerPath = $runnerHost; RunnerArgumentList = @('-NoProfile', '-NonInteractive', '-File', (Join-Path $adapterProbeDir 'slow.ps1')); TimeoutSeconds = 1 }; Expected = 'Timeout' },
-        @{ Name = 'trusted-runner';   Args = @{ RunnerPath = $runnerHost; RunnerArgumentList = @('-NoProfile', '-NonInteractive', '-File', (Join-Path $adapterProbeDir 'passed.ps1')) }; Expected = 'Passed' }
-    )
-    foreach ($probe in $adapterProbes) {
-        $probeOutput = Join-Path $adapterProbeDir ("result-" + $probe.Name + ".json")
-        $probeParams = @{ Adapter = 'PP-FormulaNet_plus-M'; ImagePath = $adapterProbeImage; OutputPath = $probeOutput }
-        foreach ($probeArg in $probe.Args.Keys) { $probeParams[$probeArg] = $probe.Args[$probeArg] }
-        & $adapterToolPath @probeParams | Out-Null
-        $probeResult = Get-Content -LiteralPath $probeOutput -Raw -Encoding UTF8 | ConvertFrom-Json
-        if ([string]$probeResult.status -ne $probe.Expected) {
-            throw ("Adapter transport probe '{0}' returned status '{1}' instead of '{2}' (reason: {3})" -f $probe.Name, $probeResult.status, $probe.Expected, $probeResult.diagnostics.reason)
-        }
-        if ([bool]$probeResult.writeBackAllowed) { throw "Adapter transport probe '$($probe.Name)' enabled write-back." }
-        if ([string]$probeResult.input.sha256 -ne $expectedInputSha256) { throw "Adapter transport probe '$($probe.Name)' lost the input hash binding." }
-        if ($probe.Name -eq 'trusted-runner') {
-            if (@($probeResult.candidates).Count -ne 1 -or [string]@($probeResult.candidates)[0].status -ne 'Candidate') {
-                throw "Adapter transport probe 'trusted-runner' did not carry runner candidates."
-            }
-        }
-    }
-} finally {
-    if (Test-Path -LiteralPath $adapterProbeDir) { Remove-Item -LiteralPath $adapterProbeDir -Recurse -Force }
-}
-
 & (Join-Path $root 'tools\Test-FormulaCanonicalContext.ps1')
 if (-not $?) { throw 'Formula context resolver fixture test failed.' }
-& (Join-Path $root 'tools\Test-FormulaFallbackSvg.ps1')
-if (-not $?) { throw 'Formula fallback SVG fixture test failed.' }
 & (Join-Path $root 'tools\Test-FormulaOleVisualAdjudication.ps1')
 if (-not $?) { throw 'Formula OLE visual adjudication fixture test failed.' }
 & (Join-Path $root 'tools\Test-FormulaOfficeMathValidator.ps1')
@@ -777,9 +582,9 @@ if (Test-Path -LiteralPath $reportsRoot) {
 
 $packagePath = Join-Path $root 'package.json'
 $packageJson = Get-Content -LiteralPath $packagePath -Raw -Encoding UTF8 | ConvertFrom-Json
-$mathJaxDependency = $packageJson.dependencies.PSObject.Properties['@mathjax/src']
-if ($null -eq $mathJaxDependency -or [string]::IsNullOrWhiteSpace([string]$mathJaxDependency.Value)) {
-    throw "package.json dependencies.@mathjax/src is missing"
+$sharpDependency = $packageJson.dependencies.PSObject.Properties['sharp']
+if ($null -eq $sharpDependency -or [string]::IsNullOrWhiteSpace([string]$sharpDependency.Value)) {
+    throw "package.json dependencies.sharp is missing"
 }
 
 $visualSkillPath = Join-Path $root 'manual\physics-ppt-visual-review\SKILL.md'
@@ -1029,7 +834,6 @@ foreach ($automationScript in @(
     'tools\Invoke-PhysicsPptWorkflow.ps1',
     'tools\Export-PptxInvariantSnapshot.ps1',
     'tools\Export-PptxVisualAudit.ps1',
-    'tools\Apply-FormulaSvgWhitelist.ps1',
     'tools\Apply-PptxVisualAuditFixes.ps1',
     'tools\Apply-PptxHighlightBoxStyle.ps1',
     'tools\Assert-Toolchain.ps1'
@@ -1112,6 +916,12 @@ $fingerprintMappingPath = Join-Path $root 'tools\Export-FormulaOleMapping.ps1'
 $fingerprintMappingContent = Get-Content -LiteralPath $fingerprintMappingPath -Raw -Encoding UTF8
 foreach ($fingerprintMarker in @('Get-OleEquationCjkFingerprint', 'OLE content fingerprint mismatch')) {
     if ($fingerprintMappingContent -notmatch [regex]::Escape($fingerprintMarker)) { throw "Formula OLE mapping content-fingerprint guard marker is missing: $fingerprintMarker" }
+}
+# The -EmitFormulaIr switch carries the former standalone IR bridge contract:
+# review rows stay CandidateOnly, bound to the approved GoldSet, and are
+# rendered by the single canonical candidate exporter.
+foreach ($oleMappingIrToken in @('ApprovedMathTypeOleGoldSet', 'CandidateOnly', 'Export-FormulaOmmlCandidates.ps1')) {
+    if ($fingerprintMappingContent -notmatch [regex]::Escape($oleMappingIrToken)) { throw "Formula OLE mapping IR bridge token is missing: $oleMappingIrToken" }
 }
 $commonLibContent = Get-Content -LiteralPath (Join-Path $root 'tools\PhysicsPpt.Common.ps1') -Raw -Encoding UTF8
 if ($commonLibContent -notmatch [regex]::Escape('function Get-OleEquationCjkFingerprint')) { throw 'Common library is missing Get-OleEquationCjkFingerprint.' }

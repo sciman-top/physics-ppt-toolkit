@@ -1,15 +1,11 @@
 {
   "name": "physics-ppt-toolkit",
   "private": true,
-  "scripts": {
-    "render:formula-svg": "node tools/Render-FormulaSvg.mjs"
-  },
+  "scripts": {},
   "dependencies": {
-    "@mathjax/src": "4.1.2",
     "sharp": "^0.35.4"
   },
   "overrides": {
-    "@xmldom/xmldom": "^0.9.12",
     "brace-expansion": "^5.0.9"
   }
 }

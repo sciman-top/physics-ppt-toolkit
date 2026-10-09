@@ -1,25 +1,43 @@
 ﻿<#
 .SYNOPSIS
-  Build a human-reviewed, hash-bound formula recognition gold set.
+  Build a human-reviewed, hash-bound formula recognition gold set, or verify
+  the evidence availability of an existing GoldSet manifest.
 
 .DESCRIPTION
-  Combines approved OLE visual evidence (positive formula examples) with an
-  explicit image-candidate adjudication CSV. It is an evaluation artifact only:
-  it never writes a PPTX and never authorizes write-back.
+  BuildGoldSet parameter set: combines approved OLE visual evidence (positive
+  formula examples) with an explicit image-candidate adjudication CSV. It is an
+  evaluation artifact only: it never writes a PPTX and never authorizes
+  write-back.
+
+  VerifyGoldSetEvidence parameter set (formerly the standalone
+  Export-FormulaGoldSetEvidenceAvailability.ps1): historical GoldSet manifests
+  may retain paths from an archived run. This read-only mode searches a
+  supplied evidence root for a file with the same basename and expected hash,
+  then writes a derived availability receipt. It never changes the historical
+  manifest, source PPTX, or write-back policy.
 #>
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'BuildGoldSet')]
 param(
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $true, ParameterSetName = 'BuildGoldSet')]
     [string]$FormulaImageCandidatesCsv,
 
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $true, ParameterSetName = 'BuildGoldSet')]
     [string]$ImageAdjudicationCsv,
 
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $true, ParameterSetName = 'BuildGoldSet')]
     [string]$OleMappingManifestJson,
 
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $true, ParameterSetName = 'BuildGoldSet')]
     [string]$OutputDir,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'VerifyGoldSetEvidence')]
+    [string]$GoldSetManifestPath,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'VerifyGoldSetEvidence')]
+    [string]$EvidenceRoot,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'VerifyGoldSetEvidence')]
+    [string]$EvidenceReceiptPath,
 
     [ValidateRange(1, 1000)]
     [int]$MaxItems = 1000
@@ -39,6 +57,60 @@ function Get-RelativeOrFail {
 }
 function Get-Sha256FileLocal { param([string]$Path) return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
 function Get-Sha256TextLocal { param([string]$Text) $sha = [Security.Cryptography.SHA256]::Create(); try { return ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text))).Replace('-', '').ToLowerInvariant()) } finally { $sha.Dispose() } }
+
+if ($PSCmdlet.ParameterSetName -eq 'VerifyGoldSetEvidence') {
+    $GoldSetManifestPath = [IO.Path]::GetFullPath($GoldSetManifestPath)
+    $EvidenceRoot = [IO.Path]::GetFullPath($EvidenceRoot)
+    $EvidenceReceiptPath = [IO.Path]::GetFullPath($EvidenceReceiptPath)
+    foreach ($path in @($GoldSetManifestPath, $EvidenceRoot)) {
+        if (-not (Test-Path -LiteralPath $path)) { throw "Required evidence input not found: $path" }
+    }
+    if (-not (Test-Path -LiteralPath $GoldSetManifestPath -PathType Leaf)) { throw "GoldSet manifest is not a file: $GoldSetManifestPath" }
+    if (-not (Test-Path -LiteralPath $EvidenceRoot -PathType Container)) { throw "EvidenceRoot is not a directory: $EvidenceRoot" }
+
+    $manifestHash = Get-Sha256FileLocal -Path $GoldSetManifestPath
+    $evidenceManifest = Get-Content -LiteralPath $GoldSetManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $records = New-Object System.Collections.Generic.List[object]
+    $available = 0
+    $missing = 0
+    $ambiguous = 0
+
+    foreach ($record in @($evidenceManifest.records)) {
+        $expected = ([string]$record.evidence.sha256).ToLowerInvariant()
+        $leaf = Split-Path -Leaf ([string]$record.evidence.path)
+        if ([string]::IsNullOrWhiteSpace($leaf)) { throw "GoldSet record has no evidence filename: $($record.goldSetId)" }
+        $candidates = @(Get-ChildItem -LiteralPath $EvidenceRoot -Recurse -File -Filter $leaf -ErrorAction SilentlyContinue |
+            Where-Object { (Get-Sha256FileLocal -Path $_.FullName) -eq $expected })
+        $status = 'Missing'
+        $resolved = $null
+        if ($candidates.Count -eq 1) { $status = 'Available'; $resolved = $candidates[0].FullName; $available++ }
+        elseif ($candidates.Count -gt 1) { $status = 'Ambiguous'; $ambiguous++ }
+        else { $missing++ }
+        $records.Add([ordered]@{
+            goldSetId = [string]$record.goldSetId
+            groundTruthClass = [string]$record.groundTruth.class
+            expectedSha256 = $expected
+            originalPath = [string]$record.evidence.path
+            status = $status
+            resolvedPath = $resolved
+            candidateCount = $candidates.Count
+        }) | Out-Null
+    }
+
+    $receipt = [ordered]@{
+        schemaVersion = 1
+        generatedAt = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+        policy = [ordered]@{ readOnly = $true; writeBackAllowed = $false }
+        sourceManifest = [ordered]@{ path = $GoldSetManifestPath; sha256 = $manifestHash }
+        counts = [ordered]@{ total = $records.Count; available = $available; missing = $missing; ambiguous = $ambiguous }
+        records = @($records.ToArray())
+    }
+    $receiptParent = Split-Path -Parent $EvidenceReceiptPath
+    if (-not [string]::IsNullOrWhiteSpace($receiptParent)) { New-Item -ItemType Directory -Path $receiptParent -Force | Out-Null }
+    $receipt | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $EvidenceReceiptPath -Encoding UTF8
+    Write-Host "Formula GoldSet evidence availability written: $EvidenceReceiptPath"
+    return
+}
 
 $FormulaImageCandidatesCsv = [IO.Path]::GetFullPath($FormulaImageCandidatesCsv)
 $ImageAdjudicationCsv = [IO.Path]::GetFullPath($ImageAdjudicationCsv)

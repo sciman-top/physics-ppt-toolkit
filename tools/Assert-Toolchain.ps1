@@ -18,7 +18,6 @@ param(
     [switch]$Deep,
     [switch]$LaunchPowerPoint,
     [switch]$RequireFormulaValidator,
-    [switch]$RequireFormulaSvg,
     [switch]$RequireMediaOptimization,
     [switch]$Strict,
     [switch]$AsJson
@@ -31,8 +30,7 @@ $ErrorActionPreference = 'Stop'
 
 $root = Split-Path -Parent $PSScriptRoot
 $checks = New-Object System.Collections.Generic.List[object]
-$nodeTier = if ($RequireFormulaSvg -or $RequireMediaOptimization) { 'Required' } else { 'Recommended' }
-$mathJaxTier = if ($RequireFormulaSvg) { 'Required' } else { 'Recommended' }
+$nodeTier = if ($RequireMediaOptimization) { 'Required' } else { 'Recommended' }
 $sharpTier = if ($RequireMediaOptimization) { 'Required' } else { 'Recommended' }
 $dotNetTier = if ($RequireFormulaValidator) { 'Required' } else { 'Recommended' }
 
@@ -143,32 +141,6 @@ function Test-NodePackage {
     } catch {
         Add-ToolchainCheck -Name $PackageName -Tier $Tier -Status 'FAIL' -Path $packagePath -Details $_.Exception.Message
         return ''
-    }
-}
-
-function Test-PythonModule {
-    param(
-        [Parameter(Mandatory = $true)][string]$PythonExe,
-        [Parameter(Mandatory = $true)][string]$ModuleName,
-        [Parameter(Mandatory = $true)][string]$Tier
-    )
-
-    $code = "import importlib, sys; mod=importlib.import_module(sys.argv[1]); print(getattr(mod, '__version__', 'OK'))"
-    try {
-        $output = & $PythonExe -c $code $ModuleName 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            $version = (($output | Select-Object -First 1) -as [string]).Trim()
-            Add-ToolchainCheck -Name "Python module $ModuleName" -Tier $Tier -Status 'OK' -Version $version -Path $PythonExe
-        } else {
-            $details = (($output | ForEach-Object { [string]$_ }) -join ' ').Trim()
-            Add-ToolchainCheck -Name "Python module $ModuleName" -Tier $Tier -Status 'MISSING' -Path $PythonExe -Details $details
-        }
-    } catch {
-        $details = $_.Exception.Message
-        if ($_.ErrorDetails -and -not [string]::IsNullOrWhiteSpace($_.ErrorDetails.Message)) {
-            $details = $_.ErrorDetails.Message
-        }
-        Add-ToolchainCheck -Name "Python module $ModuleName" -Tier $Tier -Status 'MISSING' -Path $PythonExe -Details $details
     }
 }
 
@@ -295,7 +267,7 @@ Test-PowerPointCom
 
 $nodePath = Resolve-CommandPath 'node'
 if ([string]::IsNullOrWhiteSpace($nodePath)) {
-    Add-ToolchainCheck -Name 'Node.js' -Tier $nodeTier -Status 'MISSING' -Details 'MathJax SVG rendering and sharp/libvips media optimization require Node.js.'
+    Add-ToolchainCheck -Name 'Node.js' -Tier $nodeTier -Status 'MISSING' -Details 'sharp/libvips media optimization requires Node.js.'
 } else {
     $nodeVersion = Invoke-VersionProbe -FilePath $nodePath -Arguments @('--version')
     $nodeStatus = if ($nodeVersion.ExitCode -eq 0) { 'OK' } else { 'FAIL' }
@@ -311,24 +283,10 @@ if ([string]::IsNullOrWhiteSpace($npmPath)) {
     Add-ToolchainCheck -Name 'npm' -Tier 'Recommended' -Status $npmStatus -Version $npmVersion.Text -Path $npmPath
 }
 
-Test-NodePackage -PackageName '@mathjax/src' -RelativePackageJson 'node_modules\@mathjax\src\package.json' -Tier $mathJaxTier | Out-Null
 Test-NodePackage -PackageName 'sharp' -RelativePackageJson 'node_modules\sharp\package.json' -Tier $sharpTier | Out-Null
 
-$runNodeSmoke = $Deep -or $RequireFormulaSvg -or $RequireMediaOptimization
+$runNodeSmoke = $Deep -or $RequireMediaOptimization
 if ($runNodeSmoke -and -not [string]::IsNullOrWhiteSpace($nodePath)) {
-    $svgOut = Join-Path ([System.IO.Path]::GetTempPath()) ("physics-ppt-toolchain-" + [guid]::NewGuid().ToString('N') + ".svg")
-    try {
-        $renderScript = Join-Path $root 'tools\Render-FormulaSvg.mjs'
-        $renderOutput = & $nodePath $renderScript --tex 'P=\frac{W}{t}' --out $svgOut 2>&1
-        if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $svgOut) -and (Get-Item -LiteralPath $svgOut).Length -gt 0) {
-            Add-ToolchainCheck -Name 'MathJax SVG render call' -Tier $mathJaxTier -Status 'OK' -Path $renderScript
-        } else {
-            Add-ToolchainCheck -Name 'MathJax SVG render call' -Tier $mathJaxTier -Status 'FAIL' -Path $renderScript -Details (($renderOutput | ForEach-Object { [string]$_ }) -join ' ')
-        }
-    } finally {
-        if (Test-Path -LiteralPath $svgOut) { Remove-Item -LiteralPath $svgOut -Force }
-    }
-
     # sharp does not export package.json in current releases; requiring the
     # module itself is the callable probe. Keep the version optional so an
     # exports-map change cannot turn a healthy install into a false failure.
@@ -347,41 +305,12 @@ Test-VendoredExecutable -Name 'oxipng portable' -Tier 'Recommended' -RelativePat
 Test-VendoredExecutable -Name 'Real-ESRGAN ncnn Vulkan portable' -Tier 'Recommended' -RelativePath 'tools\vendor\realesrgan-ncnn-vulkan-20220424\realesrgan-ncnn-vulkan.exe'
 Test-VendoredExecutable -Name 'Pandoc portable' -Tier 'Optional' -RelativePath 'tools\vendor\pandoc\pandoc-3.9.0.2\pandoc.exe' -VersionArguments @('--version') -MaxLines 1
 
-# Resolve python from PATH only: machine-specific absolute paths leak personal
-# environment layout and make the check result host-dependent.
-$pythonPath = Resolve-CommandPath 'python'
-
-if ([string]::IsNullOrWhiteSpace($pythonPath) -or -not (Test-Path -LiteralPath $pythonPath)) {
-    Add-ToolchainCheck -Name 'Python for OCR probes' -Tier 'Recommended' -Status 'MISSING' -Details 'RapidOCR review probes need local Python.'
-} else {
-    $pythonVersion = Invoke-VersionProbe -FilePath $pythonPath -Arguments @('--version')
-    # Judge by exit code like the node/npm probes: the WindowsApps store
-    # placeholder also prints a version-ish banner but exits non-zero.
-    if ($pythonVersion.ExitCode -eq 0) {
-        Add-ToolchainCheck -Name 'Python for OCR probes' -Tier 'Recommended' -Status 'OK' -Version $pythonVersion.Text -Path $pythonPath
-        foreach ($module in @('PIL', 'cv2', 'numpy', 'onnxruntime', 'rapidocr_onnxruntime')) {
-            Test-PythonModule -PythonExe $pythonPath -ModuleName $module -Tier 'Recommended'
-        }
-    } else {
-        Add-ToolchainCheck -Name 'Python for OCR probes' -Tier 'Recommended' -Status 'MISSING' -Details ('python --version exited with code ' + $pythonVersion.ExitCode + ' (store placeholder or broken install).')
-    }
-}
-
 foreach ($tool in @('magick', 'tesseract', 'ffmpeg', 'pngquant', 'cjpeg', 'jpegtran')) {
     $path = Resolve-CommandPath $tool
     if ([string]::IsNullOrWhiteSpace($path)) {
         Add-ToolchainCheck -Name "optional command $tool" -Tier 'Optional' -Status 'MISSING'
     } else {
         Add-ToolchainCheck -Name "optional command $tool" -Tier 'Optional' -Status 'OK' -Path $path
-    }
-}
-
-foreach ($tool in @('pix2tex', 'pix2text', 'texteller')) {
-    $path = Resolve-CommandPath $tool
-    if ([string]::IsNullOrWhiteSpace($path)) {
-        Add-ToolchainCheck -Name "experimental formula OCR $tool" -Tier 'Experimental' -Status 'MISSING' -Details 'Not part of the default reviewed workflow.'
-    } else {
-        Add-ToolchainCheck -Name "experimental formula OCR $tool" -Tier 'Experimental' -Status 'OK' -Path $path
     }
 }
 
@@ -400,7 +329,6 @@ if ($AsJson) {
         launchPowerPoint = [bool]$LaunchPowerPoint
         strict = [bool]$Strict
         requireFormulaValidator = [bool]$RequireFormulaValidator
-        requireFormulaSvg = [bool]$RequireFormulaSvg
         requireMediaOptimization = [bool]$RequireMediaOptimization
         requiredFailureCount = $requiredFailures.Count
         strictFailureCount = $strictFailures.Count
