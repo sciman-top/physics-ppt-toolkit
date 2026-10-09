@@ -199,23 +199,6 @@ function Assert-PowerPointAutomationReady {
     throw "PowerPoint automation is blocked by an existing Protected View window. Close it and rerun. Blockers: $details"
 }
 
-function Get-DefaultOutputRoot {
-    # Per-source standardized layout: reports/<source identity>/ keeps every
-    # artifact of one source file in a single named directory. Include the
-    # extension for file inputs so lesson.pptx and lesson.pptm do not share a
-    # PDF/report directory.
-    param([System.IO.FileSystemInfo]$InputItem)
-    $invalidChars = [System.IO.Path]::GetInvalidFileNameChars()
-    $sourceName = if ($InputItem.PSIsContainer) {
-        $InputItem.Name
-    } else {
-        '{0}__{1}' -f [System.IO.Path]::GetFileNameWithoutExtension($InputItem.Name), $InputItem.Extension.TrimStart('.').ToLowerInvariant()
-    }
-    $safeSource = (($sourceName.ToCharArray() | ForEach-Object { if ($invalidChars -contains $_) { '_' } else { $_ } }) -join '')
-    $reportsRoot = Join-Path (Split-Path -Parent $PSScriptRoot) 'reports'
-    return Join-Path $reportsRoot $safeSource
-}
-
 function Convert-ReportCsv {
     param([string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) { return @() }
@@ -545,22 +528,6 @@ function New-ReviewContactSheets {
     return $items
 }
 
-function Rename-ExportedPageImages {
-    param([string]$ImageDir)
-
-    if (-not (Test-Path -LiteralPath $ImageDir)) { return }
-    Get-ChildItem -LiteralPath $ImageDir -Filter '*.PNG' -File |
-        ForEach-Object {
-            if ($_.BaseName -match '(\d+)$') {
-                $pageNo = [int]$Matches[1]
-                $target = Join-Path $ImageDir ('page-{0:000}.png' -f $pageNo)
-                if ($_.FullName -ne $target) {
-                    Move-Item -LiteralPath $_.FullName -Destination $target -Force
-                }
-            }
-        }
-}
-
 function Export-SourcePageImages {
     param(
         [System.IO.FileInfo[]]$Files,
@@ -875,20 +842,8 @@ function Test-PageImageSet {
 
 function Get-FileSha256 {
     param([string]$Path)
-
     if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '' }
-    $stream = $null
-    $sha256 = $null
-    try {
-        $stream = [System.IO.File]::OpenRead($Path)
-        $sha256 = [System.Security.Cryptography.SHA256]::Create()
-        return ($sha256.ComputeHash($stream) | ForEach-Object { $_.ToString('x2') }) -join ''
-    } catch {
-        return ''
-    } finally {
-        if ($null -ne $sha256) { $sha256.Dispose() }
-        if ($null -ne $stream) { $stream.Dispose() }
-    }
+    try { return (Get-FileSha256Hex -Path $Path) } catch { return '' }
 }
 
 function Get-FileLength {

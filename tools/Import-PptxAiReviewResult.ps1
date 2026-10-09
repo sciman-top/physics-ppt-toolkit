@@ -45,20 +45,6 @@ function Assert-RequiredString {
     return $value
 }
 
-function Get-FileSha256 {
-    param([string]$Path)
-    $stream = $null
-    $sha256 = $null
-    try {
-        $stream = [System.IO.File]::OpenRead($Path)
-        $sha256 = [System.Security.Cryptography.SHA256]::Create()
-        return ($sha256.ComputeHash($stream) | ForEach-Object { $_.ToString('x2') }) -join ''
-    } finally {
-        if ($null -ne $sha256) { $sha256.Dispose() }
-        if ($null -ne $stream) { $stream.Dispose() }
-    }
-}
-
 function Get-ExpectedAggregateStatus {
     param([object[]]$Files)
     $statuses = @($Files | ForEach-Object { [string](Get-PropertyValue $_ 'status' '') })
@@ -88,7 +74,7 @@ $result = Get-Content -LiteralPath $resultFullPath -Raw -Encoding UTF8 | Convert
 if ([int](Get-PropertyValue $packet 'protocolVersion' 0) -ne 1) { throw 'AI review packet protocolVersion must be 1.' }
 if (-not (Test-PathIdentityEqual -Left ([string](Get-PropertyValue $packet 'sourceManifest' '')) -Right $manifestFullPath)) { throw 'AI review packet sourceManifest does not match the current manifest.' }
 $packetManifestSha256 = [string](Get-PropertyValue $packet 'manifestSha256' '')
-$currentManifestSha256 = Get-FileSha256 -Path $manifestFullPath
+$currentManifestSha256 = Get-FileSha256Hex -Path $manifestFullPath
 $existingReview = Get-PropertyValue $manifest 'aiVisualReview' $null
 $preparedManifestSha256 = [string](Get-PropertyValue $existingReview 'preparedManifestSha256' '')
 if ([string]::IsNullOrWhiteSpace($packetManifestSha256) -or
@@ -107,7 +93,7 @@ if ($resultStatus -notin $allowedStatuses) { throw "Unsupported AI review result
 $resultPacketPath = Assert-RequiredString $result 'packetPath' 'AI review result'
 if (-not (Test-PathIdentityEqual -Left $resultPacketPath -Right $packetFullPath)) { throw 'AI review result packetPath does not match the prepared packet.' }
 $resultPacketSha256 = Assert-RequiredString $result 'packetSha256' 'AI review result'
-if ($resultPacketSha256 -ne (Get-FileSha256 -Path $packetFullPath)) { throw 'AI review result packet hash does not match the prepared packet.' }
+if ($resultPacketSha256 -ne (Get-FileSha256Hex -Path $packetFullPath)) { throw 'AI review result packet hash does not match the prepared packet.' }
 if ($packetStatus -eq 'Ready' -and $resultStatus -eq 'ReviewUnavailable') { throw 'AI review result cannot claim ReviewUnavailable for a Ready packet.' }
 if ($packetStatus -eq 'ReviewUnavailable' -and $resultStatus -ne 'ReviewUnavailable') { throw 'AI review result must remain ReviewUnavailable when the prepared packet is unavailable.' }
 
@@ -170,7 +156,7 @@ foreach ($file in $resultFiles) {
             if ($actualHash -ne $expectedHash) { throw "AI review page $slide in '$input' has a mismatched $hashProperty." }
             $pathProperty = if ($hashProperty -eq 'sourceSha256') { 'sourceImage' } else { 'normalizedImage' }
             $actualPath = [string](Get-PropertyValue $page $pathProperty '')
-            if (-not (Test-Path -LiteralPath $actualPath) -or (Get-FileSha256 -Path $actualPath) -ne $expectedHash) { throw "AI review page $slide in '$input' has a stale or replaced image for $hashProperty." }
+            if (-not (Test-Path -LiteralPath $actualPath) -or (Get-FileSha256Hex -Path $actualPath) -ne $expectedHash) { throw "AI review page $slide in '$input' has a stale or replaced image for $hashProperty." }
         }
         $pageStatus = Assert-RequiredString $page 'status' "AI review page $slide in '$input'"
         if ($pageStatus -notin $allowedPageStatuses) { throw "Unsupported AI review page status: $pageStatus" }

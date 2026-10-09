@@ -17,20 +17,6 @@ function Get-PageNumber {
     return 0
 }
 
-function Get-FileSha256 {
-    param([string]$Path)
-    $stream = $null
-    $sha256 = $null
-    try {
-        $stream = [System.IO.File]::OpenRead($Path)
-        $sha256 = [System.Security.Cryptography.SHA256]::Create()
-        return ($sha256.ComputeHash($stream) | ForEach-Object { $_.ToString('x2') }) -join ''
-    } finally {
-        if ($null -ne $sha256) { $sha256.Dispose() }
-        if ($null -ne $stream) { $stream.Dispose() }
-    }
-}
-
 function Test-UsablePageImage {
     param([string]$Path)
 
@@ -89,7 +75,7 @@ function Get-ManifestExpectedSlideCount {
 $manifestFullPath = [System.IO.Path]::GetFullPath($ManifestPath)
 $outputFullPath = [System.IO.Path]::GetFullPath($OutputPath)
 $manifest = Get-Content -LiteralPath $manifestFullPath -Raw -Encoding UTF8 | ConvertFrom-Json
-$manifestSha256 = Get-FileSha256 -Path $manifestFullPath
+$manifestSha256 = Get-FileSha256Hex -Path $manifestFullPath
 $filePackets = New-Object System.Collections.Generic.List[object]
 
 foreach ($file in @($manifest.files)) {
@@ -126,8 +112,8 @@ foreach ($file in @($manifest.files)) {
                     slide = $slide
                     sourceImage = $source.FullName
                     normalizedImage = $normalized.FullName
-                    sourceSha256 = Get-FileSha256 -Path $source.FullName
-                    normalizedSha256 = Get-FileSha256 -Path $normalized.FullName
+                    sourceSha256 = Get-FileSha256Hex -Path $source.FullName
+                    normalizedSha256 = Get-FileSha256Hex -Path $normalized.FullName
                 }) | Out-Null
             }
         }

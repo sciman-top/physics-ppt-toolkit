@@ -74,20 +74,6 @@ function Get-PackageSnapshot {
     }
 }
 
-function Get-FileSha256 {
-    param([string]$Path)
-    $stream = $null
-    $sha256 = $null
-    try {
-        $stream = [System.IO.File]::OpenRead($Path)
-        $sha256 = [System.Security.Cryptography.SHA256]::Create()
-        return ($sha256.ComputeHash($stream) | ForEach-Object { $_.ToString('x2') }) -join ''
-    } finally {
-        if ($null -ne $sha256) { $sha256.Dispose() }
-        if ($null -ne $stream) { $stream.Dispose() }
-    }
-}
-
 function Get-SnapshotText {
     param($Shape, [ref]$ReadFailed)
     try {
@@ -305,7 +291,7 @@ try {
         schemaVersion = 1
         generatedAt = (Get-Date).ToUniversalTime().ToString('o')
         sourcePath = $inputFullPath
-        sourceSha256 = Get-FileSha256 -Path $inputFullPath
+        sourceSha256 = Get-FileSha256Hex -Path $inputFullPath
         slideWidth = [double]$presentation.PageSetup.SlideWidth
         slideHeight = [double]$presentation.PageSetup.SlideHeight
         slideCount = [int]$presentation.Slides.Count

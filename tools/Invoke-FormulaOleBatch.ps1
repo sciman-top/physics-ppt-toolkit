@@ -91,7 +91,7 @@ function Get-FileSha256 {
             $sha.Dispose()
         }
     }
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    return (Get-FileSha256Hex -Path $Path)
 }
 
 function Get-BatchManifestPath {

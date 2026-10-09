@@ -330,28 +330,14 @@ function Add-ReportRow {
     }) | Out-Null
 }
 
-function Get-FileSha256 {
-    param([string]$Path)
-    $stream = $null
-    $sha256 = $null
-    try {
-        $stream = [System.IO.File]::OpenRead($Path)
-        $sha256 = [System.Security.Cryptography.SHA256]::Create()
-        return ($sha256.ComputeHash($stream) | ForEach-Object { $_.ToString('x2') }) -join ''
-    } finally {
-        if ($null -ne $sha256) { $sha256.Dispose() }
-        if ($null -ne $stream) { $stream.Dispose() }
-    }
-}
-
 function Get-NormalizeSignature {
     param(
         [System.IO.FileInfo]$File,
         [string]$SafeName
     )
-    $sourceHash = Get-FileSha256 -Path $File.FullName
-    $configHash = if (Test-Path -LiteralPath $ConfigPath) { Get-FileSha256 -Path $ConfigPath } else { 'missing' }
-    $scriptHash = Get-FileSha256 -Path $script:NormalizeScriptPath
+    $sourceHash = Get-FileSha256Hex -Path $File.FullName
+    $configHash = if (Test-Path -LiteralPath $ConfigPath) { Get-FileSha256Hex -Path $ConfigPath } else { 'missing' }
+    $scriptHash = Get-FileSha256Hex -Path $script:NormalizeScriptPath
     $payload = [ordered]@{
         sourceSha256 = $sourceHash
         configSha256 = $configHash
@@ -599,11 +585,6 @@ function Get-SlideKind {
     }
 
     return 'Normal'
-}
-
-function Test-IsUtilitySlide {
-    param($Slide, [int]$SlideNumber)
-    return ((Get-SlideKind -Slide $Slide -SlideNumber $SlideNumber) -in @('Cover', 'Ending', 'Resource'))
 }
 
 function Get-SpecialSlidePreserveIssue {

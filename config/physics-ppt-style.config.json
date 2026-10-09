@@ -505,14 +505,10 @@
       "ClosedWorldUnattended",
       "ExplicitMigration"
     ],
-    "defaultTargetCarrier": "OfficeMath",
     "writeBackEnabled": false,
     "imageFormulaWriteBackEnabled": false,
     "mathTypeMigrationEnabled": false,
     "ocrEnabled": false,
-    "modelInferenceEnabled": false,
-    "unattendedCanonicalSources": ["Whitelist", "GoldSet"],
-    "unattendedRequiresPowerPointGate": true,
-    "unattendedRequiresVisualGate": true
+    "modelInferenceEnabled": false
   }
 }
