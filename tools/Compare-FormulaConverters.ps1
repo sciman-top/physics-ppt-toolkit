@@ -55,7 +55,16 @@ function Resolve-Pandoc {
 function Invoke-PandocVersion {
     param([string]$Path)
     if ([string]::IsNullOrWhiteSpace($Path)) { return 'Unavailable' }
-    $output = & $Path --version 2>&1
+    # Lower EAP around native calls: pandoc banners/warnings on stderr would
+    # otherwise become a terminating NativeCommandError on the 5.1 fallback
+    # host before $LASTEXITCODE could be judged.
+    $previousEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & $Path --version 2>&1
+    } finally {
+        $ErrorActionPreference = $previousEap
+    }
     if ($LASTEXITCODE -ne 0) { return 'ProbeFailed' }
     return (($output | Select-Object -First 1 | ForEach-Object { [string]$_ }) -join ' ').Trim()
 }
@@ -77,7 +86,15 @@ function Get-PandocOmml {
     # One backslash must reach Pandoc.  TargetTex is already a canonical TeX
     # value from the current whitelist/candidate exporter.
     [System.IO.File]::WriteAllText($mdPath, ('$$' + $Tex + '$$'), [System.Text.UTF8Encoding]::new($false))
-    $output = & $Pandoc $mdPath -o $docxPath --from markdown --to docx 2>&1
+    # Same EAP guard as Invoke-PandocVersion: a conversion warning on stderr
+    # must be report data, not a terminating error.
+    $previousEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & $Pandoc $mdPath -o $docxPath --from markdown --to docx 2>&1
+    } finally {
+        $ErrorActionPreference = $previousEap
+    }
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $docxPath -PathType Leaf)) {
         return [pscustomobject]@{ Status = 'Failed'; Message = (($output | ForEach-Object { [string]$_ }) -join ' ').Trim(); Docx = $docxPath; Xml = '' }
     }

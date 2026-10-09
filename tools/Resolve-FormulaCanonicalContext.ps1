@@ -71,7 +71,9 @@ foreach ($candidate in @(Import-Csv -LiteralPath $CandidateCsv -Encoding UTF8)) 
     if ($contextComplete -and $contextByKey.ContainsKey($contextKey)) {
         [object[]]$contextMatches = @($contextByKey[$contextKey].ToArray())
     }
-    [object[]]$whitelistMatches = @($whitelist | Where-Object { $rawText -match ([string]$_.sourcePattern) })
+    # Case-sensitive on purpose: P=W/t (power) and p=F/S (pressure) differ only
+    # by case, so this resolver must match exactly like Test-FormulaWhitelistMatch.
+    [object[]]$whitelistMatches = @($whitelist | Where-Object { $rawText -cmatch ([string]$_.sourcePattern) })
     $status = 'ManualRequired'
     $canonicalSource = 'None'
     $formulaName = ''
