@@ -67,6 +67,10 @@ if ($null -eq $boxRule) { throw 'Config styleRules is missing STYLE.HIGHLIGHT.BO
 if (-not $boxRule.enabled) {
     throw 'STYLE.HIGHLIGHT.BOX_SHAPE is disabled by configuration; enable it before unifying highlight boxes.'
 }
+if ($null -eq $config.fontSizes -or $null -eq $config.fontSizes.bodyMax) {
+    throw 'Config fontSizes.bodyMax is required: conclusion box text size must come from the sanctioned config.'
+}
+[int]$script:ConclusionTextSize = [int]$config.fontSizes.bodyMax
 
 function Get-BoxRuleNumber {
     param([string]$Name, [double]$Fallback)
@@ -246,7 +250,7 @@ function Set-HighlightBoxStyle {
                     $runSizeText = [string]$run.Font.Size
                     $runSize = [double]0
                     if (-not [double]::TryParse($runSizeText, [ref]$runSize) -or $runSize -lt 1) {
-                        $run.Font.Size = 36
+                        $run.Font.Size = $script:ConclusionTextSize
                     }
                 }
             }

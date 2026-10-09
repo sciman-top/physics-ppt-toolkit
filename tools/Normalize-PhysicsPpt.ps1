@@ -128,7 +128,30 @@ $script:ConfigJson = $null
 if (Test-Path -LiteralPath $ConfigPath) {
     $script:ConfigJson = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
 } else {
-    Write-Warning "Config file not found: $ConfigPath — using built-in defaults."
+    throw "Style config not found: $ConfigPath — normalization requires the sanctioned style config."
+}
+
+# The sanctioned config is the single source for style values; the inline
+# defaults in $script:Style are unreachable documentation, not a second
+# palette. Fail fast on a missing key instead of silently drifting.
+$script:RequiredStyleKeys = @(
+    'fonts.chinese', 'fonts.compactChinese', 'fonts.latin', 'fonts.math',
+    'fontSizes.title1', 'fontSizes.sectionTitle', 'fontSizes.title2', 'fontSizes.body',
+    'fontSizes.bodyMax', 'fontSizes.displayTitleMin', 'fontSizes.auxiliary', 'fontSizes.minimum',
+    'fontSizes.tableHeader', 'fontSizes.tableBody', 'fontSizes.formulaInline',
+    'fontSizes.formulaStandalone', 'fontSizes.formulaCore', 'fontSizes.footer',
+    'colors.white', 'colors.black', 'colors.body', 'colors.darkGray', 'colors.sectionTitle',
+    'colors.extensionTitle', 'colors.formulaBlue', 'colors.experimentGreen',
+    'colors.yellowFill', 'colors.yellowBorder'
+)
+$missingStyleKeys = @($script:RequiredStyleKeys | Where-Object {
+    $keyParts = $_.Split('.')
+    $categoryProp = $script:ConfigJson.PSObject.Properties[$keyParts[0]]
+    $keyProp = if ($null -ne $categoryProp -and $null -ne $categoryProp.Value) { $categoryProp.Value.PSObject.Properties[$keyParts[1]] } else { $null }
+    $null -eq $keyProp -or $null -eq $keyProp.Value -or [string]::IsNullOrWhiteSpace([string]$keyProp.Value)
+})
+if ($missingStyleKeys.Count -gt 0) {
+    throw ("Style config is missing required keys: {0} (config: {1})" -f ($missingStyleKeys -join ', '), $ConfigPath)
 }
 
 function Get-ConfigValue {

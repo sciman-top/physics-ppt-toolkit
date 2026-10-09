@@ -94,8 +94,19 @@ $workingPptx = Join-Path $deliveryDir "$stem.brand.pptx"
 Copy-Item -LiteralPath $PptxPath -Destination $workingPptx -Force
 
 # --- palette: named roles resolved to hex by Convert-HexToRgbLong ----------
-# DividerRed/DividerBlue reuse the sanctioned config palette (emphasisRed /
-# sectionTitle) so dividers stay consistent with the normalization toolkit.
+# DividerRed/DividerBlue ARE the sanctioned config palette (emphasisRed /
+# sectionTitle) read live from config so dividers stay consistent with the
+# normalization toolkit; the remaining roles are brand-specific design
+# constants unique to the decorated divider/resource pages.
+$brandConfigPath = Join-Path $root 'config\physics-ppt-style.config.json'
+if (-not (Test-Path -LiteralPath $brandConfigPath)) { throw "Style config not found: $brandConfigPath" }
+$brandConfig = Get-Content -LiteralPath $brandConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+foreach ($requiredColor in @('emphasisRed', 'sectionTitle')) {
+    $colorProp = $brandConfig.colors.PSObject.Properties[$requiredColor]
+    if ($null -eq $colorProp -or [string]::IsNullOrWhiteSpace([string]$colorProp.Value)) {
+        throw "Config colors.$requiredColor is required for divider styling."
+    }
+}
 $script:Palette = @{
     Title      = '#FFFFFF'
     Subtitle   = '#EAF2FB'
@@ -105,8 +116,8 @@ $script:Palette = @{
     KeepYellow = '#FFD966'
     Gold       = '#FFD966'
     InfoValue  = '#F2F7FC'
-    DividerRed   = '#C00000'
-    DividerBlue  = '#1F4E79'
+    DividerRed   = [string]$brandConfig.colors.emphasisRed
+    DividerBlue  = [string]$brandConfig.colors.sectionTitle
 }
 
 function Convert-HexToRgbLong {
