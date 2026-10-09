@@ -1827,14 +1827,10 @@ function Set-AutoSizeTextFontSafely {
             return
         }
 
-        # Restore geometry only when AutoSize actually reflowed; writing bounds
-        # back on an unchanged shape can only introduce single-precision rounding.
-        if ($drift -gt 0.05) {
-            $Shape.Left = [single]$left
-            $Shape.Top = [single]$top
-            $Shape.Width = [single]$width
-            $Shape.Height = [single]$height
-        }
+        # Control only reaches here when $drift -le 0.05: every branch of the
+        # reflow block above reports and returns. Writing the captured bounds
+        # back on an unchanged shape would only introduce single-precision
+        # rounding, so no restore pass exists on this path by design.
         Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
             -Issue 'TextStyleNormalized' `
             -Details $(if ($SpecialSlide) { 'Special slide font family normalized; original size, emphasis, color, AutoSize, and geometry were preserved.' } else { 'Font family normalized; original size, emphasis, color, AutoSize, and geometry were preserved.' }) `

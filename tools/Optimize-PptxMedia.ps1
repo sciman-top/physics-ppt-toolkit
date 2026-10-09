@@ -306,7 +306,10 @@ function Invoke-SharpMedia {
 
     if (-not (Test-Path -LiteralPath $WorkerPath)) { throw "Sharp worker not found: $WorkerPath" }
 
-    $argsPath = [System.IO.Path]::GetTempFileName()
+    # Random-name temp file (same rationale as New-TempMediaPath): a named
+    # GetTempFileName() placeholder would leak a 0-byte file if the process
+    # dies before the finally cleanup runs.
+    $argsPath = Join-Path ([System.IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('N') + '.args.json')
     try {
         [pscustomobject]@{
             input = $InputFile

@@ -463,8 +463,11 @@ try {
     $comMap = Get-ComShapeMap -Presentation $pres
 }
 finally {
-    if ($null -ne $pres) { $pres.Close(); Release-ComObjectSafe $pres }
-    if ($null -ne $ppt) { $ppt.Quit(); Release-ComObjectSafe $ppt }
+    # Cleanup must not throw past the boundary: a transient COM refusal on
+    # Close/Quit would otherwise mask the inventory result (same guarded
+    # pattern as the other COM tools' finally blocks).
+    if ($null -ne $pres) { try { $pres.Close() | Out-Null } catch { }; Release-ComObjectSafe $pres }
+    if ($null -ne $ppt) { try { $ppt.Quit() | Out-Null } catch { }; Release-ComObjectSafe $ppt }
     [GC]::Collect()
     [GC]::WaitForPendingFinalizers()
 }

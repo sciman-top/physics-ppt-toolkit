@@ -83,7 +83,17 @@ function Invoke-VersionProbe {
     )
 
     try {
-        $output = & $FilePath @Arguments 2>&1
+        # Lower EAP around the native call: on Windows PowerShell 5.1, stderr
+        # from `2>&1` would otherwise become a terminating NativeCommandError
+        # (or, inside this try/catch, a false probe failure) before
+        # $LASTEXITCODE could be judged.
+        $previousEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $output = & $FilePath @Arguments 2>&1
+        } finally {
+            $ErrorActionPreference = $previousEap
+        }
         $text = ($output | Select-Object -First $MaxLines | ForEach-Object { [string]$_ }) -join ' | '
         return [pscustomobject]@{
             ExitCode = $LASTEXITCODE
@@ -105,7 +115,15 @@ function Invoke-NodeRepositoryProbe {
 
     Push-Location -LiteralPath $root
     try {
-        $output = & $NodePath -e $Script 2>&1
+        # Same EAP guard as Invoke-VersionProbe: node/npm banners on stderr must
+        # not terminate the probe before $LASTEXITCODE is read.
+        $previousEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $output = & $NodePath -e $Script 2>&1
+        } finally {
+            $ErrorActionPreference = $previousEap
+        }
         return [pscustomobject]@{
             ExitCode = $LASTEXITCODE
             Text = (($output | ForEach-Object { [string]$_ }) -join ' ').Trim()
@@ -161,7 +179,17 @@ function Test-DotNetSdk {
     }
 
     foreach ($candidate in $candidates) {
-        $sdks = & $candidate --list-sdks 2>&1
+        # Lower EAP around the native call: on Windows PowerShell 5.1, stderr
+        # from `2>&1` would otherwise become a terminating NativeCommandError
+        # before $LASTEXITCODE could be judged (same guard as the workflow's
+        # Resolve-DotNetCommand).
+        $previousEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $sdks = & $candidate --list-sdks 2>&1
+        } finally {
+            $ErrorActionPreference = $previousEap
+        }
         $sdkLines = @($sdks | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
         if ($LASTEXITCODE -eq 0 -and $sdkLines.Count -gt 0) {
             Add-ToolchainCheck -Name '.NET SDK' -Tier $Tier -Status 'OK' -Version ([string]$sdkLines[0]) -Path $candidate

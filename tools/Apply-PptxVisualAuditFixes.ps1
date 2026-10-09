@@ -171,7 +171,9 @@ try {
         }
     }
 
-    $pres.SaveAs($OutputPath)
+    # Same COM retry discipline as every other Save/SaveAs write boundary: a
+    # transient rejection here would abort the batch after all fixes applied.
+    Invoke-WithComRetry -Action { $pres.SaveAs($OutputPath) } | Out-Null
     Add-FixRow -Rows $reportRows -File ([System.IO.Path]::GetFileName($InputPath)) -Slide 0 -Shape '(presentation)' -Issue 'SavedAs' -Status 'Saved' -Details $OutputPath
 } finally {
     if ($null -ne $pres) {

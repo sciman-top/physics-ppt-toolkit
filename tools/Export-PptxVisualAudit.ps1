@@ -352,7 +352,9 @@ try {
             Add-AuditRow -Rows $auditRows -File $fileName -Slide 0 -Shape '(presentation)' -Issue 'PdfExported' -Severity 'Info' -Details $pdfPath
         } catch {
             try {
-                $pres.SaveAs($pdfPath, 32) | Out-Null
+                # SaveAs fallback gets the same transient-rejection retry as the
+                # primary ExportAsFixedFormat path above.
+                Invoke-WithComRetry -MaxRetries 3 -DelayMs 1000 -Action { $pres.SaveAs($pdfPath, 32) } | Out-Null
                 if (-not (Test-Path -LiteralPath $pdfPath) -or (Get-Item -LiteralPath $pdfPath).Length -le 0) {
                     throw "PowerPoint did not create a non-empty PDF through SaveAs fallback: $pdfPath"
                 }
