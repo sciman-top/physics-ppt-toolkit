@@ -46,13 +46,6 @@ $required = @(
     'manual\physics-ppt-visual-review\SKILL.md',
     'manual\physics-ppt-visual-review\references\review-result.schema.json',
     'config\physics-ppt-style.config.json',
-    'config\formula-ir.schema.json',
-    'config\formula-evidence-manifest.schema.json',
-    'config\formula-goldset.schema.json',
-    'config\formula-goldset-evidence-availability.schema.json',
-    'config\formula-ole-visual-adjudication.schema.json',
-    'config\presentation-snapshot.schema.json',
-    'config\invariant-comparison.schema.json',
     'tools\Normalize-PhysicsPpt.ps1',
     'tools\Export-FormulaOmmlCandidates.ps1',
     'tools\Test-FormulaIr.ps1',
@@ -163,40 +156,6 @@ foreach ($safeDefault in @('writeBackEnabled', 'imageFormulaWriteBackEnabled', '
     }
     if ([bool]$safeDefaultProperty.Value) {
         throw "Config formulaProcessing.$safeDefault must remain false by default"
-    }
-}
-
-$formulaIrSchemaPath = Join-Path $root 'config\formula-ir.schema.json'
-$formulaIrSchema = Get-Content -LiteralPath $formulaIrSchemaPath -Raw -Encoding UTF8 | ConvertFrom-Json
-if ([string]$formulaIrSchema.title -ne 'Physics PPT FormulaIR' -or [int]$formulaIrSchema.properties.schemaVersion.const -ne 1) {
-    throw 'FormulaIR schema metadata is invalid.'
-}
-$evidenceSchemaPath = Join-Path $root 'config\formula-evidence-manifest.schema.json'
-$evidenceSchema = Get-Content -LiteralPath $evidenceSchemaPath -Raw -Encoding UTF8 | ConvertFrom-Json
-if ([string]$evidenceSchema.title -ne 'Physics PPT formula evidence manifest' -or
-    [int]$evidenceSchema.properties.schemaVersion.const -ne 1) {
-    throw 'Formula evidence manifest schema metadata is invalid.'
-}
-$goldSetEvidenceSchema = Get-Content -LiteralPath (Join-Path $root 'config\formula-goldset-evidence-availability.schema.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-if ([string]$goldSetEvidenceSchema.title -ne 'Physics PPT formula GoldSet evidence availability receipt' -or
-    [int]$goldSetEvidenceSchema.properties.schemaVersion.const -ne 1 -or
-    [bool]$goldSetEvidenceSchema.properties.policy.properties.writeBackAllowed.const) {
-    throw 'Formula GoldSet evidence availability schema metadata is invalid.'
-}
-$oleVisualAdjudicationSchema = Get-Content -LiteralPath (Join-Path $root 'config\formula-ole-visual-adjudication.schema.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-if ([string]$oleVisualAdjudicationSchema.title -ne 'Physics PPT current MathType/OLE visual adjudication proposal' -or
-    [int]$oleVisualAdjudicationSchema.properties.schemaVersion.const -ne 1 -or
-    [bool]$oleVisualAdjudicationSchema.properties.policy.properties.writeBackAllowed.const) {
-    throw 'Formula OLE visual adjudication schema metadata is invalid.'
-}
-foreach ($evidenceRequired in @('schemaVersion', 'generatedAt', 'policy', 'input', 'inventory', 'counts', 'records')) {
-    if ($evidenceRequired -notin @($evidenceSchema.required)) {
-        throw "Formula evidence manifest schema is missing required root field: $evidenceRequired"
-    }
-}
-foreach ($schemaRequired in @('schemaVersion', 'recordId', 'source', 'detection', 'canonical', 'decision', 'evidence')) {
-    if ($schemaRequired -notin @($formulaIrSchema.required)) {
-        throw "FormulaIR schema is missing required root field: $schemaRequired"
     }
 }
 
@@ -314,17 +273,6 @@ if ($slashFragmentXml -match '<m:f>') { throw 'Linear slash OMML regression: J\/
 if ($slashFragmentXml -notmatch '>/<') { throw 'Linear slash OMML regression: escaped slash run text is missing.' }
 
 # --- 2c. Formula recognition gold set contract ---
-$goldSetSchemaPath = Join-Path $root 'config\formula-goldset.schema.json'
-$goldSetSchema = Get-Content -LiteralPath $goldSetSchemaPath -Raw -Encoding UTF8 | ConvertFrom-Json
-if ([string]$goldSetSchema.title -ne 'Physics PPT formula recognition gold set' -or
-    [int]$goldSetSchema.properties.schemaVersion.const -ne 1) {
-    throw 'Formula gold set schema metadata is invalid.'
-}
-foreach ($goldSetRequired in @('schemaVersion', 'generatedAt', 'input', 'policy', 'counts', 'evidenceSetSha256', 'records')) {
-    if ($goldSetRequired -notin @($goldSetSchema.required)) { throw "Formula gold set schema is missing required root field: $goldSetRequired" }
-}
-if ([bool]$goldSetSchema.properties.policy.properties.writeBackAllowed.const) { throw 'Formula gold set schema must keep writeBackAllowed=false.' }
-if ([string]$goldSetSchema.properties.policy.properties.reviewRequirement.const -ne 'HumanReviewed') { throw 'Formula gold set schema must require HumanReviewed review.' }
 
 # The exporter covers both parameter sets: GoldSet construction and the
 # evidence-availability verification mode (former standalone availability
@@ -514,10 +462,6 @@ if ($visualSkill -match 'TODO|PLACEHOLDER') { throw 'physics-ppt-visual-review c
 $visualReviewSchemaPath = Join-Path $root 'manual\physics-ppt-visual-review\references\review-result.schema.json'
 $visualReviewSchema = Get-Content -LiteralPath $visualReviewSchemaPath -Raw -Encoding UTF8 | ConvertFrom-Json
 if ($visualReviewSchema.title -ne 'Physics PPT visual review result') { throw 'Visual review result schema is invalid.' }
-foreach ($schemaFile in @('config\presentation-snapshot.schema.json', 'config\invariant-comparison.schema.json')) {
-    $schema = Get-Content -LiteralPath (Join-Path $root $schemaFile) -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ([int]$schema.properties.schemaVersion.const -ne 1) { throw "Schema version guard is invalid: $schemaFile" }
-}
 
 # --- 3. PowerShell syntax check ---
 $psFiles = @(

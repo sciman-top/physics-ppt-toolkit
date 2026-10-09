@@ -28,8 +28,7 @@ physics-ppt-toolkit/
 │  └─ 公式四篇（处理说明 / OLE转换执行计划 / 识别转换实施计划 / 排版优化路线图）
 │     与 媒体优化路线图、公式GoldSet编制SOP
 ├─ config/
-│  ├─ physics-ppt-style.config.json       样式运行配置（含公式白名单）
-│  └─ *.schema.json                       快照/证据类 schema（按功能启用）
+│  └─ physics-ppt-style.config.json       样式运行配置（含公式白名单与安全开关）
 ├─ tools/                                 PowerShell 工具链
 │  ├─ Invoke-PhysicsPptWorkflow.ps1       工作流编排入口
 │  ├─ Normalize-PhysicsPpt.ps1            核心规范化实现
