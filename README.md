@@ -117,6 +117,10 @@ reports/13.2内能（王耀强）_v12/
 # 增强一键：白名单公式转可编辑 OfficeMath/OMML，并做 Open XML 结构校验
 .\tools\Invoke-PhysicsPptWorkflow.ps1 -InputPath "D:\课件\原始PPT" -Recurse -Mode NormalizeAndPdf -SkipPreflightReport -ApplyFormulaOmmlWhitelist
 
+# 全链一键：规范化 → 品牌刷新 → 强调框统一（→ 可再加 -ApplyFormulaOmmlWhitelist），
+# 阶段副本与最终 PDF 都落在同一交付目录的 01_交付物 内
+.\tools\Invoke-PhysicsPptWorkflow.ps1 -InputPath "D:\课件\原始PPT" -Recurse -Mode NormalizeAndPdf -SkipPreflightReport -BrandRefresh -HighlightBox
+
 # 深度视觉审查：需要逐页 PNG、自动确认和低风险修复副本时再开启
 .\tools\Invoke-PhysicsPptWorkflow.ps1 -InputPath "D:\课件\原始PPT" -Recurse -Mode NormalizeAndPdf -IncludeReviewArtifacts -IncludeVisualAudit -ApplyVisualAuditFixes -ApplyFormulaOmmlWhitelist -FormulaOmmlVisualAudit
 

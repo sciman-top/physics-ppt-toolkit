@@ -101,6 +101,8 @@ param(
     [string]$AiVisualReviewResult,
     [switch]$IncludeVisualAudit,
     [switch]$ApplyVisualAuditFixes,
+    [switch]$BrandRefresh,
+    [switch]$HighlightBox,
     [switch]$ApplyFormulaOmmlWhitelist,
     [switch]$FormulaOmmlVisualAudit,
     [ValidateSet('ReportOnly', 'CandidateOnly', 'ReviewRequired', 'ClosedWorldUnattended', 'ExplicitMigration')]
@@ -148,6 +150,9 @@ if ($script:FormulaProcessingModeExplicit -and
 }
 if ($script:FormulaProcessingMode -eq 'ClosedWorldUnattended' -and $ApplyFormulaOmmlWhitelist -and -not $FormulaOmmlVisualAudit) {
     throw 'ClosedWorldUnattended write-back requires -FormulaOmmlVisualAudit so the rendered visual gate is present.'
+}
+if (($BrandRefresh -or $HighlightBox) -and $Mode -eq 'CheckOnly') {
+    throw '-BrandRefresh/-HighlightBox produce styled PPTX copies and require a normalization mode; CheckOnly never writes deliverables.'
 }
 
 if ($ApplyVisualAuditFixes -and -not $IncludeVisualAudit) {
@@ -1883,6 +1888,10 @@ function Write-Summary {
         $lines.Add('- `12_视觉修复/`：仅包含规则可确定的低风险修复副本，不覆盖规范化 PPTX')
         $lines.Add('- `13_视觉修复审查/`：对视觉修复副本再次导出的审查报告和自动确认门禁')
     }
+    if ($null -ne $Manifest -and ($Manifest.PSObject.Properties.Name -contains 'brandStageArtifacts') -and $null -ne $Manifest.brandStageArtifacts) {
+        $chainCompleted = @($Manifest.brandStageArtifacts.files | Where-Object { [string]$_.status -eq 'Completed' }).Count
+        $lines.Add("- 品牌链副本（规范化→品牌→强调框）：$chainCompleted 份；最终交付以 01_交付物 内 `_callout`/`_brand` 副本及其同名 PDF 为准")
+    }
     if ($null -ne $formulaOmmlArtifacts) {
         $lines.Add('- `14_公式OMML副本/`：白名单公式转换为可编辑 OfficeMath/OMML 的 PPTX 副本')
         if ($formulaOmmlVisualAuditEnabled) {
@@ -2177,6 +2186,133 @@ function Invoke-VisualAuditArtifacts {
     return @($items.ToArray())
 }
 
+function Invoke-BrandStageArtifacts {
+    # Full-chain stage copies (brand refresh, then highlight-box unification)
+    # written in place under 01_交付物, mirroring the formula OMML stage. The
+    # invariant gate intentionally covers the normalization step only: these
+    # stages change visuals by design and keep their own reports under
+    # 00_检查报告. Stage order matters: visual-audit fixes (when enabled) feed
+    # the brand stage so no fix copy is lost, and the formula stage sources the
+    # final chain copy.
+    param(
+        $Manifest,
+        [string]$DeliveryDir,
+        [bool]$RunBrand,
+        [bool]$RunHighlight
+    )
+
+    $result = [ordered]@{
+        runBrand = $RunBrand
+        runHighlight = $RunHighlight
+        files = @()
+    }
+    foreach ($file in @($Manifest.files)) {
+        $safeName = [string]$file.outputStem
+        $extension = [System.IO.Path]::GetExtension([string]$file.normalizedPptx)
+        if ([string]::IsNullOrWhiteSpace($extension)) { $extension = '.pptx' }
+        $sourcePptx = ''
+        if ($Manifest.PSObject.Properties.Name -contains 'visualAuditArtifacts') {
+            foreach ($visual in @($Manifest.visualAuditArtifacts | Where-Object {
+                (Get-ObjectPropertyValue -Object $_ -PropertyName 'file' -DefaultValue '') -eq $file.input })) {
+                $fixed = Get-ObjectPropertyValue -Object $visual -PropertyName 'fixedPptx' -DefaultValue ''
+                if (-not [string]::IsNullOrWhiteSpace($fixed) -and (Test-Path -LiteralPath $fixed)) {
+                    $sourcePptx = $fixed
+                    break
+                }
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($sourcePptx)) {
+            $sourcePptx = [string]$file.normalizedPptx
+        }
+        if ([string]::IsNullOrWhiteSpace($sourcePptx) -or -not (Test-Path -LiteralPath $sourcePptx)) { continue }
+
+        $record = [ordered]@{
+            file = [string]$file.input
+            deckStem = $safeName
+            sourcePptx = $sourcePptx
+            brandPptx = $null
+            highlightPptx = $null
+            finalPptx = $sourcePptx
+            finalPdf = $null
+            status = 'Skipped'
+        }
+        $current = $sourcePptx
+        # Stage scripts run as child pwsh processes (Normalize's parallel-worker
+        # pattern), not in-process ampersand calls: under pwsh 7.6 an & -invoked
+        # child script can lose visibility of its own script-scope functions
+        # inside scriptblocks handed to dot-sourced helpers (observed with
+        # Apply-PptxBrandVisualRefresh's Invoke-WithComRetry slide loop), while
+        # a fresh `pwsh -File` entry always resolves correctly and keeps the
+        # workflow's COM state isolated.
+        $stageHost = Resolve-PowerShellHost
+        if ($RunBrand) {
+            $brandPptx = Join-Path $DeliveryDir "$safeName.brand$extension"
+            Write-Host "  brand refresh -> $(Split-Path -Leaf $brandPptx)"
+            # Out-Host keeps the child's stdout on the console: anything left on
+            # this function's output stream would pollute the returned result
+            # object (pwsh unrolls function output into the caller's value).
+            & $stageHost -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'Apply-PptxBrandVisualRefresh.ps1') -PptxPath $current -OutputPath $brandPptx | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw "Brand refresh stage failed with exit code $LASTEXITCODE" }
+            if (-not (Test-Path -LiteralPath $brandPptx)) { throw "Brand refresh produced no output: $brandPptx" }
+            $record.brandPptx = $brandPptx
+            $current = $brandPptx
+        }
+        if ($RunHighlight) {
+            $highlightPptx = Join-Path $DeliveryDir "$safeName.callout$extension"
+            Write-Host "  highlight box -> $(Split-Path -Leaf $highlightPptx)"
+            & $stageHost -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'Apply-PptxHighlightBoxStyle.ps1') -PptxPath $current -OutputPath $highlightPptx | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw "Highlight-box stage failed with exit code $LASTEXITCODE" }
+            if (-not (Test-Path -LiteralPath $highlightPptx)) { throw "Highlight-box stage produced no output: $highlightPptx" }
+            $record.highlightPptx = $highlightPptx
+            $current = $highlightPptx
+        }
+        $record.finalPptx = $current
+        $record.status = 'Completed'
+        $result.files += ,([pscustomobject]$record)
+    }
+    return [pscustomobject]$result
+}
+
+function Export-FinalChainPdf {
+    # Export the PDF of the last chain copy from a fresh hidden PowerPoint
+    # instance. Mirrors Normalize's Export-PresentationPdf (ppSaveAsPDF) with
+    # the workflow-level COM lifecycle (retry on open, full release on exit).
+    param(
+        [string]$PptxPath,
+        [string]$PdfPath,
+        [string]$FileName
+    )
+    $application = $null
+    $presentation = $null
+    try {
+        $application = New-PowerPointApplication
+        $pptxFullPath = [System.IO.Path]::GetFullPath($PptxPath)
+        $presentation = Invoke-WithComRetry -MaxRetries 3 -DelayMs 800 -Action {
+            $application.Presentations.Open($pptxFullPath, $true, $false, $false)
+        }.GetNewClosure()
+        $pdfFormat = 32 # ppSaveAsPDF
+        Invoke-WithComRetry -MaxRetries 3 -DelayMs 800 -Action {
+            $presentation.SaveAs([System.IO.Path]::GetFullPath($PdfPath), $pdfFormat)
+        }.GetNewClosure()
+        if (-not (Test-Path -LiteralPath $PdfPath) -or (Get-Item -LiteralPath $PdfPath).Length -le 0) {
+            throw "PowerPoint did not create a non-empty final-chain PDF: $PdfPath"
+        }
+        Write-Host "  final PDF -> $(Split-Path -Leaf $PdfPath)"
+        return $true
+    } finally {
+        if ($null -ne $presentation) {
+            try { Invoke-WithComRetry -MaxRetries 2 -Action { $presentation.Close() }.GetNewClosure() | Out-Null } catch { }
+            Release-ComObjectSafe $presentation
+        }
+        if ($null -ne $application) {
+            try { $application.Quit() } catch { }
+            Release-ComObjectSafe $application
+        }
+        [GC]::Collect()
+        [GC]::WaitForPendingFinalizers()
+    }
+}
+
 function Invoke-FormulaOmmlArtifacts {
     param(
         $Manifest,
@@ -2254,6 +2390,19 @@ function Invoke-FormulaOmmlArtifacts {
                 $sourcePptx = $fixed
                 $sourceKind = 'VisualFixed'
                 break
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($sourcePptx) -and $Manifest.PSObject.Properties.Name -contains 'brandStageArtifacts') {
+            # A brand/highlight chain ran for this deck: the formula stage must
+            # convert the final chain copy, or the styled callout deliverable
+            # would ship without the converted formulas.
+            foreach ($chainFile in @(Get-ObjectPropertyValue -Object $Manifest.brandStageArtifacts -PropertyName 'files' -DefaultValue @())) {
+                if ((Get-ObjectPropertyValue -Object $chainFile -PropertyName 'file' -DefaultValue '') -ne $file.input) { continue }
+                $chainCandidate = Get-ObjectPropertyValue -Object $chainFile -PropertyName 'finalPptx' -DefaultValue ''
+                if (-not [string]::IsNullOrWhiteSpace($chainCandidate) -and (Test-Path -LiteralPath $chainCandidate)) {
+                    $sourcePptx = $chainCandidate
+                    $sourceKind = 'BrandChain'
+                }
             }
         }
         if ([string]::IsNullOrWhiteSpace($sourcePptx)) {
@@ -2602,6 +2751,7 @@ if ($ApplyFormulaOmmlWhitelist) {
 
 $stepCount = 5
 if ($IncludeVisualAudit) { $stepCount++ }
+if ($BrandRefresh -or $HighlightBox) { $stepCount++ }
 if ($ApplyFormulaOmmlWhitelist) { $stepCount++ }
 
 Write-Host "Step 1/${stepCount}: self-check"
@@ -2653,7 +2803,7 @@ if ($Mode -eq 'CheckOnly') {
         Recurse = [bool]$Recurse
         UpdateMaster = [bool]$UpdateMaster
         DisableAdvanceOnClick = [bool]$DisableAdvanceOnClick
-        NoPdf = ($Mode -eq 'SafeNormalize')
+        NoPdf = (($Mode -eq 'SafeNormalize') -or $BrandRefresh -or $HighlightBox)
         Force = ($Mode -eq 'ForceRebuild')
         FilePattern = $FilePattern
     }
@@ -2742,6 +2892,45 @@ if ($IncludeVisualAudit) {
     $manifest | Add-Member -NotePropertyName visualAuditEnabled -NotePropertyValue $false -Force
     $manifest | Add-Member -NotePropertyName visualAuditFixesEnabled -NotePropertyValue $false -Force
     $manifest | Add-Member -NotePropertyName visualAuditArtifacts -NotePropertyValue @() -Force
+}
+
+if ($BrandRefresh -or $HighlightBox) {
+    $currentStep++
+    Write-Host "Step ${currentStep}/${stepCount}: brand refresh and highlight-box copies"
+    $brandStageArtifacts = Invoke-BrandStageArtifacts -Manifest $manifest -DeliveryDir $normalizedDir -RunBrand ([bool]$BrandRefresh) -RunHighlight ([bool]$HighlightBox)
+    $manifest | Add-Member -NotePropertyName brandStageEnabled -NotePropertyValue $true -Force
+    $manifest | Add-Member -NotePropertyName brandStageArtifacts -NotePropertyValue $brandStageArtifacts -Force
+    # The stage copies supersede the normalized copy as the classroom
+    # deliverable, so the final-chain PDF is exported from the last stage copy
+    # instead of the .normalized PDF Normalize skipped in this mode, and the
+    # manifest's PDF validation is rebound to the delivered bytes.
+    if ($Mode -ne 'SafeNormalize') {
+        foreach ($chainFile in @($brandStageArtifacts.files)) {
+            if ((Get-ObjectPropertyValue -Object $chainFile -PropertyName 'status' -DefaultValue '') -ne 'Completed') { continue }
+            $finalPptx = [string](Get-ObjectPropertyValue -Object $chainFile -PropertyName 'finalPptx' -DefaultValue '')
+            $finalPdf = Join-Path $normalizedDir ("{0}.pdf" -f [string](Get-ObjectPropertyValue -Object $chainFile -PropertyName 'deckStem' -DefaultValue ''))
+            $exported = Export-FinalChainPdf -PptxPath $finalPptx -PdfPath $finalPdf -FileName (Split-Path -Leaf $finalPptx)
+            if (-not $exported) { continue }
+            $chainFile.finalPdf = $finalPdf
+            $deckStem = [string](Get-ObjectPropertyValue -Object $chainFile -PropertyName 'deckStem' -DefaultValue '')
+            foreach ($mf in @($manifest.files)) {
+                if ([string]$mf.input -ne [string](Get-ObjectPropertyValue -Object $chainFile -PropertyName 'file' -DefaultValue '')) { continue }
+                $finalPdfPageCount = Get-PdfPageCount -PdfPath $finalPdf
+                $expectedSlides = Get-ObjectPropertyValue -Object (Get-ObjectPropertyValue -Object $mf -PropertyName 'validation' -DefaultValue $null) -PropertyName 'expectedSlides' -DefaultValue $null
+                $mf.pdf = $finalPdf
+                $mf.pdfBytes = Get-FileLength -Path $finalPdf
+                $mf.pdfSha256 = Get-FileSha256 -Path $finalPdf
+                $validation = Get-ObjectPropertyValue -Object $mf -PropertyName 'validation' -DefaultValue $null
+                if ($null -ne $validation) {
+                    $validation.pdfPageCount = $finalPdfPageCount
+                    $validation.pdfPagesMatchExpected = ($null -ne $expectedSlides -and $null -ne $finalPdfPageCount -and [int]$finalPdfPageCount -eq [int]$expectedSlides)
+                }
+            }
+        }
+    }
+} else {
+    $manifest | Add-Member -NotePropertyName brandStageEnabled -NotePropertyValue $false -Force
+    $manifest | Add-Member -NotePropertyName brandStageArtifacts -NotePropertyValue $null -Force
 }
 
 if ($ApplyFormulaOmmlWhitelist) {

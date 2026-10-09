@@ -32,6 +32,10 @@
 param(
     [string]$PptxPath = '',
     [string]$OutputRoot = '',
+    # Chain-in-place mode (workflow -HighlightBox): write the styled copy to
+    # this exact path inside the caller's delivery tree instead of claiming a
+    # new reports/<stem>_v<N> generation; the caller owns backup and report dirs.
+    [string]$OutputPath = '',
     [double]$BorderWeightPt = 0,
     [double]$CornerRadiusAdj = -1
 )
@@ -130,17 +134,32 @@ if ($stem.EndsWith('.brand.callout')) { $stem = $stem.Substring(0, $stem.Length 
 elseif ($stem.EndsWith('.brand')) { $stem = $stem.Substring(0, $stem.Length - '.brand'.Length) }
 elseif ($stem.EndsWith('.callout')) { $stem = $stem.Substring(0, $stem.Length - '.callout'.Length) }
 if ($stem.EndsWith('.normalized')) { $stem = $stem.Substring(0, $stem.Length - '.normalized'.Length) }
-$deliveryRoot = New-VersionedDeliveryRoot -Stem $stem -ReportsRoot $OutputRoot
-$deliveryDir = Join-Path $deliveryRoot '01_交付物'
-$reportDir = Join-Path $deliveryRoot '00_检查报告'
-$backupDir = Join-Path $deliveryRoot '03_原始备份'
-foreach ($dir in @($deliveryDir, $reportDir, $backupDir)) {
-    New-Item -ItemType Directory -Path $dir -Force | Out-Null
-}
-Copy-Item -LiteralPath $PptxPath -Destination (Join-Path $backupDir "$stem.pptx") -Force
+if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
+    $OutputPath = [System.IO.Path]::GetFullPath($OutputPath)
+    $deliveryRoot = Split-Path -Parent (Split-Path -Parent $OutputPath)
+    $deliveryDir = Split-Path -Parent $OutputPath
+    $reportDir = Join-Path $deliveryRoot '00_检查报告'
+    $backupDir = Join-Path $deliveryRoot '03_原始备份'
+    foreach ($dir in @($deliveryDir, $reportDir)) {
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    }
+    # The caller's delivery tree already keeps the true source in 03_原始备份;
+    # a second copy of the chain input would overwrite it with an intermediate.
+    $workingPptx = $OutputPath
+    Copy-Item -LiteralPath $PptxPath -Destination $workingPptx -Force
+} else {
+    $deliveryRoot = New-VersionedDeliveryRoot -Stem $stem -ReportsRoot $OutputRoot
+    $deliveryDir = Join-Path $deliveryRoot '01_交付物'
+    $reportDir = Join-Path $deliveryRoot '00_检查报告'
+    $backupDir = Join-Path $deliveryRoot '03_原始备份'
+    foreach ($dir in @($deliveryDir, $reportDir, $backupDir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+    Copy-Item -LiteralPath $PptxPath -Destination (Join-Path $backupDir "$stem.pptx") -Force
 
-$workingPptx = Join-Path $deliveryDir "$stem.callout.pptx"
-Copy-Item -LiteralPath $PptxPath -Destination $workingPptx -Force
+    $workingPptx = Join-Path $deliveryDir "$stem.callout.pptx"
+    Copy-Item -LiteralPath $PptxPath -Destination $workingPptx -Force
+}
 
 $reportRows = New-Object System.Collections.Generic.List[object]
 $script:counters = @{ Changed = 0; AlreadyApplied = 0; GroupsSkipped = 0; Failed = 0 }

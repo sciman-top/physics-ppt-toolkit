@@ -34,6 +34,10 @@ param(
     [string]$PptxPath = '',
     [string]$OutputRoot = '',
     [string]$AssetsDir = '',
+    # Chain-in-place mode (workflow -BrandRefresh): write the branded copy to
+    # this exact path inside the caller's delivery tree instead of claiming a
+    # new reports/<stem>_v<N> generation; the caller owns backup and report dirs.
+    [string]$OutputPath = '',
     [int]$DividerFontSize = 54,
     [int]$IconDiameterPt = 48
 )
@@ -80,18 +84,34 @@ if ($stem.EndsWith('.brand.callout')) { $stem = $stem.Substring(0, $stem.Length 
 elseif ($stem.EndsWith('.callout')) { $stem = $stem.Substring(0, $stem.Length - '.callout'.Length) }
 elseif ($stem.EndsWith('.brand')) { $stem = $stem.Substring(0, $stem.Length - '.brand'.Length) }
 elseif ($stem.EndsWith('.normalized')) { $stem = $stem.Substring(0, $stem.Length - '.normalized'.Length) }
-$deliveryRoot = New-VersionedDeliveryRoot -Stem $stem -ReportsRoot $OutputRoot
-$deliveryDir = Join-Path $deliveryRoot '01_交付物'
-$pageImageDir = Join-Path $deliveryDir '页面图片'
-$reportDir = Join-Path $deliveryRoot '00_检查报告'
-$backupDir = Join-Path $deliveryRoot '03_原始备份'
-foreach ($dir in @($deliveryDir, $pageImageDir, $reportDir, $backupDir)) {
-    New-Item -ItemType Directory -Path $dir -Force | Out-Null
-}
-Copy-Item -LiteralPath $PptxPath -Destination (Join-Path $backupDir "$stem.pptx") -Force
+if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
+    $OutputPath = [System.IO.Path]::GetFullPath($OutputPath)
+    $deliveryRoot = Split-Path -Parent (Split-Path -Parent $OutputPath)
+    $deliveryDir = Split-Path -Parent $OutputPath
+    $pageImageDir = Join-Path $deliveryDir '页面图片'
+    $reportDir = Join-Path $deliveryRoot '00_检查报告'
+    $backupDir = Join-Path $deliveryRoot '03_原始备份'
+    foreach ($dir in @($deliveryDir, $pageImageDir, $reportDir)) {
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    }
+    # The caller's delivery tree already keeps the true source in 03_原始备份;
+    # a second copy of the chain input would overwrite it with an intermediate.
+    $workingPptx = $OutputPath
+    Copy-Item -LiteralPath $PptxPath -Destination $workingPptx -Force
+} else {
+    $deliveryRoot = New-VersionedDeliveryRoot -Stem $stem -ReportsRoot $OutputRoot
+    $deliveryDir = Join-Path $deliveryRoot '01_交付物'
+    $pageImageDir = Join-Path $deliveryDir '页面图片'
+    $reportDir = Join-Path $deliveryRoot '00_检查报告'
+    $backupDir = Join-Path $deliveryRoot '03_原始备份'
+    foreach ($dir in @($deliveryDir, $pageImageDir, $reportDir, $backupDir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+    Copy-Item -LiteralPath $PptxPath -Destination (Join-Path $backupDir "$stem.pptx") -Force
 
-$workingPptx = Join-Path $deliveryDir "$stem.brand.pptx"
-Copy-Item -LiteralPath $PptxPath -Destination $workingPptx -Force
+    $workingPptx = Join-Path $deliveryDir "$stem.brand.pptx"
+    Copy-Item -LiteralPath $PptxPath -Destination $workingPptx -Force
+}
 
 # --- palette: named roles resolved to hex by Convert-HexToRgbLong ----------
 # DividerRed/DividerBlue ARE the sanctioned config palette (emphasisRed /
@@ -836,7 +856,7 @@ $summaryLines = @(
     "- 交付物：$workingPptx",
     "- PDF：$(Join-Path $deliveryDir "$stem.brand.pdf")",
     "- 页面图片：$pageImageDir",
-    "- 版本目录：$deliveryRoot（已存在历史版本 $(@($existing).Count) 个，本次 v$nextVersion）",
+    "- 版本目录：$deliveryRoot（本次交付：$(Split-Path -Leaf $deliveryRoot)）",
     "- 页面角色：$($roleSummary -join '，')",
     '',
     '## 本次动作',
