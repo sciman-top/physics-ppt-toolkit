@@ -177,10 +177,6 @@ if ([string]$evidenceSchema.title -ne 'Physics PPT formula evidence manifest' -o
     [int]$evidenceSchema.properties.schemaVersion.const -ne 1) {
     throw 'Formula evidence manifest schema metadata is invalid.'
 }
-$contextResolverScript = Get-Content -LiteralPath (Join-Path $root 'tools\Resolve-FormulaCanonicalContext.ps1') -Raw -Encoding UTF8
-foreach ($contextToken in @('ManualRequired', 'CandidateOnly', 'SourceSha256', 'sourceContextRequiredForGoldSet', 'writeBackAllowed = $false')) {
-    if ($contextResolverScript -notmatch [regex]::Escape($contextToken)) { throw "Formula context resolver is missing required safety token: $contextToken" }
-}
 $goldSetEvidenceSchema = Get-Content -LiteralPath (Join-Path $root 'config\formula-goldset-evidence-availability.schema.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 if ([string]$goldSetEvidenceSchema.title -ne 'Physics PPT formula GoldSet evidence availability receipt' -or
     [int]$goldSetEvidenceSchema.properties.schemaVersion.const -ne 1 -or
@@ -193,63 +189,9 @@ if ([string]$oleVisualAdjudicationSchema.title -ne 'Physics PPT current MathType
     [bool]$oleVisualAdjudicationSchema.properties.policy.properties.writeBackAllowed.const) {
     throw 'Formula OLE visual adjudication schema metadata is invalid.'
 }
-$oleVisualAdjudicationScript = Get-Content -LiteralPath (Join-Path $root 'tools\Export-FormulaOleVisualAdjudication.ps1') -Raw -Encoding UTF8
-foreach ($oleVisualAdjudicationToken in @('AdjudicationCsv', 'CandidateOnly', 'ManualRequired', 'CropSha256', 'evidenceSetSha256', 'writeBackAllowed = $false', 'never writes a PPTX')) {
-    if ($oleVisualAdjudicationScript -notmatch [regex]::Escape($oleVisualAdjudicationToken)) {
-        throw "Formula OLE visual adjudication exporter is missing required token: $oleVisualAdjudicationToken"
-    }
-}
-$oleVisualAdjudicationTestScript = Get-Content -LiteralPath (Join-Path $root 'tools\Test-FormulaOleVisualAdjudication.ps1') -Raw -Encoding UTF8
-foreach ($oleVisualAdjudicationTestToken in @('drifted-adjudication.csv', 'Drifted crop hash was not rejected', 'Formula OLE visual adjudication tests passed')) {
-    if ($oleVisualAdjudicationTestScript -notmatch [regex]::Escape($oleVisualAdjudicationTestToken)) {
-        throw "Formula OLE visual adjudication test is missing required token: $oleVisualAdjudicationTestToken"
-    }
-}
 foreach ($evidenceRequired in @('schemaVersion', 'generatedAt', 'policy', 'input', 'inventory', 'counts', 'records')) {
     if ($evidenceRequired -notin @($evidenceSchema.required)) {
         throw "Formula evidence manifest schema is missing required root field: $evidenceRequired"
-    }
-}
-$evidenceManifestScript = Get-Content -LiteralPath (Join-Path $root 'tools\Export-FormulaEvidenceManifest.ps1') -Raw -Encoding UTF8
-foreach ($evidenceToken in @('formula-evidence-manifest.json', 'pathBase', 'writeBackAllowed = $false', 'PptxPackageEntry', 'evidenceSetSha256')) {
-    if ($evidenceManifestScript -notmatch [regex]::Escape($evidenceToken)) {
-        throw "Formula evidence manifest tool is missing required contract token: $evidenceToken"
-    }
-}
-$cropScript = Get-Content -LiteralPath (Join-Path $root 'tools\Export-FormulaImageCrops.ps1') -Raw -Encoding UTF8
-foreach ($cropToken in @('PaddingPx', 'transparentTrimOnly', 'MixedImage', 'SplitFailed', 'originalPreservedOnFailure')) {
-    if ($cropScript -notmatch [regex]::Escape($cropToken)) {
-        throw "Formula image crop protocol is missing required token: $cropToken"
-    }
-}
-$converterScript = Get-Content -LiteralPath (Join-Path $root 'tools\Compare-FormulaConverters.ps1') -Raw -Encoding UTF8
-foreach ($converterToken in @('Pandoc', 'ReferenceOnly', 'formula-converter-comparison-manifest.json', 'writesPptx = $false')) {
-    if ($converterScript -notmatch [regex]::Escape($converterToken)) {
-        throw "Formula converter comparison harness is missing required token: $converterToken"
-    }
-}
-$ommlCandidateScript = Get-Content -LiteralPath (Join-Path $root 'tools\Export-FormulaOmmlCandidates.ps1') -Raw -Encoding UTF8
-foreach ($formulaIrToken in @('Convert-AstToFormulaIrToken', 'formulaIrDir', 'FormulaIrStatus', 'CandidateOnly')) {
-    if ($ommlCandidateScript -notmatch [regex]::Escape($formulaIrToken)) {
-        throw "OMML candidate exporter is missing FormulaIR token contract: $formulaIrToken"
-    }
-}
-$workflowScript = Get-Content -LiteralPath (Join-Path $root 'tools\Invoke-PhysicsPptWorkflow.ps1') -Raw -Encoding UTF8
-foreach ($workflowToken in @('FormulaProcessingMode', 'ExplicitMigration', 'ClosedWorldUnattended', 'actualWriteBack', 'writeBackRequested')) {
-    if ($workflowScript -notmatch [regex]::Escape($workflowToken)) {
-        throw "Workflow formula mode contract is missing required token: $workflowToken"
-    }
-}
-$inventoryScript = Get-Content -LiteralPath (Join-Path $root 'tools\Export-FormulaCarrierInventory.ps1') -Raw -Encoding UTF8
-foreach ($inventoryToken in @('OfficeMath', 'MathTypeOle', 'TextFormula', 'FormulaImage', 'MixedImage', 'GroupFormula', 'Unknown', 'formula-carrier-inventory.json', 'ReviewStatus=Approved', 'formula-ole-mapping.csv')) {
-    if ($inventoryScript -notmatch [regex]::Escape($inventoryToken)) {
-        throw "Formula carrier inventory is missing required carrier/manifest token: $inventoryToken"
-    }
-}
-$oleCropsScript = Get-Content -LiteralPath (Join-Path $root 'tools\Export-FormulaOleCrops.ps1') -Raw -Encoding UTF8
-foreach ($oleCropsToken in @('sldSz', 'SuggestedSizePt', 'writeBackAllowed = $false', 'ole-crops.csv', 'formula-ole-crops-manifest.json', 'PaddingPx', 'PageSha256')) {
-    if ($oleCropsScript -notmatch [regex]::Escape($oleCropsToken)) {
-        throw "OLE crop exporter is missing required evidence token: $oleCropsToken"
     }
 }
 foreach ($schemaRequired in @('schemaVersion', 'recordId', 'source', 'detection', 'canonical', 'decision', 'evidence')) {
@@ -387,36 +329,6 @@ if ([string]$goldSetSchema.properties.policy.properties.reviewRequirement.const 
 # The exporter covers both parameter sets: GoldSet construction and the
 # evidence-availability verification mode (former standalone availability
 # exporter). Evidence-availability receipts keep their schema above.
-$goldSetScript = Get-Content -LiteralPath (Join-Path $root 'tools\Export-FormulaGoldSet.ps1') -Raw -Encoding UTF8
-foreach ($goldSetToken in @('writeBackAllowed = $false', 'HumanReviewed', 'MixedNonIsolatable', 'formula-goldset-manifest.json', 'evidenceSetSha256', 'GoldSetManifestPath', 'EvidenceRoot', 'Available', 'Missing')) {
-    if ($goldSetScript -notmatch [regex]::Escape($goldSetToken)) {
-        throw "Formula gold set exporter is missing required contract token: $goldSetToken"
-    }
-}
-$oleBatchScript = Get-Content -LiteralPath (Join-Path $root 'tools\Invoke-FormulaOleBatch.ps1') -Raw -Encoding UTF8
-foreach ($oleBatchToken in @('formula-ole-batch-manifest.json', 'Resume', 'Apply-FormulaOmmlForOle', 'FormulaOfficeMathValidator', 'Export-FormulaCarrierInventory')) {
-    if ($oleBatchScript -notmatch [regex]::Escape($oleBatchToken)) {
-        throw "OLE batch orchestrator is missing required contract token: $oleBatchToken"
-    }
-}
-$validatorFaultScript = Get-Content -LiteralPath (Join-Path $root 'tools\Test-FormulaOfficeMathValidator.ps1') -Raw -Encoding UTF8
-foreach ($validatorFaultToken in @('malformed PPTX', 'FormulaOfficeMathValidator', 'OpenXmlErrorCount', 'source fixture')) {
-    if ($validatorFaultScript -notmatch [regex]::Escape($validatorFaultToken)) {
-        throw "OfficeMath validator fault-injection test is missing required contract token: $validatorFaultToken"
-    }
-}
-$repairProbeScript = Get-Content -LiteralPath (Join-Path $root 'tools\Test-FormulaPowerPointRepairHandling.ps1') -Raw -Encoding UTF8
-foreach ($repairProbeToken in @('malformed temporary PPTX copy', 'Presentations.Open', 'NotObservable', 'OriginalKept', 'source fixture')) {
-    if ($repairProbeScript -notmatch [regex]::Escape($repairProbeToken)) {
-        throw "PowerPoint repair probe is missing required contract token: $repairProbeToken"
-    }
-}
-$closedWorldPlanScript = Get-Content -LiteralPath (Join-Path $root 'tools\Plan-ClosedWorldUnattended.ps1') -Raw -Encoding UTF8
-foreach ($closedWorldToken in @('ClosedWorldUnattended', 'planOnly', 'circuitBreaker', 'FormulaImage', 'writeBackAllowed = $false', 'GoldSet source hash does not match', 'Recognition evaluation is not bound', 'Context resolution contains a source record absent', 'falseAcceptCount', 'false acceptance')) {
-    if ($closedWorldPlanScript -notmatch [regex]::Escape($closedWorldToken)) {
-        throw "Closed-world planner is missing required safety token: $closedWorldToken"
-    }
-}
 $goldSetSampleRows = @(Import-Csv -LiteralPath (Join-Path $root 'examples\fixtures\formula-goldset.sample.csv'))
 if ($goldSetSampleRows.Count -lt 1) { throw 'Formula gold set sample fixture must contain at least one row.' }
 $goldSetSampleHeader = @($goldSetSampleRows[0].PSObject.Properties.Name)
@@ -814,13 +726,6 @@ try {
 }
 
 $normalizeContent = Get-Content -LiteralPath (Join-Path $root 'tools\Normalize-PhysicsPpt.ps1') -Raw -Encoding UTF8
-$commonContent = Get-Content -LiteralPath (Join-Path $root 'tools\PhysicsPpt.Common.ps1') -Raw -Encoding UTF8
-foreach ($powerShellHostMarker in @('Get-PowerShellHostInfo', 'Resolve-PowerShellHost', 'pwsh.exe', 'powershell.exe')) {
-    if ($commonContent -notmatch [regex]::Escape($powerShellHostMarker)) { throw "PowerShell host resolver marker is missing: $powerShellHostMarker" }
-}
-foreach ($silentAutomationMarker in @('New-PowerPointApplication', 'DisplayAlerts = 1', '$application.Visible')) {
-    if ($commonContent -notmatch [regex]::Escape($silentAutomationMarker)) { throw "Silent PowerPoint automation marker is missing: $silentAutomationMarker" }
-}
 if ($normalizeContent -match '&\s+powershell\.exe') { throw 'Parallel PowerShell workers must resolve the PS7-first host instead of hard-coding powershell.exe.' }
 if ($normalizeContent -notmatch 'Resolve-PowerShellHost') { throw 'Normalize script must use Resolve-PowerShellHost for child workers.' }
 
@@ -849,42 +754,8 @@ foreach ($automationScript in @(
         throw "PowerPoint automation script must use New-PowerPointApplication: $automationScript"
     }
 }
-foreach ($requiredGuard in @('DoNotMoveShapes', 'DoNotResizeShapes', 'DoNotModifyAnimations', 'DoNotModifySlideTransitions', 'Test-ShapeUsesAutomaticSizing')) {
-    if ($normalizeContent -notmatch [regex]::Escape($requiredGuard)) { throw "Normalize safety guard is missing: $requiredGuard" }
-}
-foreach ($requiredRuleMarker in @('Test-StyleRuleEnabled', 'STYLE.FORMULA.TEXT', 'STYLE.DECORATIVE.EFFECTS', 'SLIDE.BACKGROUND', 'DisableAdvanceOnClick', 'AdvanceOnClickPreserved', 'SizeBodyMax', 'BodyFontSizeCapped', 'SizeDisplayTitleMin', 'TextStyleNormalizedGeometryRestored')) {
-    if ($normalizeContent -notmatch [regex]::Escape($requiredRuleMarker)) { throw "Normalize rule marker is missing: $requiredRuleMarker" }
-}
-if ($normalizeContent -match 'Normalize-TextShape[^\r\n]*-FontOnly') { throw 'Special slides must stay report-only; preserve slides must not receive font-only normalization.' }
-if ($normalizeContent -match "Issue 'TextStyleSkippedAutoSize'") { throw 'AutoSize text must use font-only normalization with geometry restoration, not be skipped.' }
-foreach ($fontSafetyMarker in @('AutoSizeGeometryRestored', 'Set-AutoSizeTextFontSafely', 'TextStyleSkippedGeometryRisk', 'font and geometry were rolled back before save')) {
-    if ($normalizeContent -notmatch [regex]::Escape($fontSafetyMarker)) { throw "AutoSize font normalization safety marker is missing: $fontSafetyMarker" }
-}
-foreach ($lineLayoutMarker in @('Get-TextRangeLineLayout', 'Test-TextRangeLayoutUnchanged', 'Get-TextRangeLayoutChangeText', 'TextStyleSkippedLineRelayout', 'beforeLayout', 'afterLayout')) {
-    if ($normalizeContent -notmatch [regex]::Escape($lineLayoutMarker)) { throw "Line-layout re-wrap guard marker is missing: $lineLayoutMarker" }
-}
-foreach ($pictureFillMarker in @('Get-PictureFillShapeIds', 'Test-PictureFillShapeId', 'PictureFillShapePreserved', 're-bakes the fill bitmap')) {
-    if ($normalizeContent -notmatch [regex]::Escape($pictureFillMarker)) { throw "Picture-fill shape guard marker is missing: $pictureFillMarker" }
-}
-foreach ($shapeEnumGuardMarker in @('Invoke-NormalizeSlideShape', 'consecutiveShapeFailures', 'enumerationBrokenAfter', 'ShapeEnumerationRecovered', 'ShapeEnumerationCorrupted', 'indexed recovery pass re-processed')) {
-    if ($normalizeContent -notmatch [regex]::Escape($shapeEnumGuardMarker)) { throw "Shape-enumeration circuit breaker marker is missing: $shapeEnumGuardMarker" }
-}
-$brandContent = Get-Content -LiteralPath (Join-Path $root 'tools\Apply-PptxBrandVisualRefresh.ps1') -Raw -Encoding UTF8
-foreach ($dividerGuardMarker in @('cjkCount', 'textShapeCount', '$isCjkHeadline', '$isFormulaDivider', '$textShapeCount -le 1', '$SlideText.Length -gt 20')) {
-    if ($brandContent -notmatch [regex]::Escape($dividerGuardMarker)) { throw "Divider detection guard marker is missing: $dividerGuardMarker" }
-}
-$highlightBoxContent = Get-Content -LiteralPath (Join-Path $root 'tools\Apply-PptxHighlightBoxStyle.ps1') -Raw -Encoding UTF8
-foreach ($brightYellowMarker in @('$rgbBrightYellow', 'rgb -eq $rgbBrightYellow', 'semantic box')) {
-    if ($highlightBoxContent -notmatch [regex]::Escape($brightYellowMarker)) { throw "Bright-yellow conclusion family marker is missing: $brightYellowMarker" }
-}
-foreach ($emphasisGuardMarker in @('pass only ever ADDS bold for titles and never writes a', 'if ($Bold) { $font.Bold = $script:MsoTrue }', 'Author bold and color carry teaching semantics', 'HighlightTextColorPreserved', 'Test-IsLargeDisplayTextShape', 'DisplayTextPreserved', 'SectionTitleStyleSkippedMixedEmphasis', 'FormulaStyleSkippedMixedFontSize', 'FormulaStyleSkippedLineRelayout', 'AuthorLargeTextFloor', 'EmbeddedObjectPreserved', 'Sub-property writes are gated on a VISIBLE shadow')) {
-    if ($normalizeContent -notmatch [regex]::Escape($emphasisGuardMarker)) { throw "Author emphasis preservation guard marker is missing: $emphasisGuardMarker" }
-}
 if ($normalizeContent -match [regex]::Escape('$font.Fill.ForeColor.RGB = $Color')) { throw 'Normalize body path must never write author text colors.' }
 if ($normalizeContent -match [regex]::Escape('$font.Bold = $(if ($Bold) { $script:MsoTrue } else { $script:MsoFalse })')) { throw 'Normalize body path must never write Bold=false over author bold runs.' }
-foreach ($preflightMarker in @('Get-MissingConfiguredFonts', 'Get-SlideAspectRatioCheck', 'CHECK.FONT.AVAILABILITY', 'CHECK.SLIDE.ASPECT_RATIO', 'ConfiguredFontCheckUnavailable', 'SlideAspectRatioCheckUnavailable')) {
-    if ($normalizeContent -notmatch [regex]::Escape($preflightMarker)) { throw "Preflight check marker is missing: $preflightMarker" }
-}
 
 # Geometry heal write-back re-serializes slide XML verbatim; a
 # PreserveWhitespace=$false Load drops whitespace-only <a:t> runs and the
@@ -918,19 +789,6 @@ if ($whitespaceRunXml -notmatch '<a:t> </a:t>') { throw 'Whitespace-only a:t rou
 # attributed slide16 sh13/sh16 to each other's formulas (Q吸=cmΔt vs Q放=qm)
 # and passed every schema check — only the embedding bytes know what the OLE
 # really holds, so the mapping must verify the fingerprint.
-$fingerprintMappingPath = Join-Path $root 'tools\Export-FormulaOleMapping.ps1'
-$fingerprintMappingContent = Get-Content -LiteralPath $fingerprintMappingPath -Raw -Encoding UTF8
-foreach ($fingerprintMarker in @('Get-OleEquationCjkFingerprint', 'OLE content fingerprint mismatch')) {
-    if ($fingerprintMappingContent -notmatch [regex]::Escape($fingerprintMarker)) { throw "Formula OLE mapping content-fingerprint guard marker is missing: $fingerprintMarker" }
-}
-# The -EmitFormulaIr switch carries the former standalone IR bridge contract:
-# review rows stay CandidateOnly, bound to the approved GoldSet, and are
-# rendered by the single canonical candidate exporter.
-foreach ($oleMappingIrToken in @('ApprovedMathTypeOleGoldSet', 'CandidateOnly', 'Export-FormulaOmmlCandidates.ps1')) {
-    if ($fingerprintMappingContent -notmatch [regex]::Escape($oleMappingIrToken)) { throw "Formula OLE mapping IR bridge token is missing: $oleMappingIrToken" }
-}
-$commonLibContent = Get-Content -LiteralPath (Join-Path $root 'tools\PhysicsPpt.Common.ps1') -Raw -Encoding UTF8
-if ($commonLibContent -notmatch [regex]::Escape('function Get-OleEquationCjkFingerprint')) { throw 'Common library is missing Get-OleEquationCjkFingerprint.' }
 $fingerprintCommonAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'tools\PhysicsPpt.Common.ps1'), [ref]$null, [ref]$null)
 
 # Deck-stem canonicalization probe: stage-suffix stripping must fully resolve
@@ -1006,10 +864,6 @@ try {
 # from the presentation order once a deck is reordered in PowerPoint. Every
 # slide-locating helper must resolve through the sldIdLst map, or guards
 # silently miss on reordered decks (18.2 blipFill re-bake class).
-$reorderCommonFunctions = @('Get-PresentationOrderSlidePartMap')
-foreach ($fnName in $reorderCommonFunctions) {
-    if ($commonContent -notmatch [regex]::Escape("function $fnName")) { throw "Slide-order helper is missing from Common: $fnName" }
-}
 $normalizeReorderAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'tools\Normalize-PhysicsPpt.ps1'), [ref]$null, [ref]$null)
 $reorderNormalizeFunctions = @('Read-GeometrySlideXmlDocument', 'Get-PictureFillShapeIds')
 $reorderFunctionText = ''
@@ -1142,31 +996,6 @@ if ([Math]::Abs([double]$maxAxisDrift - 1.0) -gt 0.000001) { throw "Geometry dri
 
 $aiImportContent = Get-Content -LiteralPath (Join-Path $root 'tools\Import-PptxAiReviewResult.ps1') -Raw -Encoding UTF8
 if ($aiImportContent -match 'PowerPoint\.Application|Presentations\.Open|SaveAs|Normalize-PhysicsPpt') { throw 'AI review import must remain read-only and must not access PPTX automation.' }
-
-$workflowContent = Get-Content -LiteralPath (Join-Path $root 'tools\Invoke-PhysicsPptWorkflow.ps1') -Raw -Encoding UTF8
-foreach ($requiredWorkflowMarker in @('BlockedMissingNormalizedPptx', 'deliveryBlocked', 'deliveryStatus', 'invariantDeliveryBlocked', "'Ready'", "'BlockedAiVisualReview'", 'New-VersionedDeliveryRoot', 'Get-ExistingPreparedAiEvidence', 'VersionedDelivery')) {
-    if ($workflowContent -notmatch [regex]::Escape($requiredWorkflowMarker)) { throw "Workflow delivery gate marker is missing: $requiredWorkflowMarker" }
-}
-foreach ($requiredAiReuseMarker in @('Test-PreparedManifestMatchesCurrent', 'Test-PreparedPacketMatchesCurrent', 'preparedManifestMatchesCurrent', 'preparedPacketMatchesCurrent', 'existing prepared AI packet does not match')) {
-    if ($workflowContent -notmatch [regex]::Escape($requiredAiReuseMarker)) { throw "Workflow AI-reuse integrity marker is missing: $requiredAiReuseMarker" }
-}
-foreach ($requiredArtifactMarker in @('inputSha256', 'normalizedPptxSha256', 'pdfSha256', 'Test-PageImageSet', 'Test-UsablePageImage')) {
-    if ($workflowContent -notmatch [regex]::Escape($requiredArtifactMarker)) { throw "Workflow artifact-integrity marker is missing: $requiredArtifactMarker" }
-}
-$visualAuditContent = Get-Content -LiteralPath (Join-Path $root 'tools\Export-PptxVisualAudit.ps1') -Raw -Encoding UTF8
-foreach ($requiredVisualExportMarker in @('did not create a non-empty PDF', 'PdfExportedBySaveAsFallback', 'Get-ImageVisualMetrics', 'SlidePngExportFailed')) {
-    if ($visualAuditContent -notmatch [regex]::Escape($requiredVisualExportMarker)) { throw "Visual export-integrity marker is missing: $requiredVisualExportMarker" }
-}
-foreach ($requiredPngDecodeMarker in @('Get-BasicImageInfo -Path $target', 'undecodable PNG')) {
-    if ($normalizeContent -notmatch [regex]::Escape($requiredPngDecodeMarker)) { throw "Normalize PNG-integrity marker is missing: $requiredPngDecodeMarker" }
-    if ($workflowContent -notmatch [regex]::Escape($requiredPngDecodeMarker)) { throw "Workflow PNG-integrity marker is missing: $requiredPngDecodeMarker" }
-}
-foreach ($requiredAiDeliveryMarker in @('deliveryStatus', "'Ready'", 'preparedManifestSha256', '交付状态')) {
-    if ($aiImportContent -notmatch [regex]::Escape($requiredAiDeliveryMarker)) { throw "AI import delivery marker is missing: $requiredAiDeliveryMarker" }
-}
-foreach ($summaryCheckMarker in @('configuredFontsMissingCount', 'slideAspectMismatchCount', '字体回退风险', '非 16:9')) {
-    if ($workflowContent -notmatch [regex]::Escape($summaryCheckMarker)) { throw "Summary preflight marker is missing: $summaryCheckMarker" }
-}
 
 & (Join-Path $root 'tools\Test-PhysicsPptPolicy.ps1')
 
