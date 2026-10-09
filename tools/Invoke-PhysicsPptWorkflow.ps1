@@ -3,7 +3,8 @@
   One-command workflow for checking, normalizing, exporting PDF, and summarizing physics PPT files.
 
 .DESCRIPTION
-  Creates a timestamped output workspace, runs toolkit self-check, optionally runs report-only inspection,
+  Creates a timestamped output workspace, runs a light self-check (full repository gate with -FullSelfCheck),
+  optionally runs report-only inspection,
   normalizes PPTX/PPTM files, exports same-name PDFs, and writes summary.md plus review-manifest.json.
   SafeNormalize can be used explicitly when PDF/page image export is not needed.
   Detailed visual review artifacts can be generated explicitly with -IncludeReviewArtifacts.
@@ -70,6 +71,13 @@
   Explicitly disable mouse-click slide advance on every slide. The default preserves
   the source presentation's click behavior.
 
+.PARAMETER FullSelfCheck
+  Run the full repository self-check (Test-ToolkitFiles.ps1) before the run.
+  The default light check validates only what a deck run depends on: style
+  config integrity (parsed and fail-fast at startup), toolchain availability,
+  and PowerPoint automation readiness. The full gate belongs to code changes
+  and CI, not to every delivery run.
+
 .PARAMETER FormulaOmmlMaxItems
 Maximum formula whitelist rows to convert per run.
 
@@ -109,6 +117,7 @@ param(
     [string]$FormulaProcessingMode = '',
     [switch]$SkipPreflightReport,
     [switch]$DisableAdvanceOnClick,
+    [switch]$FullSelfCheck,
 
     [ValidateRange(1, 100)]
     [int]$FormulaOmmlMaxItems = 100
@@ -2755,7 +2764,12 @@ if ($BrandRefresh -or $HighlightBox) { $stepCount++ }
 if ($ApplyFormulaOmmlWhitelist) { $stepCount++ }
 
 Write-Host "Step 1/${stepCount}: self-check"
-& (Join-Path $PSScriptRoot 'Test-ToolkitFiles.ps1')
+if ($FullSelfCheck) {
+    # The full gate parses every script and runs all fixture probes; that is a
+    # code-change/CI gate. A deck run relies on the startup config fail-fast
+    # and on in-product error handling instead of re-proving the repository.
+    & (Join-Path $PSScriptRoot 'Test-ToolkitFiles.ps1')
+}
 $toolchainArgs = @{}
 if ($ApplyFormulaOmmlWhitelist) { $toolchainArgs.RequireFormulaValidator = $true }
 & (Join-Path $PSScriptRoot 'Assert-Toolchain.ps1') @toolchainArgs
