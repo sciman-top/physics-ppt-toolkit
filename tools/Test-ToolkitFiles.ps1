@@ -117,6 +117,31 @@ foreach ($rel in $required) {
     if (-not (Test-Path -LiteralPath $path)) { throw "Missing required file: $rel" }
 }
 
+# --- 1b. Required-list completeness: a newly added script, doc, fixture or
+# launcher must be registered in $required, or it silently loses existence
+# coverage. The syntax/BOM scans below are directory-wide and would still run,
+# so an unregistered file would look healthy while vanishing from the gate's
+# contract surface. The reverse direction (stale list entries) is already
+# caught by the existence loop above. vendor\ holds third-party payloads and
+# stays out of scope on purpose.
+$unregistered = @()
+$unregistered += @(Get-ChildItem -LiteralPath (Join-Path $root 'tools') -Filter '*.ps1' -Recurse -File |
+    Where-Object { $_.FullName -notmatch '\\vendor\\' } |
+    ForEach-Object { $_.FullName.Substring($root.Length + 1) } |
+    Where-Object { $_ -notin $required })
+$unregistered += @(Get-ChildItem -LiteralPath (Join-Path $root 'examples') -File -Recurse |
+    ForEach-Object { $_.FullName.Substring($root.Length + 1) } |
+    Where-Object { $_ -notin $required })
+$unregistered += @(Get-ChildItem -LiteralPath (Join-Path $root 'docs') -Filter '*.md' -File |
+    ForEach-Object { $_.FullName.Substring($root.Length + 1) } |
+    Where-Object { $_ -notin $required })
+$unregistered += @(Get-ChildItem -LiteralPath $root -Filter '*.cmd' -File |
+    ForEach-Object { $_.Name } |
+    Where-Object { $_ -notin $required })
+if ($unregistered.Count -gt 0) {
+    throw ("Files present but not registered in the required list (add them or archive them): " + ($unregistered -join ', '))
+}
+
 # --- 2. JSON config schema validation ---
 $configPath = Join-Path $root 'config\physics-ppt-style.config.json'
 $config = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
