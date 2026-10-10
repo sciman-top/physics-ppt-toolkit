@@ -42,31 +42,13 @@ function Add-IntentionalGeometryChange {
 }
 
 function Get-GeometrySlideXmlNames {
-    # Pass -Zip to enumerate an already-open archive; the geometry and restore
-    # passes each hold their package open, and a path-based call here reopened
-    # the same zip a second time on every file.
-    param([string]$PptxPath, $Zip)
+    # Enumerates slide part names from an already-open archive only; the
+    # geometry and restore passes each hold their package open, and a
+    # path-based call here reopened the same zip a second time on every file.
+    param($Zip)
     $names = New-Object System.Collections.Generic.List[string]
-    if ($null -ne $Zip) {
-        foreach ($entry in @($Zip.Entries)) {
-            if ($entry.FullName -match '^ppt/slides/slide(\d+)\.xml$') { $names.Add($entry.FullName) | Out-Null }
-        }
-        return $names
-    }
-    $zip = $null
-    $stream = $null
-    try {
-        Add-Type -AssemblyName System.IO.Compression.FileSystem
-        # Shared read/write co-exists with lingering antivirus/watcher handles
-        # that hold the freshly written package after PowerPoint exits.
-        $stream = [System.IO.File]::Open($PptxPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-        $zip = New-Object System.IO.Compression.ZipArchive($stream, [System.IO.Compression.ZipArchiveMode]::Read)
-        foreach ($entry in @($zip.Entries)) {
-            if ($entry.FullName -match '^ppt/slides/slide(\d+)\.xml$') { $names.Add($entry.FullName) | Out-Null }
-        }
-    } finally {
-        if ($null -ne $zip) { $zip.Dispose() }
-        if ($null -ne $stream) { $stream.Dispose() }
+    foreach ($entry in @($Zip.Entries)) {
+        if ($entry.FullName -match '^ppt/slides/slide(\d+)\.xml$') { $names.Add($entry.FullName) | Out-Null }
     }
     return $names
 }
@@ -136,7 +118,7 @@ function Get-SourceShapeGeometryMap {
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         $zipStream = [System.IO.File]::Open($SourcePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
         $zip = New-Object System.IO.Compression.ZipArchive($zipStream, [System.IO.Compression.ZipArchiveMode]::Read)
-        foreach ($entryName in @(Get-GeometrySlideXmlNames -PptxPath $SourcePath -Zip $zip)) {
+        foreach ($entryName in @(Get-GeometrySlideXmlNames -Zip $zip)) {
             if ($entryName -notmatch '^ppt/slides/slide\d+\.xml$') { continue }
             $doc = Read-GeometrySlideXmlDocument -Zip $zip -EntryName $entryName
             if ($null -eq $doc) { continue }
@@ -208,7 +190,7 @@ function Restore-SourceShapeGeometry {
     $attempts = 84
     for ($attempt = 1; $attempt -le $attempts; $attempt++) {
         try {
-            return Restore-SourceShapeGeometryOnce -SourcePath $SourcePath -OutputPath $OutputPath -FileName $FileName -SourceMap $sourceMap
+            return Restore-SourceShapeGeometryOnce -OutputPath $OutputPath -FileName $FileName -SourceMap $sourceMap
         } catch {
             if ($attempt -ge $attempts) { throw }
             if (-not (Test-GeometryRestoreLockConflict -Exception $_.Exception)) { throw }
@@ -220,12 +202,11 @@ function Restore-SourceShapeGeometry {
 
 function Restore-SourceShapeGeometryOnce {
     param(
-        [string]$SourcePath,
         [string]$OutputPath,
         [string]$FileName,
         $SourceMap
     )
-    $sourceMap = if ($null -ne $SourceMap) { $SourceMap } else { Get-SourceShapeGeometryMap -SourcePath $SourcePath }
+    $sourceMap = $SourceMap
     if ($sourceMap.Count -eq 0) { return 0 }
     # Report rows use presentation order everywhere else in the evidence CSV;
     # translate physical part names back through the host-owned map so the
@@ -245,7 +226,7 @@ function Restore-SourceShapeGeometryOnce {
         # handles (antivirus/watcher) that would reject an exclusive open.
         $zipStream = [System.IO.File]::Open($OutputPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)
         $zip = New-Object System.IO.Compression.ZipArchive($zipStream, [System.IO.Compression.ZipArchiveMode]::Update)
-        foreach ($entryName in @(Get-GeometrySlideXmlNames -PptxPath $OutputPath -Zip $zip)) {
+        foreach ($entryName in @(Get-GeometrySlideXmlNames -Zip $zip)) {
             $slideNumber = 0
             if ($entryName -notmatch '^ppt/slides/slide(\d+)\.xml$') { continue }
             $slideNumber = [int]$Matches[1]

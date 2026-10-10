@@ -363,7 +363,9 @@ function Get-NormalizeSignature {
     # them once instead of re-reading the 160KB script per file. The source
     # hash stays per-file because it is the cache key.
     if ($null -eq $script:NormalizeSignatureConstantHashes) {
-        $configHashOnce = if (Test-Path -LiteralPath $ConfigPath) { Get-FileSha256Hex -Path $ConfigPath } else { 'missing' }
+        # Startup throws when the sanctioned config is missing, so the digest
+        # can be taken unconditionally here.
+        $configHashOnce = Get-FileSha256Hex -Path $ConfigPath
         $script:NormalizeSignatureConstantHashes = @{
             config = $configHashOnce
             script = $(Get-FileSha256Hex -Path $script:NormalizeScriptPath)
@@ -444,21 +446,30 @@ function Test-IsTitleShape {
     return $false
 }
 
+function Test-FactsHaveLargeVisual {
+    # Shared large-visual predicate (Picture/Media/Group over 120000 pt^2);
+    # Get-SlideKind and Test-IsSectionTitleSlide must agree on this threshold.
+    param($Facts)
+    foreach ($fact in $Facts) {
+        if ($null -ne $fact.Type -and ($fact.Type -eq $script:MsoPicture -or $fact.Type -eq $script:MsoMedia -or $fact.Type -eq $script:MsoGroup)) {
+            if ($null -ne $fact.Width -and $null -ne $fact.Height -and (($fact.Width * $fact.Height) -gt 120000)) { return $true }
+        }
+    }
+    return $false
+}
+
 function Test-IsSectionTitleSlide {
     param($Slide, $Facts)
     if ($null -eq $Facts) { $Facts = Get-SlideShapeFacts -Slide $Slide }
     $textShapes = 0
     $mainText = ''
-    $hasLargeVisual = $false
     foreach ($fact in $Facts) {
         if ($fact.HasText -eq $script:MsoTrue -and -not [string]::IsNullOrWhiteSpace($fact.Text)) {
             $textShapes++
             $mainText = $fact.Text
         }
-        if ($null -ne $fact.Type -and ($fact.Type -eq $script:MsoPicture -or $fact.Type -eq $script:MsoMedia -or $fact.Type -eq $script:MsoGroup)) {
-            if ($null -ne $fact.Width -and $null -ne $fact.Height -and (($fact.Width * $fact.Height) -gt 120000)) { $hasLargeVisual = $true }
-        }
     }
+    $hasLargeVisual = Test-FactsHaveLargeVisual $Facts
     $cleanText = ($mainText -replace '\s+', '').Trim()
     if ($cleanText.Length -eq 0 -or $cleanText.Length -gt 18) { return $false }
     if ($cleanText -match 'https?|www|网盘|QQ群|下载|地址|[，。；：、,;:]') { return $false }
@@ -578,12 +589,7 @@ function Get-SlideKind {
         return 'ContentSection'
     }
 
-    $hasLargeVisual = $false
-    foreach ($fact in $Facts) {
-        if ($null -ne $fact.Type -and ($fact.Type -eq $script:MsoPicture -or $fact.Type -eq $script:MsoMedia -or $fact.Type -eq $script:MsoGroup)) {
-            if ($null -ne $fact.Width -and $null -ne $fact.Height -and (($fact.Width * $fact.Height) -gt 120000)) { $hasLargeVisual = $true }
-        }
-    }
+    $hasLargeVisual = Test-FactsHaveLargeVisual $Facts
     $plain = ($joined -replace '\s+', '')
     if (Test-IsExerciseOrQuestionText -Text $joined) {
         return 'Exercise'
@@ -884,7 +890,6 @@ function Get-TextRangeBounds {
 
 function Test-TextRangeFitsShape {
     param(
-        $Shape,
         $TextRange,
         [double]$ShapeWidth,
         [double]$ShapeHeight,
@@ -1001,12 +1006,11 @@ function Set-TextRangeStyle {
         [int]$SlideNumber = 0,
         [string]$ShapeName = '',
         [switch]$ForceTargetSize,
-        [double]$MaxSize = 0,
-        [switch]$FontOnly
+        [double]$MaxSize = 0
     )
     if (-not (Test-StyleRuleEnabled -RuleId 'STYLE.TEXT.FONT')) {
         Add-RuleSkippedReport -FileName $FileName -SlideNumber $SlideNumber -ShapeName $ShapeName `
-            -RuleId 'STYLE.TEXT.FONT' -Property $(if ($FontOnly) { 'FontName/NameFarEast' } else { 'FontName/NameFarEast/Size/Bold/Color' }) `
+            -RuleId 'STYLE.TEXT.FONT' -Property 'FontName/NameFarEast/Size/Bold/Color' `
             -Details 'Text style rule is disabled by configuration.'
         return
     }
@@ -1024,21 +1028,19 @@ function Set-TextRangeStyle {
         $beforeLayout = Get-TextRangeLineLayout -TextRange $TextRange
         $font.Name = $script:Style.FontLatin
         $font.NameFarEast = $script:Style.FontChinese
-        if (-not $FontOnly) {
-            if ($mixedFontSize) {
-                Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $ShapeName -Issue 'TextStyleSkippedMixedFontSize' `
-                    -Details 'Text range mixes font sizes; size, bold, and color were preserved to keep the emphasis hierarchy.' `
-                    -RuleId 'STYLE.TEXT.FONT' -Property 'Size/Bold/Color' -Before "$beforeSize|$beforeBold|$beforeColor" -After "$beforeSize|$beforeBold|$beforeColor" `
-                    -RiskLevel 'R0' -Result 'Skipped'
-            } else {
-                $font.Size = $safeSize
-                # Emphasis colors and weight belong to the author: red/blue
-                # highlights and bold runs carry teaching semantics, so this
-                # pass only ever ADDS bold for titles and never writes a
-                # color (43 red and 14 blue runs were flattened to black in
-                # 18.2 v3 before this guard).
-                if ($Bold) { $font.Bold = $script:MsoTrue }
-            }
+        if ($mixedFontSize) {
+            Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $ShapeName -Issue 'TextStyleSkippedMixedFontSize' `
+                -Details 'Text range mixes font sizes; size, bold, and color were preserved to keep the emphasis hierarchy.' `
+                -RuleId 'STYLE.TEXT.FONT' -Property 'Size/Bold/Color' -Before "$beforeSize|$beforeBold|$beforeColor" -After "$beforeSize|$beforeBold|$beforeColor" `
+                -RiskLevel 'R0' -Result 'Skipped'
+        } else {
+            $font.Size = $safeSize
+            # Emphasis colors and weight belong to the author: red/blue
+            # highlights and bold runs carry teaching semantics, so this
+            # pass only ever ADDS bold for titles and never writes a
+            # color (43 red and 14 blue runs were flattened to black in
+            # 18.2 v3 before this guard).
+            if ($Bold) { $font.Bold = $script:MsoTrue }
         }
         # Same-geometry re-wrap guard: sibling answer shapes anchor to the old
         # break points, so any rendered line-layout change rolls every write
@@ -1047,7 +1049,7 @@ function Set-TextRangeStyle {
         if (-not (Test-TextRangeLayoutUnchanged -Before $beforeLayout -After $afterLayout)) {
             $font.Name = $beforeName
             $font.NameFarEast = $beforeFarEast
-            if (-not $FontOnly -and -not $mixedFontSize) {
+            if (-not $mixedFontSize) {
                 if ($null -ne $beforeSize) { $font.Size = $beforeSize }
                 if ($beforeBold -ne '') { $font.Bold = [int]$beforeBold }
                 if ($beforeColor -ne '') { $font.Fill.ForeColor.RGB = [int]$beforeColor }
@@ -1055,7 +1057,7 @@ function Set-TextRangeStyle {
             if ($FileName -ne '') {
                 Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $ShapeName -Issue 'TextStyleSkippedLineRelayout' `
                     -Details ("Target style {0}/{1} re-wrapped the shape ({2}); the original style and line layout were restored." -f $script:Style.FontLatin, $script:Style.FontChinese, (Get-TextRangeLayoutChangeText -Before $beforeLayout -After $afterLayout)) `
-                    -RuleId 'STYLE.TEXT.FONT' -Property $(if ($FontOnly) { 'FontName/NameFarEast' } else { 'FontName/NameFarEast/Size/Bold/Color' }) `
+                    -RuleId 'STYLE.TEXT.FONT' -Property 'FontName/NameFarEast/Size/Bold/Color' `
                     -Before ("{0}|{1}|{2}|{3}|{4}" -f $beforeName, $beforeFarEast, $beforeSize, $beforeBold, $beforeColor) `
                     -After ("{0}|{1}|{2}|{3}|{4}" -f $beforeName, $beforeFarEast, $beforeSize, $beforeBold, $beforeColor) `
                     -RiskLevel 'R0' -Result 'Skipped'
@@ -1065,10 +1067,10 @@ function Set-TextRangeStyle {
         if ($FileName -ne '') {
             $writtenProperties = $(if ($Bold) { 'FontName/NameFarEast/Size/Bold' } else { 'FontName/NameFarEast/Size' })
             Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $ShapeName -Issue 'TextStyleNormalized' `
-                -Details $(if ($FontOnly) { 'Font family normalized; size, emphasis, color, text content, and geometry preserved.' } else { 'Font family and safe font size normalized; author bold and color preserved; text content preserved.' }) `
+                -Details 'Font family and safe font size normalized; author bold and color preserved; text content preserved.' `
                 -RuleId 'STYLE.TEXT.FONT' -Property $writtenProperties `
                 -Before ("{0}|{1}|{2}|{3}|{4}" -f $beforeName, $beforeFarEast, $beforeSize, $beforeBold, $beforeColor) `
-                -After $(if ($FontOnly -or $mixedFontSize) { "{0}|{1}|{2}|{3}|{4}" -f $script:Style.FontLatin, $script:Style.FontChinese, $beforeSize, $beforeBold, $beforeColor } else { "{0}|{1}|{2}|{3}|{4}" -f $script:Style.FontLatin, $script:Style.FontChinese, $safeSize, $beforeBold, $beforeColor }) `
+                -After $(if ($mixedFontSize) { "{0}|{1}|{2}|{3}|{4}" -f $script:Style.FontLatin, $script:Style.FontChinese, $beforeSize, $beforeBold, $beforeColor } else { "{0}|{1}|{2}|{3}|{4}" -f $script:Style.FontLatin, $script:Style.FontChinese, $safeSize, $beforeBold, $beforeColor }) `
                 -RiskLevel 'R1' -Result 'Applied'
         }
     } catch {
@@ -1249,11 +1251,6 @@ function Add-PresentationPreflightReports {
             -RuleId $aspectRule -Property 'SlideWidth/SlideHeight' -Before 'Unavailable' -After 'NoWriteBack' `
             -RiskLevel 'R1' -Result 'NeedsReview'
     }
-
-    return [pscustomobject]@{
-        Font = $fontCheck
-        AspectRatio = $aspectCheck
-    }
 }
 
 function Set-AutoSizeFontSizeCapSafely {
@@ -1339,8 +1336,7 @@ function Set-AutoSizeTextFontSafely {
     param(
         $Shape,
         [int]$SlideNumber,
-        [string]$FileName,
-        [switch]$SpecialSlide
+        [string]$FileName
     )
 
     $shapeName = Get-ShapeName $Shape
@@ -1416,7 +1412,7 @@ function Set-AutoSizeTextFontSafely {
     }
 
     try {
-        $beforeFit = Test-TextRangeFitsShape -Shape $Shape -TextRange $textRange -ShapeWidth $width -ShapeHeight $height
+        $beforeFit = Test-TextRangeFitsShape -TextRange $textRange -ShapeWidth $width -ShapeHeight $height
         $beforeLayout = Get-TextRangeLineLayout -TextRange $textRange
         & $setFontFamily $script:Style.FontLatin $script:Style.FontChinese
 
@@ -1442,7 +1438,7 @@ function Set-AutoSizeTextFontSafely {
         # and Latin runs: changing only the Latin family can widen a line while
         # leaving the original AutoSize geometry unchanged.  Never promote a
         # font-only normalization that introduces a new content-fit risk.
-        $targetFit = Test-TextRangeFitsShape -Shape $Shape -TextRange $textRange -ShapeWidth $width -ShapeHeight $height
+        $targetFit = Test-TextRangeFitsShape -TextRange $textRange -ShapeWidth $width -ShapeHeight $height
         $targetOverflow = ($targetFit.Available -and -not $targetFit.Fits)
         $beforeOverflow = ($beforeFit.Available -and -not $beforeFit.Fits)
         $targetWorsensExistingOverflow = $false
@@ -1493,49 +1489,47 @@ function Set-AutoSizeTextFontSafely {
                     -RiskLevel 'R1' -Result 'Applied'
                 return
             }
-            if (-not $SpecialSlide) {
-                $compactChineseFont = $script:Style.FontCompactChinese
-                & $setFontFamily $script:Style.FontLatin $compactChineseFont
-                $fallbackDrift = Get-AutoSizeGeometryDrift -Shape $Shape -Left $left -Top $top -Width $width -Height $height
-                if ($fallbackDrift -gt 0.05) {
-                    $Shape.Left = [single]$left
-                    $Shape.Top = [single]$top
-                    $Shape.Width = [single]$width
-                    $Shape.Height = [single]$height
-                    if ($fallbackDrift -le $driftTolerance) {
-                        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
-                            -Issue 'TextStyleNormalizedCompactFallbackGeometryRestored' `
-                            -Details ("Microsoft YaHei UI reflowed the AutoSize shape by {0:N2} pt; the compatible fallback font was kept and the original geometry was restored." -f $fallbackDrift) `
-                            -RuleId 'STYLE.TEXT.FONT' -Property 'FontName/NameFarEast' -Before $beforeSummary `
-                            -After "$($script:Style.FontLatin)|$compactChineseFont" -RiskLevel 'R1' -Result 'Applied'
-                        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
-                            -Issue 'AutoSizeGeometryRestored' -Details 'Compatible font fallback completed with AutoSize geometry restored to the original bounds.' `
-                            -RuleId 'SAFETY.GEOMETRY.AUTOSIZE' -Property 'Left/Top/Width/Height/AutoSize' `
-                            -Before ("{0}|{1}|{2}|{3}|{4}" -f $left, $top, $width, $height, $autoSize) `
-                            -After ("{0}|{1}|{2}|{3}|{4}" -f $Shape.Left, $Shape.Top, $Shape.Width, $Shape.Height, $Shape.TextFrame2.AutoSize) `
-                            -RiskLevel 'R1' -Result 'Applied'
-                        return
-                    }
-                } else {
+            $compactChineseFont = $script:Style.FontCompactChinese
+            & $setFontFamily $script:Style.FontLatin $compactChineseFont
+            $fallbackDrift = Get-AutoSizeGeometryDrift -Shape $Shape -Left $left -Top $top -Width $width -Height $height
+            if ($fallbackDrift -gt 0.05) {
+                $Shape.Left = [single]$left
+                $Shape.Top = [single]$top
+                $Shape.Width = [single]$width
+                $Shape.Height = [single]$height
+                if ($fallbackDrift -le $driftTolerance) {
                     Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
-                        -Issue 'TextStyleNormalizedCompactFallback' `
-                        -Details 'Microsoft YaHei changed AutoSize geometry; Microsoft YaHei UI preserved geometry and was used as the compatible fallback.' `
+                        -Issue 'TextStyleNormalizedCompactFallbackGeometryRestored' `
+                        -Details ("Microsoft YaHei UI reflowed the AutoSize shape by {0:N2} pt; the compatible fallback font was kept and the original geometry was restored." -f $fallbackDrift) `
                         -RuleId 'STYLE.TEXT.FONT' -Property 'FontName/NameFarEast' -Before $beforeSummary `
                         -After "$($script:Style.FontLatin)|$compactChineseFont" -RiskLevel 'R1' -Result 'Applied'
                     Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
-                        -Issue 'AutoSizeGeometryRestored' -Details 'Compatible font fallback completed without changing AutoSize or object geometry.' `
+                        -Issue 'AutoSizeGeometryRestored' -Details 'Compatible font fallback completed with AutoSize geometry restored to the original bounds.' `
                         -RuleId 'SAFETY.GEOMETRY.AUTOSIZE' -Property 'Left/Top/Width/Height/AutoSize' `
                         -Before ("{0}|{1}|{2}|{3}|{4}" -f $left, $top, $width, $height, $autoSize) `
                         -After ("{0}|{1}|{2}|{3}|{4}" -f $Shape.Left, $Shape.Top, $Shape.Width, $Shape.Height, $Shape.TextFrame2.AutoSize) `
                         -RiskLevel 'R1' -Result 'Applied'
                     return
                 }
-                & $setFontFamily '' '' -Rollback
-                $Shape.Left = [single]$left
-                $Shape.Top = [single]$top
-                $Shape.Width = [single]$width
-                $Shape.Height = [single]$height
+            } else {
+                Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
+                    -Issue 'TextStyleNormalizedCompactFallback' `
+                    -Details 'Microsoft YaHei changed AutoSize geometry; Microsoft YaHei UI preserved geometry and was used as the compatible fallback.' `
+                    -RuleId 'STYLE.TEXT.FONT' -Property 'FontName/NameFarEast' -Before $beforeSummary `
+                    -After "$($script:Style.FontLatin)|$compactChineseFont" -RiskLevel 'R1' -Result 'Applied'
+                Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
+                    -Issue 'AutoSizeGeometryRestored' -Details 'Compatible font fallback completed without changing AutoSize or object geometry.' `
+                    -RuleId 'SAFETY.GEOMETRY.AUTOSIZE' -Property 'Left/Top/Width/Height/AutoSize' `
+                    -Before ("{0}|{1}|{2}|{3}|{4}" -f $left, $top, $width, $height, $autoSize) `
+                    -After ("{0}|{1}|{2}|{3}|{4}" -f $Shape.Left, $Shape.Top, $Shape.Width, $Shape.Height, $Shape.TextFrame2.AutoSize) `
+                    -RiskLevel 'R1' -Result 'Applied'
+                return
             }
+            & $setFontFamily '' '' -Rollback
+            $Shape.Left = [single]$left
+            $Shape.Top = [single]$top
+            $Shape.Width = [single]$width
+            $Shape.Height = [single]$height
             Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
                 -Issue 'TextStyleSkippedGeometryRisk' -Details 'Target font reflowed AutoSize geometry beyond the accepted tolerance; font and geometry were rolled back before save.' `
                 -RuleId 'STYLE.TEXT.FONT' -Property 'FontName/NameFarEast' -Before $beforeSummary -After $beforeSummary `
@@ -1549,11 +1543,11 @@ function Set-AutoSizeTextFontSafely {
         # rounding, so no restore pass exists on this path by design.
         Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
             -Issue 'TextStyleNormalized' `
-            -Details $(if ($SpecialSlide) { 'Special slide font family normalized; original size, emphasis, color, AutoSize, and geometry were preserved.' } else { 'Font family normalized; original size, emphasis, color, AutoSize, and geometry were preserved.' }) `
+            -Details 'Font family normalized; original size, emphasis, color, AutoSize, and geometry were preserved.' `
             -RuleId 'STYLE.TEXT.FONT' -Property 'FontName/NameFarEast' -Before $beforeSummary `
             -After "$($script:Style.FontLatin)|$($script:Style.FontChinese)" -RiskLevel 'R1' -Result 'Applied'
         Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
-            -Issue $(if ($SpecialSlide) { 'SpecialSlideFontNormalized' } else { 'AutoSizeGeometryRestored' }) `
+            -Issue 'AutoSizeGeometryRestored' `
             -Details 'Font-only normalization completed without changing AutoSize or object geometry.' `
             -RuleId 'SAFETY.GEOMETRY.AUTOSIZE' -Property 'Left/Top/Width/Height/AutoSize' `
             -Before ("{0}|{1}|{2}|{3}|{4}" -f $left, $top, $width, $height, $autoSize) `
@@ -1729,7 +1723,7 @@ function Test-IsLargeDisplayTextShape {
 }
 
 function Normalize-TextShape {
-    param($Shape, [string]$Text, [int]$SlideNumber, [string]$FileName, [bool]$IsVideoSlide, [bool]$IsSectionTitleSlide, [double]$SlideWidth, [switch]$FontOnly)
+    param($Shape, [string]$Text, [int]$SlideNumber, [string]$FileName, [bool]$IsVideoSlide, [bool]$IsSectionTitleSlide, [double]$SlideWidth)
     if ([string]::IsNullOrWhiteSpace($Text)) { return }
 
     if (Test-IsLargeDisplayTextShape -Shape $Shape) {
@@ -1768,15 +1762,9 @@ function Normalize-TextShape {
         $capTop = [double]$Shape.Top
         $capWidth = [double]$Shape.Width
         $capHeight = [double]$Shape.Height
-        Set-AutoSizeTextFontSafely -Shape $Shape -SlideNumber $SlideNumber -FileName $FileName -SpecialSlide:$FontOnly
+        Set-AutoSizeTextFontSafely -Shape $Shape -SlideNumber $SlideNumber -FileName $FileName
         Set-AutoSizeFontSizeCapSafely -Shape $Shape -MaxSize $maxSize -Left $capLeft -Top $capTop -Width $capWidth -Height $capHeight `
             -FileName $FileName -SlideNumber $SlideNumber -ShapeName (Get-ShapeName $Shape)
-        return
-    }
-
-    if ($FontOnly) {
-        Set-TextRangeStyle -TextRange $Shape.TextFrame2.TextRange -Size 0 -Color 0 -Bold:$false `
-            -FileName $FileName -SlideNumber $SlideNumber -ShapeName (Get-ShapeName $Shape) -FontOnly
         return
     }
 

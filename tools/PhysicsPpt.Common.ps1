@@ -496,7 +496,9 @@ function Test-PageImageSet {
         if (-not (Test-UsablePageImage -Path $file.FullName)) { return $false }
         $numbers.Add([int]$Matches[1]) | Out-Null
     }
-    if ($numbers.Count -ne $ExpectedCount -or @($numbers | Sort-Object -Unique).Count -ne $numbers.Count) { return $false }
+    # The exact 1..ExpectedCount comparison below already rejects duplicates
+    # and gaps, so no separate uniqueness pass is needed.
+    if ($numbers.Count -ne $ExpectedCount) { return $false }
     $numbers = @($numbers | Sort-Object)
     return (($numbers | ForEach-Object { [string]$_ }) -join ',') -eq ((1..$ExpectedCount) -join ',')
 }
