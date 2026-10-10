@@ -601,26 +601,29 @@ function Get-SlideKind {
     return 'Normal'
 }
 
+# Single source for the special-slide kind set, its report issue names, and
+# the preserve-details text; the membership test in the main loop reads the
+# same table so a new kind cannot be added to one encoding and missed by the
+# others.
+$script:SpecialSlidePreservation = @{
+    'Cover'        = @{ Issue = 'CoverSlideStylePreserved'; Details = 'Cover slide detected; fonts, sizes, emphasis, colors, and layout are preserved. Only decorative shape effects are cleared.' }
+    'Ending'       = @{ Issue = 'EndingSlideStylePreserved'; Details = 'Ending slide detected; fonts, sizes, emphasis, colors, and layout are preserved. Only decorative shape effects are cleared.' }
+    'Resource'     = @{ Issue = 'ResourceSlideStylePreserved'; Details = 'Resource/download slide detected; fonts, sizes, emphasis, colors, and layout are preserved. Only decorative shape effects are cleared.' }
+    'AppendixText' = @{ Issue = 'AppendixTextSlideStylePreserved'; Details = 'Appendix explanation slide detected; original text style is preserved. Only decorative shape effects are cleared.' }
+}
+
 function Get-SpecialSlidePreserveIssue {
     param([string]$SlideKind)
-    switch ($SlideKind) {
-        'Cover'        { return 'CoverSlideStylePreserved' }
-        'Ending'       { return 'EndingSlideStylePreserved' }
-        'Resource'     { return 'ResourceSlideStylePreserved' }
-        'AppendixText' { return 'AppendixTextSlideStylePreserved' }
-        default        { return $null }
-    }
+    $entry = $script:SpecialSlidePreservation[$SlideKind]
+    if ($null -eq $entry) { return $null }
+    return $entry.Issue
 }
 
 function Get-SpecialSlidePreserveDetails {
     param([string]$SlideKind)
-    switch ($SlideKind) {
-        'Cover'        { return 'Cover slide detected; fonts, sizes, emphasis, colors, and layout are preserved. Only decorative shape effects are cleared.' }
-        'Ending'       { return 'Ending slide detected; fonts, sizes, emphasis, colors, and layout are preserved. Only decorative shape effects are cleared.' }
-        'Resource'     { return 'Resource/download slide detected; fonts, sizes, emphasis, colors, and layout are preserved. Only decorative shape effects are cleared.' }
-        'AppendixText' { return 'Appendix explanation slide detected; original text style is preserved. Only decorative shape effects are cleared.' }
-        default        { return '' }
-    }
+    $entry = $script:SpecialSlidePreservation[$SlideKind]
+    if ($null -eq $entry) { return '' }
+    return $entry.Details
 }
 
 function Test-IsLargePictureShape {
@@ -2432,7 +2435,7 @@ function Normalize-Presentation {
             $slideFacts = Get-SlideShapeFacts -Slide $slide
             $isVideo = Test-IsVideoSlide -Slide $slide -Facts $slideFacts
             $slideKind = Get-SlideKind -Slide $slide -SlideNumber $i -Facts $slideFacts
-            $preserveSlideStyle = ($slideKind -in @('Cover', 'Ending', 'Resource', 'AppendixText'))
+            $preserveSlideStyle = ($slideKind -in @($script:SpecialSlidePreservation.Keys))
             $isSectionTitle = (-not $preserveSlideStyle -and (Test-IsSectionTitleSlide -Slide $slide -Facts $slideFacts))
             Add-ReportRow -File $File.Name -SlideNumber $i -ShapeName '(slide)' -Issue 'SlideType' -Details $(if ($isVideo) { 'VideoOrMediaCandidate' } else { 'Normal' })
             Add-ReportRow -File $File.Name -SlideNumber $i -ShapeName '(slide)' -Issue 'SlideKind' -Details $slideKind

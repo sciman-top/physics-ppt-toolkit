@@ -559,33 +559,14 @@ function Invoke-VisualConfirmationArtifact {
 }
 
 function Resolve-DotNetCommand {
-    $candidates = New-Object System.Collections.Generic.List[string]
-    $userDotnet = Join-Path $env:USERPROFILE '.dotnet\dotnet.exe'
-    if (Test-Path -LiteralPath $userDotnet) { $candidates.Add($userDotnet) | Out-Null }
-
-    $pathDotnet = Get-Command dotnet -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($null -ne $pathDotnet) {
-        $dotnetPath = if (-not [string]::IsNullOrWhiteSpace([string]$pathDotnet.Source)) { [string]$pathDotnet.Source } else { [string]$pathDotnet.Path }
-        if (-not [string]::IsNullOrWhiteSpace($dotnetPath) -and $dotnetPath -notin $candidates) {
-            $candidates.Add($dotnetPath) | Out-Null
-        }
-    }
-
-    foreach ($candidate in $candidates) {
-        # EAP is lowered around native calls: on Windows PowerShell 5.1, stderr
-        # from `2>&1` would otherwise become a terminating NativeCommandError
-        # before $LASTEXITCODE could be judged.
-        $previousEap = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'
+    foreach ($candidate in (Get-DotNetCommandCandidates)) {
         try {
-            $sdks = & $candidate --list-sdks 2>&1
+            $sdks = Invoke-NativeCommandWithEapGuard -FilePath $candidate -Arguments @('--list-sdks')
             if ($LASTEXITCODE -eq 0 -and @($sdks | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }).Count -gt 0) {
                 return $candidate
             }
         } catch {
             continue
-        } finally {
-            $ErrorActionPreference = $previousEap
         }
     }
 
@@ -1277,6 +1258,12 @@ function Invoke-VisualAuditArtifacts {
             $items.Add([pscustomobject]@{
                 file = $file.input
                 fileRelativePath = $file.inputRelativePath
+                baselinePptx = $null
+                baselineVisualAuditDir = $null
+                baselineVisualAuditStatus = 'SkippedCheckOnly'
+                baselineVisualAuditError = ''
+                baselineVisualAuditErrorCount = 0
+                baselineVisualAuditWarningCount = 0
                 sourcePptx = $null
                 visualAuditDir = $null
                 visualAuditCsv = $null
@@ -1291,6 +1278,8 @@ function Invoke-VisualAuditArtifacts {
                 visualConfirmationManifest = $null
                 visualConfirmationContactSheet = $null
                 visualConfirmationError = ''
+                visualConfirmationNeedsReviewCount = 0
+                visualConfirmationFailedCount = 0
                 fixedPptx = $null
                 fixReport = $null
                 fixStatus = 'SkippedCheckOnly'
@@ -1306,6 +1295,8 @@ function Invoke-VisualAuditArtifacts {
                 fixedVisualConfirmationManifest = $null
                 fixedVisualConfirmationContactSheet = $null
                 fixedVisualConfirmationError = ''
+                fixedVisualConfirmationNeedsReviewCount = 0
+                fixedVisualConfirmationFailedCount = 0
             }) | Out-Null
         }
         return @($items.ToArray())

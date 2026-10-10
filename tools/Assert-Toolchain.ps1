@@ -77,17 +77,9 @@ function Invoke-VersionProbe {
     )
 
     try {
-        # Lower EAP around the native call: on Windows PowerShell 5.1, stderr
-        # from `2>&1` would otherwise become a terminating NativeCommandError
-        # (or, inside this try/catch, a false probe failure) before
-        # $LASTEXITCODE could be judged.
-        $previousEap = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'
-        try {
-            $output = & $FilePath @Arguments 2>&1
-        } finally {
-            $ErrorActionPreference = $previousEap
-        }
+        # The EAP guard lives in the shared helper; this outer try/catch only
+        # turns a spawn failure into a structured probe result.
+        $output = Invoke-NativeCommandWithEapGuard -FilePath $FilePath -Arguments $Arguments
         $text = ($output | Select-Object -First $MaxLines | ForEach-Object { [string]$_ }) -join ' | '
         return [pscustomobject]@{
             ExitCode = $LASTEXITCODE
@@ -197,16 +189,8 @@ function Invoke-DotNetSdkProbeCached {
         return [pscustomobject]@{ ExitCode = [int]$entry.exitCode; FirstSdk = [string]$entry.firstSdk }
     }
 
-    # Lower EAP around the native call: on Windows PowerShell 5.1, stderr from
-    # `2>&1` would otherwise become a terminating NativeCommandError before
-    # $LASTEXITCODE could be judged (same guard as Invoke-VersionProbe).
-    $previousEap = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try {
-        $sdks = & $DotNetPath --list-sdks 2>&1
-    } finally {
-        $ErrorActionPreference = $previousEap
-    }
+    # The EAP guard lives in the shared helper (same reason as Invoke-VersionProbe).
+    $sdks = Invoke-NativeCommandWithEapGuard -FilePath $DotNetPath -Arguments @('--list-sdks')
     $sdkLines = @($sdks | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
     $exitCode = $LASTEXITCODE
     if ($exitCode -eq 0 -and $sdkLines.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace($key)) {
@@ -217,14 +201,7 @@ function Invoke-DotNetSdkProbeCached {
 
 function Test-DotNetSdk {
     param([Parameter(Mandatory = $true)][string]$Tier)
-    $candidates = New-Object System.Collections.Generic.List[string]
-    $userDotnet = Join-Path $env:USERPROFILE '.dotnet\dotnet.exe'
-    if (Test-Path -LiteralPath $userDotnet) { $candidates.Add($userDotnet) | Out-Null }
-
-    $pathDotnet = Resolve-CommandPath 'dotnet'
-    if (-not [string]::IsNullOrWhiteSpace($pathDotnet) -and $pathDotnet -notin $candidates) {
-        $candidates.Add($pathDotnet) | Out-Null
-    }
+    $candidates = @(Get-DotNetCommandCandidates)
 
     if ($candidates.Count -eq 0) {
         Add-ToolchainCheck -Name '.NET SDK' -Tier $Tier -Status 'MISSING' -Details 'FormulaOfficeMathValidator requires a dotnet SDK.'

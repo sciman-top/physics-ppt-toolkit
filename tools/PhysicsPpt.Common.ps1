@@ -374,16 +374,46 @@ function Resolve-PowerShellHost {
       is deliberately kept here, at one boundary, so all callers use the same
       PS7-first policy and no worker silently regresses to powershell.exe.
     #>
-    param([switch]$RequirePowerShell7)
-
     $hostInfo = Get-PowerShellHostInfo
     if ($null -eq $hostInfo) {
         throw "No PowerShell host was found. Install PowerShell 7 (pwsh) or enable the Windows PowerShell 5.1 compatibility host."
     }
-    if ($RequirePowerShell7 -and -not $hostInfo.IsPrimary) {
-        throw "PowerShell 7 (pwsh) is required for this operation, but only the Windows PowerShell 5.1 fallback was found."
-    }
     return [string]$hostInfo.Path
+}
+
+function Get-DotNetCommandCandidates {
+    # Shared dotnet resolution order for the validator gate (Assert-Toolchain)
+    # and the workflow formula stage: per-user install first, then PATH, deduped.
+    $candidates = New-Object System.Collections.Generic.List[string]
+    $userDotnet = Join-Path $env:USERPROFILE '.dotnet\dotnet.exe'
+    if (Test-Path -LiteralPath $userDotnet) { $candidates.Add($userDotnet) | Out-Null }
+
+    $pathDotnet = Get-Command dotnet -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -ne $pathDotnet) {
+        $dotnetPath = if (-not [string]::IsNullOrWhiteSpace([string]$pathDotnet.Source)) { [string]$pathDotnet.Source } else { [string]$pathDotnet.Path }
+        if (-not [string]::IsNullOrWhiteSpace($dotnetPath) -and $dotnetPath -notin $candidates) {
+            $candidates.Add($dotnetPath) | Out-Null
+        }
+    }
+    return $candidates.ToArray()
+}
+
+function Invoke-NativeCommandWithEapGuard {
+    # Lowered EAP around native calls: on Windows PowerShell 5.1, stderr from
+    # `2>&1` would otherwise become a terminating NativeCommandError before
+    # $LASTEXITCODE could be judged. The output is wrapped in a one-element
+    # array so single-line output is not unrolled by the pipeline.
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [string[]]$Arguments
+    )
+    $previousEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        return ,(& $FilePath @Arguments 2>&1)
+    } finally {
+        $ErrorActionPreference = $previousEap
+    }
 }
 
 function New-PowerPointApplication {
