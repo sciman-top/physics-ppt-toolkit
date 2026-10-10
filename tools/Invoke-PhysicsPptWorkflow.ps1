@@ -206,7 +206,14 @@ function Convert-ReportCsv {
 }
 
 function Get-IssueCount {
-    param($Rows, [string]$Issue)
+    param($Rows, [string]$Issue, $Index)
+    # $Index is a precomputed issue-name -> count map (see Write-Summary); it
+    # turns the ~30 summary count passes over every report row into O(1)
+    # lookups. The scan path stays for callers without an index.
+    if ($null -ne $Index) {
+        $count = $Index[$Issue]
+        return $(if ($null -eq $count) { 0 } else { [int]$count })
+    }
     return @($Rows | Where-Object { $_.Issue -eq $Issue }).Count
 }
 
@@ -216,12 +223,24 @@ function Get-VideoCandidateCount {
 }
 
 function Get-SmallTextCount {
-    param($Rows)
+    param($Rows, $Index)
+    if ($null -ne $Index) {
+        $total = 0
+        foreach ($name in @('SmallText', 'SmallTextPreserved', 'SmallTextAfterNormalize')) {
+            $count = $Index[$name]
+            if ($null -ne $count) { $total += [int]$count }
+        }
+        return $total
+    }
     return @($Rows | Where-Object { $_.Issue -in @('SmallText', 'SmallTextPreserved', 'SmallTextAfterNormalize') }).Count
 }
 
 function Get-ImageExportMismatchCount {
-    param($Rows)
+    param($Rows, $Index)
+    if ($null -ne $Index) {
+        $count = $Index['ImageExportCountMismatch']
+        return $(if ($null -eq $count) { 0 } else { [int]$count })
+    }
     return @($Rows | Where-Object { $_.Issue -eq 'ImageExportCountMismatch' }).Count
 }
 
@@ -294,7 +313,7 @@ function New-ImageContactSheet {
     $files = @(Get-ChildItem -LiteralPath $ImageDir -Filter 'page-*.png' -File | Sort-Object Name)
     if ($files.Count -eq 0) { return $null }
 
-    Add-Type -AssemblyName System.Drawing
+    Initialize-SystemDrawing
     $labelHeight = 24
     $rows = [int][Math]::Ceiling($files.Count / [double]$Columns)
     $sheet = $null
@@ -447,7 +466,7 @@ function New-ReviewContactSheet {
     if ($null -eq $SlideIssues -or $SlideIssues.Count -eq 0) { return $null }
     if (-not (Test-Path -LiteralPath $ImageDir)) { return $null }
 
-    Add-Type -AssemblyName System.Drawing
+    Initialize-SystemDrawing
     $slides = @($SlideIssues.Keys | Sort-Object { [int]$_ })
     $labelHeight = 48
     $rows = [int][Math]::Ceiling($slides.Count / [double]$Columns)
@@ -615,7 +634,7 @@ function New-BeforeAfterReviewSheet {
     if (-not (Test-Path -LiteralPath $SourceImageDir)) { return $null }
     if (-not (Test-Path -LiteralPath $NormalizedImageDir)) { return $null }
 
-    Add-Type -AssemblyName System.Drawing
+    Initialize-SystemDrawing
     $slides = @($SlideIssues.Keys | Sort-Object { [int]$_ })
     $labelHeight = 46
     $gap = 18
@@ -1445,13 +1464,28 @@ function New-Manifest {
         $IdentityMap
     )
 
+    # One grouping pass replaces the old per-file full-table filter, which was
+    # O(files x rows) with two reflective property lookups per row per file.
+    $rowsByFileKey = @{}
+    foreach ($row in $ReportRows) {
+        $key = Get-ReportRowFileKey -Row $row
+        if ([string]::IsNullOrEmpty($key)) { continue }
+        $bucket = $rowsByFileKey[$key]
+        if ($null -eq $bucket) {
+            $bucket = [System.Collections.Generic.List[object]]::new()
+            $rowsByFileKey[$key] = $bucket
+        }
+        $bucket.Add($row)
+    }
+
     $items = foreach ($file in $Files) {
         $identity = $IdentityMap[$file.FullName]
         $safeName = $identity.safeStem
         $pptxPath = Join-Path $OutputRoot "01_交付物\$safeName.normalized$($file.Extension)"
         $pdfPath = Join-Path $OutputRoot "01_交付物\$safeName.normalized.pdf"
         $imageDir = Join-Path $OutputRoot ('04_页面图片\' + $safeName)
-        $fileRows = @($ReportRows | Where-Object { (Get-ReportRowFileKey -Row $_) -eq $file.FullName })
+        $fileRowsBucket = $rowsByFileKey[$file.FullName]
+        $fileRows = @($(if ($null -ne $fileRowsBucket) { $fileRowsBucket.ToArray() } else { @() }))
         $failed = @($fileRows | Where-Object { Test-IsFinalFailureIssue -Issue $_.Issue }).Count -gt 0
         $saved = Test-Path -LiteralPath $pptxPath
         $pdf = Test-Path -LiteralPath $pdfPath
@@ -1560,6 +1594,14 @@ function Write-Summary {
         $Manifest
     )
 
+    # Precomputed once so the ~30 summary count lines below are O(1) lookups
+    # instead of one full-table scan each.
+    $rowIssueIndex = @{}
+    foreach ($row in $Rows) {
+        $issueName = [string]$row.Issue
+        $rowIssueIndex[$issueName] = 1 + $(if ($rowIssueIndex.ContainsKey($issueName)) { [int]$rowIssueIndex[$issueName] } else { 0 })
+    }
+
     $reviewItems = @(Get-ReviewSlides -Rows $Rows)
     $manifestFiles = @($Manifest.files)
     $visualAuditItems = @()
@@ -1576,12 +1618,12 @@ function Write-Summary {
     $aiVisualReview = Get-ObjectPropertyValue -Object $Manifest -PropertyName 'aiVisualReview' -DefaultValue $null
     $aiVisualReviewStatus = [string](Get-ObjectPropertyValue -Object $aiVisualReview -PropertyName 'status' -DefaultValue 'NotPrepared')
     $deliveryStatus = [string](Get-ObjectPropertyValue -Object $Manifest -PropertyName 'deliveryStatus' -DefaultValue 'Pending')
-    $configuredFontsAvailableCount = Get-IssueCount -Rows $Rows -Issue 'ConfiguredFontsAvailable'
-    $configuredFontsMissingCount = Get-IssueCount -Rows $Rows -Issue 'ConfiguredFontsMissing'
-    $configuredFontCheckUnavailableCount = Get-IssueCount -Rows $Rows -Issue 'ConfiguredFontCheckUnavailable'
-    $slideAspect16By9Count = Get-IssueCount -Rows $Rows -Issue 'SlideAspectRatio16By9'
-    $slideAspectMismatchCount = Get-IssueCount -Rows $Rows -Issue 'SlideAspectRatioMismatch'
-    $slideAspectCheckUnavailableCount = Get-IssueCount -Rows $Rows -Issue 'SlideAspectRatioCheckUnavailable'
+    $configuredFontsAvailableCount = Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'ConfiguredFontsAvailable'
+    $configuredFontsMissingCount = Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'ConfiguredFontsMissing'
+    $configuredFontCheckUnavailableCount = Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'ConfiguredFontCheckUnavailable'
+    $slideAspect16By9Count = Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'SlideAspectRatio16By9'
+    $slideAspectMismatchCount = Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'SlideAspectRatioMismatch'
+    $slideAspectCheckUnavailableCount = Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'SlideAspectRatioCheckUnavailable'
     $pdfCount = @($manifestFiles | Where-Object { -not [string]::IsNullOrWhiteSpace($_.pdf) -and (Test-Path -LiteralPath $_.pdf) }).Count
     $visualAuditCount = @($visualAuditItems | Where-Object { (Get-ObjectPropertyValue -Object $_ -PropertyName 'visualAuditStatus' -DefaultValue '') -eq 'Completed' }).Count
     $visualAuditFailedCount = @($visualAuditItems | Where-Object { (Get-ObjectPropertyValue -Object $_ -PropertyName 'visualAuditStatus' -DefaultValue '') -eq 'Failed' }).Count
@@ -1705,33 +1747,33 @@ function Write-Summary {
         }
         $lines.Add("- OMML 自动门禁通过/失败：$formulaOmmlGatePassedCount / $formulaOmmlGateFailedCount")
     }
-    $lines.Add("- 疑似公式：$(Get-IssueCount -Rows $Rows -Issue 'FormulaCandidate')")
-    $lines.Add("- 已归一低风险文本公式：$(Get-IssueCount -Rows $Rows -Issue 'FormulaTextStyleNormalized')")
-    $lines.Add("- 公式样式跳过：$(Get-IssueCount -Rows $Rows -Issue 'FormulaStyleSkipped')")
-    $lines.Add("- 白名单公式候选：$(Get-IssueCount -Rows $Rows -Issue 'FormulaWhitelistCandidate')")
-    $lines.Add("- 公式转换跳过：$(Get-IssueCount -Rows $Rows -Issue 'FormulaConversionSkipped')")
-    $lines.Add("- 小字号：$(Get-SmallTextCount -Rows $Rows)")
-    $lines.Add("- 大图/位图文字需复核：$(Get-IssueCount -Rows $Rows -Issue 'RasterPicturePreserved')")
-    $lines.Add("- 分节标题页：$(Get-IssueCount -Rows $Rows -Issue 'SectionTitleSlide')")
-    $lines.Add("- 封面页保留样式：$(Get-IssueCount -Rows $Rows -Issue 'CoverSlideStylePreserved')")
-    $lines.Add("- 结束页保留样式：$(Get-IssueCount -Rows $Rows -Issue 'EndingSlideStylePreserved')")
-    $lines.Add("- 资源页保留样式：$(Get-IssueCount -Rows $Rows -Issue 'ResourceSlideStylePreserved')")
-    $lines.Add("- 补充说明页保留样式：$(Get-IssueCount -Rows $Rows -Issue 'AppendixTextSlideStylePreserved')")
-    $lines.Add("- 已横向扩展文本框：$(Get-IssueCount -Rows $Rows -Issue 'TextBoxWidthExpanded')")
-    $lines.Add("- 已上下对齐答案框：$(Get-IssueCount -Rows $Rows -Issue 'AnswerTextAligned')")
-    $lines.Add("- 已检查答案框对齐：$(Get-IssueCount -Rows $Rows -Issue 'AnswerTextAlignmentChecked')")
-    $lines.Add("- 已设置答案劈裂动画：$((Get-IssueCount -Rows $Rows -Issue 'AnswerAnimationSet') + (Get-IssueCount -Rows $Rows -Issue 'AnswerAnimationAdded'))")
-    $lines.Add("- 组合对象跳过：$(Get-IssueCount -Rows $Rows -Issue 'GroupShapeSkipped')")
-    $lines.Add("- 空白页候选：$(Get-IssueCount -Rows $Rows -Issue 'EmptySlideCandidate')")
-    $lines.Add("- 页面背景候选/写回：$(Get-IssueCount -Rows $Rows -Issue 'SlideBackgroundCandidate') / $(Get-IssueCount -Rows $Rows -Issue 'SlideBackgroundNormalized')")
-    $lines.Add("- 装饰效果清理：$(Get-IssueCount -Rows $Rows -Issue 'DecorativeEffectsCleared')")
-    $lines.Add("- 已禁用单击换片：$(Get-IssueCount -Rows $Rows -Issue 'AdvanceOnClickDisabled')")
+    $lines.Add("- 疑似公式：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'FormulaCandidate')")
+    $lines.Add("- 已归一低风险文本公式：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'FormulaTextStyleNormalized')")
+    $lines.Add("- 公式样式跳过：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'FormulaStyleSkipped')")
+    $lines.Add("- 白名单公式候选：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'FormulaWhitelistCandidate')")
+    $lines.Add("- 公式转换跳过：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'FormulaConversionSkipped')")
+    $lines.Add("- 小字号：$(Get-SmallTextCount -Rows $Rows -Index $rowIssueIndex)")
+    $lines.Add("- 大图/位图文字需复核：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'RasterPicturePreserved')")
+    $lines.Add("- 分节标题页：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'SectionTitleSlide')")
+    $lines.Add("- 封面页保留样式：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'CoverSlideStylePreserved')")
+    $lines.Add("- 结束页保留样式：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'EndingSlideStylePreserved')")
+    $lines.Add("- 资源页保留样式：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'ResourceSlideStylePreserved')")
+    $lines.Add("- 补充说明页保留样式：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'AppendixTextSlideStylePreserved')")
+    $lines.Add("- 已横向扩展文本框：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'TextBoxWidthExpanded')")
+    $lines.Add("- 已上下对齐答案框：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'AnswerTextAligned')")
+    $lines.Add("- 已检查答案框对齐：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'AnswerTextAlignmentChecked')")
+    $lines.Add("- 已设置答案劈裂动画：$((Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'AnswerAnimationSet') + (Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'AnswerAnimationAdded'))")
+    $lines.Add("- 组合对象跳过：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'GroupShapeSkipped')")
+    $lines.Add("- 空白页候选：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'EmptySlideCandidate')")
+    $lines.Add("- 页面背景候选/写回：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'SlideBackgroundCandidate') / $(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'SlideBackgroundNormalized')")
+    $lines.Add("- 装饰效果清理：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'DecorativeEffectsCleared')")
+    $lines.Add("- 已禁用单击换片：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'AdvanceOnClickDisabled')")
     $lines.Add("- 视频页候选：$(Get-VideoCandidateCount -Rows $Rows)")
     if ($exportsPdf) {
-        $lines.Add("- PDF 导出失败：$(Get-IssueCount -Rows $Rows -Issue 'PdfExportFailed')")
+        $lines.Add("- PDF 导出失败：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'PdfExportFailed')")
     }
     if ($IncludeReviewArtifacts) {
-        $lines.Add("- 页面图片数量异常：$(Get-ImageExportMismatchCount -Rows $Rows)")
+        $lines.Add("- 页面图片数量异常：$(Get-ImageExportMismatchCount -Rows $Rows -Index $rowIssueIndex)")
         $lines.Add("- 页面总览图：$contactSheetCount")
         $lines.Add("- 重点复核图：$reviewSheetCount")
         $lines.Add("- 前后对比图：$beforeAfterSheetCount")

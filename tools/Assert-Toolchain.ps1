@@ -107,6 +107,120 @@ function Invoke-VersionProbe {
     }
 }
 
+# Version probes each spawn a full interpreter (npm alone can take seconds), so
+# every startup paid 2-3s before any real work. Successful probes are cached in
+# the user temp dir keyed by the executable's identity (path + size + UTC write
+# time): upgrading or replacing a tool yields a new file identity and
+# invalidates its own entry, so a cached hit reports exactly what a live probe
+# would. Failed probes are never cached (transient breakage stays visible on
+# the next run) and entries expire after 7 days to bound stale-hit risk.
+$script:ToolchainProbeCachePath = Join-Path ([System.IO.Path]::GetTempPath()) 'physics-ppt-toolkit.toolchain-probe-cache.json'
+$script:ToolchainProbeCacheRoot = $null
+$script:ToolchainProbeCacheTtl = (New-TimeSpan -Days 7)
+
+function Get-ToolchainProbeCacheRoot {
+    if ($null -ne $script:ToolchainProbeCacheRoot) { return $script:ToolchainProbeCacheRoot }
+    try {
+        if (Test-Path -LiteralPath $script:ToolchainProbeCachePath) {
+            $raw = [System.IO.File]::ReadAllText($script:ToolchainProbeCachePath)
+            if (-not [string]::IsNullOrWhiteSpace($raw)) { $script:ToolchainProbeCacheRoot = $raw | ConvertFrom-Json }
+        }
+    } catch {
+        $script:ToolchainProbeCacheRoot = $null
+    }
+    return $script:ToolchainProbeCacheRoot
+}
+
+function Get-ToolchainProbeIdentityKey {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [string[]]$Arguments = @(),
+        [int]$MaxLines = 0
+    )
+    try {
+        $exe = Get-Item -LiteralPath $FilePath -ErrorAction Stop
+    } catch {
+        return $null
+    }
+    $argKey = if ($null -eq $Arguments) { '' } else { ($Arguments -join ' ') }
+    return ('{0}|{1}|{2}|{3}|{4}' -f $exe.FullName.ToLowerInvariant(), $exe.Length, $exe.LastWriteTimeUtc.Ticks, $argKey, $MaxLines)
+}
+
+function Save-ToolchainProbeCacheEntry {
+    param([string]$Key, $Payload)
+    try {
+        $root = Get-ToolchainProbeCacheRoot
+        if ($null -eq $root) { $root = [pscustomobject]@{} }
+        $payloadWithStamp = $Payload | Add-Member -MemberType NoteProperty -Name 'createdUtc' -Value ((Get-Date).ToUniversalTime().ToString('o')) -Force -PassThru
+        $existing = $root.PSObject.Properties[$Key]
+        if ($null -ne $existing) { $existing.Value = $payloadWithStamp } else { $root | Add-Member -MemberType NoteProperty -Name $Key -Value $payloadWithStamp }
+        $script:ToolchainProbeCacheRoot = $root
+        [System.IO.File]::WriteAllText($script:ToolchainProbeCachePath, ($root | ConvertTo-Json -Depth 5), (New-Object System.Text.UTF8Encoding -ArgumentList $false))
+    } catch {
+        # An unwritable or racing temp cache must never fail the toolchain check.
+    }
+}
+
+function Get-ToolchainProbeCacheEntry {
+    param([string]$Key)
+    if ([string]::IsNullOrWhiteSpace($Key)) { return $null }
+    $root = Get-ToolchainProbeCacheRoot
+    if ($null -eq $root) { return $null }
+    $prop = $root.PSObject.Properties[$Key]
+    if ($null -eq $prop) { return $null }
+    try {
+        $createdUtc = [datetime]::Parse([string]$prop.Value.createdUtc, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
+        if (([datetime]::UtcNow - $createdUtc) -gt $script:ToolchainProbeCacheTtl) { return $null }
+    } catch {
+        return $null
+    }
+    return $prop.Value
+}
+
+function Invoke-VersionProbeCached {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [string[]]$Arguments = @('--version'),
+        [int]$MaxLines = 1
+    )
+    $key = Get-ToolchainProbeIdentityKey -FilePath $FilePath -Arguments $Arguments -MaxLines $MaxLines
+    $entry = Get-ToolchainProbeCacheEntry -Key $key
+    if ($null -ne $entry) {
+        return [pscustomobject]@{ ExitCode = [int]$entry.exitCode; Text = [string]$entry.text }
+    }
+    $probe = Invoke-VersionProbe -FilePath $FilePath -Arguments $Arguments -MaxLines $MaxLines
+    if ($probe.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($key)) {
+        Save-ToolchainProbeCacheEntry -Key $key -Payload ([pscustomobject]@{ exitCode = [int]$probe.ExitCode; text = [string]$probe.Text })
+    }
+    return $probe
+}
+
+function Invoke-DotNetSdkProbeCached {
+    param([Parameter(Mandatory = $true)][string]$DotNetPath)
+    $key = Get-ToolchainProbeIdentityKey -FilePath $DotNetPath -Arguments @('--list-sdks')
+    $entry = Get-ToolchainProbeCacheEntry -Key $key
+    if ($null -ne $entry) {
+        return [pscustomobject]@{ ExitCode = [int]$entry.exitCode; FirstSdk = [string]$entry.firstSdk }
+    }
+
+    # Lower EAP around the native call: on Windows PowerShell 5.1, stderr from
+    # `2>&1` would otherwise become a terminating NativeCommandError before
+    # $LASTEXITCODE could be judged (same guard as Invoke-VersionProbe).
+    $previousEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $sdks = & $DotNetPath --list-sdks 2>&1
+    } finally {
+        $ErrorActionPreference = $previousEap
+    }
+    $sdkLines = @($sdks | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -eq 0 -and $sdkLines.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace($key)) {
+        Save-ToolchainProbeCacheEntry -Key $key -Payload ([pscustomobject]@{ exitCode = [int]$exitCode; firstSdk = [string]$sdkLines[0] })
+    }
+    return [pscustomobject]@{ ExitCode = $exitCode; FirstSdk = if ($sdkLines.Count -gt 0) { [string]$sdkLines[0] } else { '' } }
+}
+
 function Invoke-NodeRepositoryProbe {
     param(
         [Parameter(Mandatory = $true)][string]$NodePath,
@@ -179,20 +293,9 @@ function Test-DotNetSdk {
     }
 
     foreach ($candidate in $candidates) {
-        # Lower EAP around the native call: on Windows PowerShell 5.1, stderr
-        # from `2>&1` would otherwise become a terminating NativeCommandError
-        # before $LASTEXITCODE could be judged (same guard as the workflow's
-        # Resolve-DotNetCommand).
-        $previousEap = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'
-        try {
-            $sdks = & $candidate --list-sdks 2>&1
-        } finally {
-            $ErrorActionPreference = $previousEap
-        }
-        $sdkLines = @($sdks | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
-        if ($LASTEXITCODE -eq 0 -and $sdkLines.Count -gt 0) {
-            Add-ToolchainCheck -Name '.NET SDK' -Tier $Tier -Status 'OK' -Version ([string]$sdkLines[0]) -Path $candidate
+        $sdkProbe = Invoke-DotNetSdkProbeCached -DotNetPath $candidate
+        if ($sdkProbe.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($sdkProbe.FirstSdk)) {
+            Add-ToolchainCheck -Name '.NET SDK' -Tier $Tier -Status 'OK' -Version $sdkProbe.FirstSdk -Path $candidate
             return
         }
     }
@@ -254,7 +357,7 @@ function Test-VendoredExecutable {
         return
     }
 
-    $version = Invoke-VersionProbe -FilePath $path -Arguments $VersionArguments -MaxLines $MaxLines
+    $version = Invoke-VersionProbeCached -FilePath $path -Arguments $VersionArguments -MaxLines $MaxLines
     # A version-looking banner from a broken executable or a WindowsApps
     # placeholder is not proof that the tool is callable. Exit code is the
     # authoritative probe result.
@@ -277,7 +380,7 @@ $primaryPowerShellPath = Resolve-CommandPath 'pwsh'
 if ([string]::IsNullOrWhiteSpace($primaryPowerShellPath)) {
     Add-ToolchainCheck -Name 'PowerShell 7 (primary host)' -Tier 'Required' -Status 'MISSING' -Details 'The default entrypoints require pwsh. Windows PowerShell 5.1 is supported only as a compatibility fallback.'
 } else {
-    $primaryVersion = Invoke-VersionProbe -FilePath $primaryPowerShellPath -Arguments @('-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.ToString()')
+    $primaryVersion = Invoke-VersionProbeCached -FilePath $primaryPowerShellPath -Arguments @('-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.ToString()')
     $primaryStatus = if ($primaryVersion.ExitCode -eq 0) { 'OK' } else { 'FAIL' }
     Add-ToolchainCheck -Name 'PowerShell 7 (primary host)' -Tier 'Required' -Status $primaryStatus -Version $primaryVersion.Text -Path $primaryPowerShellPath
 }
@@ -286,7 +389,7 @@ $legacyPowerShellPath = Resolve-CommandPath 'powershell.exe'
 if ([string]::IsNullOrWhiteSpace($legacyPowerShellPath)) {
     Add-ToolchainCheck -Name 'Windows PowerShell 5.1 (compatibility fallback)' -Tier 'Optional' -Status 'MISSING' -Details 'Not required when PowerShell 7 is available.'
 } else {
-    $legacyVersion = Invoke-VersionProbe -FilePath $legacyPowerShellPath -Arguments @('-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.ToString()')
+    $legacyVersion = Invoke-VersionProbeCached -FilePath $legacyPowerShellPath -Arguments @('-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.ToString()')
     $legacyStatus = if ($legacyVersion.ExitCode -eq 0) { 'OK' } else { 'WARN' }
     Add-ToolchainCheck -Name 'Windows PowerShell 5.1 (compatibility fallback)' -Tier 'Optional' -Status $legacyStatus -Version $legacyVersion.Text -Path $legacyPowerShellPath
 }
@@ -297,7 +400,7 @@ $nodePath = Resolve-CommandPath 'node'
 if ([string]::IsNullOrWhiteSpace($nodePath)) {
     Add-ToolchainCheck -Name 'Node.js' -Tier $nodeTier -Status 'MISSING' -Details 'sharp/libvips media optimization requires Node.js.'
 } else {
-    $nodeVersion = Invoke-VersionProbe -FilePath $nodePath -Arguments @('--version')
+    $nodeVersion = Invoke-VersionProbeCached -FilePath $nodePath -Arguments @('--version')
     $nodeStatus = if ($nodeVersion.ExitCode -eq 0) { 'OK' } else { 'FAIL' }
     Add-ToolchainCheck -Name 'Node.js' -Tier $nodeTier -Status $nodeStatus -Version $nodeVersion.Text -Path $nodePath
 }
@@ -306,7 +409,7 @@ $npmPath = Resolve-CommandPath 'npm'
 if ([string]::IsNullOrWhiteSpace($npmPath)) {
     Add-ToolchainCheck -Name 'npm' -Tier 'Recommended' -Status 'MISSING' -Details 'Needed only when restoring node_modules.'
 } else {
-    $npmVersion = Invoke-VersionProbe -FilePath $npmPath -Arguments @('--version')
+    $npmVersion = Invoke-VersionProbeCached -FilePath $npmPath -Arguments @('--version')
     $npmStatus = if ($npmVersion.ExitCode -eq 0) { 'OK' } else { 'FAIL' }
     Add-ToolchainCheck -Name 'npm' -Tier 'Recommended' -Status $npmStatus -Version $npmVersion.Text -Path $npmPath
 }

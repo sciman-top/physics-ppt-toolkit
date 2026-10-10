@@ -80,6 +80,9 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'PhysicsPpt.Common.ps1')
 
 $script:NormalizeScriptPath = $PSCommandPath
+# Run-constant digest cache for Get-NormalizeSignature (config + script hashes
+# are identical for every file; $null means not computed yet).
+$script:NormalizeSignatureConstantHashes = $null
 
 # --- Office Enum Constants ---
 $script:MsoTrue  = -1
@@ -334,13 +337,21 @@ function Get-NormalizeSignature {
         [System.IO.FileInfo]$File,
         [string]$SafeName
     )
+    # Config and script digests are identical for every file in the run; hash
+    # them once instead of re-reading the 160KB script per file. The source
+    # hash stays per-file because it is the cache key.
+    if ($null -eq $script:NormalizeSignatureConstantHashes) {
+        $configHashOnce = if (Test-Path -LiteralPath $ConfigPath) { Get-FileSha256Hex -Path $ConfigPath } else { 'missing' }
+        $script:NormalizeSignatureConstantHashes = @{
+            config = $configHashOnce
+            script = $(Get-FileSha256Hex -Path $script:NormalizeScriptPath)
+        }
+    }
     $sourceHash = Get-FileSha256Hex -Path $File.FullName
-    $configHash = if (Test-Path -LiteralPath $ConfigPath) { Get-FileSha256Hex -Path $ConfigPath } else { 'missing' }
-    $scriptHash = Get-FileSha256Hex -Path $script:NormalizeScriptPath
     $payload = [ordered]@{
         sourceSha256 = $sourceHash
-        configSha256 = $configHash
-        scriptSha256 = $scriptHash
+        configSha256 = $script:NormalizeSignatureConstantHashes.config
+        scriptSha256 = $script:NormalizeSignatureConstantHashes.script
         safeName = $SafeName
         noPdf = [bool]$NoPdf
         reportOnly = [bool]$ReportOnly
@@ -412,23 +423,19 @@ function Test-IsTitleShape {
 }
 
 function Test-IsSectionTitleSlide {
-    param($Slide)
+    param($Slide, $Facts)
+    if ($null -eq $Facts) { $Facts = Get-SlideShapeFacts -Slide $Slide }
     $textShapes = 0
     $mainText = ''
     $hasLargeVisual = $false
-    foreach ($shape in $Slide.Shapes) {
-        try {
-            $text = Get-ShapeTextCom $shape
-            if ($shape.TextFrame2.HasText -eq $script:MsoTrue -and -not [string]::IsNullOrWhiteSpace($text)) {
-                $textShapes++
-                $mainText = $text
-            }
-        } catch { }
-        try {
-            if ($shape.Type -eq $script:MsoPicture -or $shape.Type -eq $script:MsoMedia -or $shape.Type -eq $script:MsoGroup) {
-                if (($shape.Width * $shape.Height) -gt 120000) { $hasLargeVisual = $true }
-            }
-        } catch { }
+    foreach ($fact in $Facts) {
+        if ($fact.HasText -eq $script:MsoTrue -and -not [string]::IsNullOrWhiteSpace($fact.Text)) {
+            $textShapes++
+            $mainText = $fact.Text
+        }
+        if ($null -ne $fact.Type -and ($fact.Type -eq $script:MsoPicture -or $fact.Type -eq $script:MsoMedia -or $fact.Type -eq $script:MsoGroup)) {
+            if ($null -ne $fact.Width -and $null -ne $fact.Height -and (($fact.Width * $fact.Height) -gt 120000)) { $hasLargeVisual = $true }
+        }
     }
     $cleanText = ($mainText -replace '\s+', '').Trim()
     if ($cleanText.Length -eq 0 -or $cleanText.Length -gt 18) { return $false }
@@ -437,17 +444,15 @@ function Test-IsSectionTitleSlide {
 }
 
 function Get-SlideTextSummary {
-    param($Slide)
+    param($Slide, $Facts)
+    if ($null -eq $Facts) { $Facts = Get-SlideShapeFacts -Slide $Slide }
     $textBuilder = New-Object System.Text.StringBuilder
     $textShapeCount = 0
-    foreach ($shape in $Slide.Shapes) {
-        try {
-            $text = Get-ShapeTextCom $shape
-            if (-not [string]::IsNullOrWhiteSpace($text)) {
-                $textShapeCount++
-                [void]$textBuilder.AppendLine($text)
-            }
-        } catch { }
+    foreach ($fact in $Facts) {
+        if (-not [string]::IsNullOrWhiteSpace($fact.Text)) {
+            $textShapeCount++
+            [void]$textBuilder.AppendLine($fact.Text)
+        }
     }
     return [pscustomobject]@{
         Text = $textBuilder.ToString()
@@ -475,34 +480,55 @@ function Test-IsExtensionSectionText {
     return ($plain -match '^(拓展|扩展|拓展提升|拓展训练|选学|能力提升)$')
 }
 
-function Test-IsEmptySlideCandidate {
+function Get-SlideShapeFacts {
+    # One COM enumeration feeding every per-slide classification predicate
+    # (video/media, text summary, section title, large visual, empty slide).
+    # Before this fusion the main loop re-enumerated Shapes 5-6 times per
+    # slide, and every property read is a cross-process COM call, so large
+    # decks paid seconds in repeated identical reads. Per-shape reads stay
+    # individually guarded; an enumerator failure propagates to the caller
+    # exactly as the standalone predicates did. The fact records hold plain
+    # values only — no COM references survive the enumeration.
     param($Slide)
 
-    $summary = Get-SlideTextSummary -Slide $Slide
+    $facts = New-Object System.Collections.Generic.List[object]
+    foreach ($shape in $Slide.Shapes) {
+        $text = Get-ShapeTextCom $shape
+        $hasText = $null
+        try { $hasText = $shape.TextFrame2.HasText } catch { }
+        $type = $null
+        try { $type = $shape.Type } catch { }
+        $visible = $null
+        try { $visible = $shape.Visible } catch { }
+        $width = $null
+        $height = $null
+        try { $width = $shape.Width; $height = $shape.Height } catch { }
+        $facts.Add([pscustomobject]@{
+            Text = [string]$text
+            HasText = $hasText
+            Type = $type
+            Visible = $visible
+            Width = $width
+            Height = $height
+        })
+    }
+    return ,$facts
+}
+
+function Test-IsEmptySlideCandidate {
+    param($Slide, $Facts)
+
+    if ($null -eq $Facts) { $Facts = Get-SlideShapeFacts -Slide $Slide }
+    $summary = Get-SlideTextSummary -Slide $Slide -Facts $Facts
     if (-not [string]::IsNullOrWhiteSpace($summary.Text)) { return $false }
 
-    try {
-        if ($Slide.Shapes.Count -eq 0) { return $true }
-    } catch {
-        return $false
-    }
-
-    foreach ($shape in $Slide.Shapes) {
-        try {
-            if ($shape.Visible -eq $script:MsoFalse) { continue }
-        } catch { }
-
-        try {
-            if ($shape.Type -eq $script:MsoPlaceholder) {
-                continue
-            }
-        } catch { }
-
-        try {
-            if (($shape.Width * $shape.Height) -gt 100) {
-                return $false
-            }
-        } catch {
+    foreach ($fact in $Facts) {
+        if ($fact.Visible -eq $script:MsoFalse) { continue }
+        if ($fact.Type -eq $script:MsoPlaceholder) { continue }
+        # A failed geometry read returns "not empty", matching the old
+        # per-shape catch that bailed out conservatively.
+        if ($null -eq $fact.Width -or $null -eq $fact.Height) { return $false }
+        if (($fact.Width * $fact.Height) -gt 100) {
             return $false
         }
     }
@@ -511,10 +537,11 @@ function Test-IsEmptySlideCandidate {
 }
 
 function Get-SlideKind {
-    param($Slide, [int]$SlideNumber)
+    param($Slide, [int]$SlideNumber, $Facts)
     if ($SlideNumber -eq 1) { return 'Cover' }
 
-    $summary = Get-SlideTextSummary -Slide $Slide
+    if ($null -eq $Facts) { $Facts = Get-SlideShapeFacts -Slide $Slide }
+    $summary = Get-SlideTextSummary -Slide $Slide -Facts $Facts
     $joined = $summary.Text
     if ([string]::IsNullOrWhiteSpace($joined)) { return 'Normal' }
 
@@ -522,7 +549,7 @@ function Get-SlideKind {
     if ($joined -match '课件下载|下载地址|网盘|QQ群|Q群|知乎主页|公众号|sciman|zhihu\.com|pan\.baidu|alipan|quark') {
         return 'Resource'
     }
-    if (Test-IsSectionTitleSlide -Slide $Slide) {
+    if (Test-IsSectionTitleSlide -Slide $Slide -Facts $Facts) {
         if (Test-IsExtensionSectionText -Text $joined) {
             return 'ExtensionSection'
         }
@@ -530,12 +557,10 @@ function Get-SlideKind {
     }
 
     $hasLargeVisual = $false
-    foreach ($shape in $Slide.Shapes) {
-        try {
-            if ($shape.Type -eq $script:MsoPicture -or $shape.Type -eq $script:MsoMedia -or $shape.Type -eq $script:MsoGroup) {
-                if (($shape.Width * $shape.Height) -gt 120000) { $hasLargeVisual = $true }
-            }
-        } catch { }
+    foreach ($fact in $Facts) {
+        if ($null -ne $fact.Type -and ($fact.Type -eq $script:MsoPicture -or $fact.Type -eq $script:MsoMedia -or $fact.Type -eq $script:MsoGroup)) {
+            if ($null -ne $fact.Width -and $null -ne $fact.Height -and (($fact.Width * $fact.Height) -gt 120000)) { $hasLargeVisual = $true }
+        }
     }
     $plain = ($joined -replace '\s+', '')
     if (Test-IsExerciseOrQuestionText -Text $joined) {
@@ -579,13 +604,11 @@ function Test-IsLargePictureShape {
 }
 
 function Test-IsVideoSlide {
-    param($Slide)
-    foreach ($shape in $Slide.Shapes) {
-        try {
-            if ($shape.Type -eq $script:MsoMedia) { return $true }
-        } catch { }
-        $text = Get-ShapeTextCom $shape
-        if ($null -ne $script:VideoKeywordPattern -and $text -match $script:VideoKeywordPattern) { return $true }
+    param($Slide, $Facts)
+    if ($null -eq $Facts) { $Facts = Get-SlideShapeFacts -Slide $Slide }
+    foreach ($fact in $Facts) {
+        if ($null -ne $fact.Type -and $fact.Type -eq $script:MsoMedia) { return $true }
+        if ($null -ne $script:VideoKeywordPattern -and $fact.Text -match $script:VideoKeywordPattern) { return $true }
     }
     return $false
 }
@@ -2600,6 +2623,9 @@ function Invoke-NormalizeSlideShape {
 function Normalize-Presentation {
     param($PowerPoint, [System.IO.FileInfo]$File)
 
+    # Report rows appended after this point belong to this file; the failure
+    # re-check below scans only that slice instead of every accumulated row.
+    $fileRowStartIndex = $script:ReportRows.Count
     $safeName = Get-RelativePathSafeStem -RootPath $InputPath -TargetPath $File.FullName
     $outFile = Join-Path $OutputDir ($safeName + '.normalized' + $File.Extension)
     $pdfFile = Join-Path $OutputDir ($safeName + '.normalized.pdf')
@@ -2653,10 +2679,11 @@ function Normalize-Presentation {
 
         for ($i = 1; $i -le $pres.Slides.Count; $i++) {
             $slide = $pres.Slides.Item($i)
-            $isVideo = Test-IsVideoSlide $slide
-            $slideKind = Get-SlideKind -Slide $slide -SlideNumber $i
+            $slideFacts = Get-SlideShapeFacts -Slide $slide
+            $isVideo = Test-IsVideoSlide -Slide $slide -Facts $slideFacts
+            $slideKind = Get-SlideKind -Slide $slide -SlideNumber $i -Facts $slideFacts
             $preserveSlideStyle = ($slideKind -in @('Cover', 'Ending', 'Resource', 'AppendixText'))
-            $isSectionTitle = (-not $preserveSlideStyle -and (Test-IsSectionTitleSlide $slide))
+            $isSectionTitle = (-not $preserveSlideStyle -and (Test-IsSectionTitleSlide -Slide $slide -Facts $slideFacts))
             Add-ReportRow -File $File.Name -SlideNumber $i -ShapeName '(slide)' -Issue 'SlideType' -Details $(if ($isVideo) { 'VideoOrMediaCandidate' } else { 'Normal' })
             Add-ReportRow -File $File.Name -SlideNumber $i -ShapeName '(slide)' -Issue 'SlideKind' -Details $slideKind
             $specialIssue = Get-SpecialSlidePreserveIssue -SlideKind $slideKind
@@ -2666,7 +2693,7 @@ function Normalize-Presentation {
             if ($isSectionTitle) {
                 Add-ReportRow -File $File.Name -SlideNumber $i -ShapeName '(slide)' -Issue 'SectionTitleSlide' -Details 'Single centered title slide detected; section title size preserved.'
             }
-            if (Test-IsEmptySlideCandidate -Slide $slide) {
+            if (Test-IsEmptySlideCandidate -Slide $slide -Facts $slideFacts) {
                 Add-ReportRow -File $File.Name -SlideNumber $i -ShapeName '(slide)' -Issue 'EmptySlideCandidate' -Details 'No visible text, picture, media, group, or non-placeholder shape detected.'
             }
             if ($ReportOnly) {
@@ -2745,9 +2772,12 @@ function Normalize-Presentation {
                 $imageDir = Join-Path $ImageOutputDir $safeName
                 Export-PresentationImages -Presentation $pres -ImageDir $imageDir -FileName $File.Name
             }
-            $fileFailureIssues = @($script:ReportRows | Where-Object {
-                $_.FilePath -eq $File.FullName -and $_.Issue -in @('PdfExportFailed', 'ImagesExportFailed', 'ImageExportCountMismatch', 'SlidePngExportFailed', 'SavedAsFailed')
-            })
+            $fileFailureIssues = @(
+                for ($rowIndex = $fileRowStartIndex; $rowIndex -lt $script:ReportRows.Count; $rowIndex++) {
+                    $sliceRow = $script:ReportRows[$rowIndex]
+                    if ($sliceRow.FilePath -eq $File.FullName -and $sliceRow.Issue -in @('PdfExportFailed', 'ImagesExportFailed', 'ImageExportCountMismatch', 'SlidePngExportFailed', 'SavedAsFailed')) { $sliceRow }
+                }
+            )
             $cacheImageDir = if ([string]::IsNullOrWhiteSpace($ImageOutputDir)) { '' } else { Join-Path $ImageOutputDir $safeName }
             $cacheReady = (Test-Path -LiteralPath $outFile) -and (Get-Item -LiteralPath $outFile).Length -gt 0 -and $fileFailureIssues.Count -eq 0 -and
                 ($NoPdf -or ((Test-Path -LiteralPath $pdfFile) -and (Get-Item -LiteralPath $pdfFile).Length -gt 0)) -and

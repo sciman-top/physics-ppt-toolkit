@@ -458,6 +458,30 @@ function Test-PageImageSet {
     return (($numbers | ForEach-Object { [string]$_ }) -join ',') -eq ((1..$ExpectedCount) -join ',')
 }
 
+function Initialize-SystemDrawing {
+    # Add-Type re-resolves the assembly on every call; hot image-metric paths
+    # call this instead so the resolution cost is paid once per process.
+    if (-not ('System.Drawing.Bitmap' -as [type])) { Add-Type -AssemblyName System.Drawing }
+}
+
+function Copy-BitmapPixelsToBytes {
+    # One LockBits + Marshal.Copy replaces tens of thousands of GetPixel calls
+    # (each of which natively locks/unlocks the bitmap). Format32bppArgb keeps
+    # the per-pixel byte order B,G,R,A identical to what GetPixel reported, so
+    # callers preserve bit-identical metrics.
+    param([System.Drawing.Bitmap]$Bitmap)
+
+    $rect = New-Object System.Drawing.Rectangle 0, 0, $Bitmap.Width, $Bitmap.Height
+    $data = $Bitmap.LockBits($rect, [System.Drawing.Imaging.ImageLockMode]::ReadOnly, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    try {
+        $bytes = New-Object byte[] ($data.Stride * $Bitmap.Height)
+        [System.Runtime.InteropServices.Marshal]::Copy($data.Scan0, $bytes, 0, $bytes.Length)
+        return [pscustomobject]@{ Bytes = $bytes; Stride = $data.Stride }
+    } finally {
+        $Bitmap.UnlockBits($data)
+    }
+}
+
 function Get-ImageDeltaPercent {
     <#
       Single shared metric for before/after page-image deltas. The thumbnail
@@ -474,7 +498,7 @@ function Get-ImageDeltaPercent {
     if ([string]::IsNullOrWhiteSpace($BeforePath) -or [string]::IsNullOrWhiteSpace($AfterPath)) { return $null }
     if (-not (Test-Path -LiteralPath $BeforePath) -or -not (Test-Path -LiteralPath $AfterPath)) { return $null }
 
-    Add-Type -AssemblyName System.Drawing
+    Initialize-SystemDrawing
     $before = $null
     $after = $null
     $beforeThumb = $null
@@ -486,12 +510,16 @@ function Get-ImageDeltaPercent {
         $height = 90
         $beforeThumb = New-Object System.Drawing.Bitmap $before, $width, $height
         $afterThumb = New-Object System.Drawing.Bitmap $after, $width, $height
+        $beforePixels = Copy-BitmapPixelsToBytes -Bitmap $beforeThumb
+        $afterPixels = Copy-BitmapPixelsToBytes -Bitmap $afterThumb
+        $beforeBytes = $beforePixels.Bytes
+        $afterBytes = $afterPixels.Bytes
         [double]$sum = 0
         for ($y = 0; $y -lt $height; $y++) {
+            $rowBase = $y * $beforePixels.Stride
             for ($x = 0; $x -lt $width; $x++) {
-                $a = $beforeThumb.GetPixel($x, $y)
-                $b = $afterThumb.GetPixel($x, $y)
-                $sum += ([Math]::Abs($a.R - $b.R) + [Math]::Abs($a.G - $b.G) + [Math]::Abs($a.B - $b.B)) / (3 * 255)
+                $offset = $rowBase + ($x * 4)
+                $sum += ([Math]::Abs([int]$beforeBytes[$offset + 2] - [int]$afterBytes[$offset + 2]) + [Math]::Abs([int]$beforeBytes[$offset + 1] - [int]$afterBytes[$offset + 1]) + [Math]::Abs([int]$beforeBytes[$offset] - [int]$afterBytes[$offset])) / (3 * 255)
             }
         }
         return [Math]::Round(($sum / ($width * $height)) * 100, 2)
@@ -510,7 +538,7 @@ function Get-ImageWhitePercent {
 
     if ([string]::IsNullOrWhiteSpace($ImagePath) -or -not (Test-Path -LiteralPath $ImagePath)) { return $null }
 
-    Add-Type -AssemblyName System.Drawing
+    Initialize-SystemDrawing
     $image = $null
     $thumb = $null
     try {
@@ -518,11 +546,14 @@ function Get-ImageWhitePercent {
         $width = 160
         $height = 90
         $thumb = New-Object System.Drawing.Bitmap $image, $width, $height
+        $pixels = Copy-BitmapPixelsToBytes -Bitmap $thumb
+        $bytes = $pixels.Bytes
         $white = 0
         for ($y = 0; $y -lt $height; $y++) {
+            $rowBase = $y * $pixels.Stride
             for ($x = 0; $x -lt $width; $x++) {
-                $pixel = $thumb.GetPixel($x, $y)
-                if ($pixel.R -ge 245 -and $pixel.G -ge 245 -and $pixel.B -ge 245) { $white++ }
+                $offset = $rowBase + ($x * 4)
+                if ($bytes[$offset + 2] -ge 245 -and $bytes[$offset + 1] -ge 245 -and $bytes[$offset] -ge 245) { $white++ }
             }
         }
         return [Math]::Round(($white / ($width * $height)) * 100, 2)
