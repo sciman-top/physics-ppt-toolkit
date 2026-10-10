@@ -100,6 +100,7 @@ $script:MsoAnimEffectSplit = 16
 $script:MsoAnimationLevelNone = 0
 $script:MsoAnimTriggerOnPageClick = 1
 $script:MsoMixed = -2
+$script:MsoColorMixed = -2147483648
 $script:MsoEmbeddedOle = 7
 $script:MsoLinkedOle = 10
 # Authored text at/above this size is treated as display emphasis even below
@@ -1049,8 +1050,12 @@ function Set-TextRangeStyle {
             $font.NameFarEast = $beforeFarEast
             if (-not $mixedFontSize) {
                 if ($null -ne $beforeSize) { $font.Size = $beforeSize }
-                if ($beforeBold -ne '') { $font.Bold = [int]$beforeBold }
-                if ($beforeColor -ne '') { $font.Fill.ForeColor.RGB = [int]$beforeColor }
+                # Writing a mixed sentinel back flattens every run to one
+                # format (16.1 slide14: red+black runs all turned explicit
+                # black and adjacent runs merged), so mixed bold/color can
+                # only be preserved by leaving the runs untouched.
+                if ($beforeBold -in @([string]$script:MsoTrue, [string]$script:MsoFalse)) { $font.Bold = [int]$beforeBold }
+                if ($beforeColor -ne '' -and [double]$beforeColor -ne $script:MsoColorMixed) { $font.Fill.ForeColor.RGB = [int]$beforeColor }
             }
             if ($FileName -ne '') {
                 Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $ShapeName -Issue 'TextStyleSkippedLineRelayout' `
