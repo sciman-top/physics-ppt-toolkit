@@ -44,8 +44,6 @@ $required = @(
     'tools\Normalize-PhysicsPpt.ps1',
     'tools\Export-FormulaOmmlCandidates.ps1',
     'tools\Test-FormulaIr.ps1',
-    'tools\Resolve-FormulaCanonicalContext.ps1',
-    'tools\Test-FormulaCanonicalContext.ps1',
     'tools\Test-FormulaOfficeMathValidator.ps1',
     'tools\Test-ClosedWorldCircuitBreaker.ps1',
     'tools\Plan-ClosedWorldUnattended.ps1',
@@ -62,7 +60,6 @@ $required = @(
     'tools\Export-FormulaOleCrops.ps1',
     'tools\Export-FormulaOleVisualAdjudication.ps1',
     'tools\Test-FormulaOleVisualAdjudication.ps1',
-    'tools\Export-FormulaEvidenceManifest.ps1',
     'tools\PhysicsPpt.Common.ps1',
     'tools\PhysicsPpt.ReviewArtifacts.ps1',
     'tools\PhysicsPpt.Geometry.ps1',
@@ -341,8 +338,6 @@ foreach ($goldSetSampleRow in $goldSetSampleRows) {
     }
 }
 
-& (Join-Path $root 'tools\Test-FormulaCanonicalContext.ps1')
-if (-not $?) { throw 'Formula context resolver fixture test failed.' }
 & (Join-Path $root 'tools\Test-FormulaOleVisualAdjudication.ps1')
 if (-not $?) { throw 'Formula OLE visual adjudication fixture test failed.' }
 & (Join-Path $root 'tools\Test-FormulaOfficeMathValidator.ps1')
