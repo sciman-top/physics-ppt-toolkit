@@ -24,7 +24,7 @@
 ## B. 执行边界
 - `config/` 管样式与安全开关（纸面 JSON Schema 已裁撤，契约由工具运行时校验与 `examples/fixtures` 定义）；`tools/` 管 PowerShell/Node/Python/.NET 自动化；`vba/` 是不读取 JSON 的离线备用实现。
 - 新工具必须纳入 `tools/Test-ToolkitFiles.ps1`；`reports/` 是可再生成产物，默认不新增跟踪文件。
-- OCR、AI 清晰化、逐页图片、媒体重编码和联网视觉 API 默认关闭；只有当前任务明确需要并有样本收益证据时才启用。
+- OCR、AI 清晰化、媒体重编码及其 vendor/npm 依赖已于 2026-10-10 归档（git 历史可整链取回）；联网视觉 API 仍默认关闭，只有当前任务明确需要并有样本收益证据时才按归档批次恢复。
 - `PPTX/` 是真实样本资产；新增、替换或删除大样本必须说明用途，普通代码回滚不得触碰无关样本变更。
 
 ## C. 最低门禁

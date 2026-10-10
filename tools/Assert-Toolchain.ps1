@@ -17,8 +17,7 @@
 param(
     [switch]$Deep,
     [switch]$LaunchPowerPoint,
-    [switch]$RequireFormulaValidator,
-    [switch]$RequireMediaOptimization
+    [switch]$RequireFormulaValidator
 )
 
 Set-StrictMode -Version Latest
@@ -28,8 +27,6 @@ $ErrorActionPreference = 'Stop'
 
 $root = Split-Path -Parent $PSScriptRoot
 $checks = New-Object System.Collections.Generic.List[object]
-$nodeTier = if ($RequireMediaOptimization) { 'Required' } else { 'Recommended' }
-$sharpTier = if ($RequireMediaOptimization) { 'Required' } else { 'Recommended' }
 $dotNetTier = if ($RequireFormulaValidator) { 'Required' } else { 'Recommended' }
 
 function Add-ToolchainCheck {
@@ -218,58 +215,6 @@ function Invoke-DotNetSdkProbeCached {
     return [pscustomobject]@{ ExitCode = $exitCode; FirstSdk = if ($sdkLines.Count -gt 0) { [string]$sdkLines[0] } else { '' } }
 }
 
-function Invoke-NodeRepositoryProbe {
-    param(
-        [Parameter(Mandatory = $true)][string]$NodePath,
-        [Parameter(Mandatory = $true)][string]$Script
-    )
-
-    Push-Location -LiteralPath $root
-    try {
-        # Same EAP guard as Invoke-VersionProbe: node/npm banners on stderr must
-        # not terminate the probe before $LASTEXITCODE is read.
-        $previousEap = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'
-        try {
-            $output = & $NodePath -e $Script 2>&1
-        } finally {
-            $ErrorActionPreference = $previousEap
-        }
-        return [pscustomobject]@{
-            ExitCode = $LASTEXITCODE
-            Text = (($output | ForEach-Object { [string]$_ }) -join ' ').Trim()
-        }
-    } catch {
-        return [pscustomobject]@{
-            ExitCode = 999
-            Text = $_.Exception.Message
-        }
-    } finally {
-        Pop-Location
-    }
-}
-
-function Test-NodePackage {
-    param(
-        [Parameter(Mandatory = $true)][string]$PackageName,
-        [Parameter(Mandatory = $true)][string]$RelativePackageJson,
-        [Parameter(Mandatory = $true)][string]$Tier
-    )
-
-    $packagePath = Join-Path $root $RelativePackageJson
-    if (-not (Test-Path -LiteralPath $packagePath)) {
-        Add-ToolchainCheck -Name $PackageName -Tier $Tier -Status 'MISSING' -Path $packagePath -Details 'node_modules package is missing; run npm install if package-lock.json is trusted.'
-        return
-    }
-
-    try {
-        $packageJson = Get-Content -LiteralPath $packagePath -Raw -Encoding UTF8 | ConvertFrom-Json
-        Add-ToolchainCheck -Name $PackageName -Tier $Tier -Status 'OK' -Version ([string]$packageJson.version) -Path $packagePath
-    } catch {
-        Add-ToolchainCheck -Name $PackageName -Tier $Tier -Status 'FAIL' -Path $packagePath -Details $_.Exception.Message
-    }
-}
-
 function Test-DotNetSdk {
     param([Parameter(Mandatory = $true)][string]$Tier)
     $candidates = New-Object System.Collections.Generic.List[string]
@@ -390,44 +335,9 @@ if ([string]::IsNullOrWhiteSpace($legacyPowerShellPath)) {
 
 Test-PowerPointCom
 
-$nodePath = Resolve-CommandPath 'node'
-if ([string]::IsNullOrWhiteSpace($nodePath)) {
-    Add-ToolchainCheck -Name 'Node.js' -Tier $nodeTier -Status 'MISSING' -Details 'sharp/libvips media optimization requires Node.js.'
-} else {
-    $nodeVersion = Invoke-VersionProbeCached -FilePath $nodePath -Arguments @('--version')
-    $nodeStatus = if ($nodeVersion.ExitCode -eq 0) { 'OK' } else { 'FAIL' }
-    Add-ToolchainCheck -Name 'Node.js' -Tier $nodeTier -Status $nodeStatus -Version $nodeVersion.Text -Path $nodePath
-}
-
-$npmPath = Resolve-CommandPath 'npm'
-if ([string]::IsNullOrWhiteSpace($npmPath)) {
-    Add-ToolchainCheck -Name 'npm' -Tier 'Recommended' -Status 'MISSING' -Details 'Needed only when restoring node_modules.'
-} else {
-    $npmVersion = Invoke-VersionProbeCached -FilePath $npmPath -Arguments @('--version')
-    $npmStatus = if ($npmVersion.ExitCode -eq 0) { 'OK' } else { 'FAIL' }
-    Add-ToolchainCheck -Name 'npm' -Tier 'Recommended' -Status $npmStatus -Version $npmVersion.Text -Path $npmPath
-}
-
-Test-NodePackage -PackageName 'sharp' -RelativePackageJson 'node_modules\sharp\package.json' -Tier $sharpTier
-
-$runNodeSmoke = $Deep -or $RequireMediaOptimization
-if ($runNodeSmoke -and -not [string]::IsNullOrWhiteSpace($nodePath)) {
-    # sharp does not export package.json in current releases; requiring the
-    # module itself is the callable probe. Keep the version optional so an
-    # exports-map change cannot turn a healthy install into a false failure.
-    $sharpProbe = Invoke-NodeRepositoryProbe -NodePath $nodePath -Script "const sharp=require('sharp'); process.stdout.write(String(sharp.versions?.sharp || 'loaded'))"
-    if ($sharpProbe.ExitCode -eq 0) {
-        Add-ToolchainCheck -Name 'sharp require call' -Tier $sharpTier -Status 'OK' -Version $sharpProbe.Text
-    } else {
-        Add-ToolchainCheck -Name 'sharp require call' -Tier $sharpTier -Status 'FAIL' -Details $sharpProbe.Text
-    }
-}
-
 Test-DotNetSdk -Tier $dotNetTier
 
 # Recommended and optional portable tools.
-Test-VendoredExecutable -Name 'oxipng portable' -Tier 'Recommended' -RelativePath 'tools\vendor\oxipng-10.1.1\oxipng-10.1.1-x86_64-pc-windows-msvc\oxipng.exe' -VersionArguments @('--version')
-Test-VendoredExecutable -Name 'Real-ESRGAN ncnn Vulkan portable' -Tier 'Recommended' -RelativePath 'tools\vendor\realesrgan-ncnn-vulkan-20220424\realesrgan-ncnn-vulkan.exe'
 Test-VendoredExecutable -Name 'Pandoc portable' -Tier 'Optional' -RelativePath 'tools\vendor\pandoc\pandoc-3.9.0.2\pandoc.exe' -VersionArguments @('--version') -MaxLines 1
 
 foreach ($tool in @('magick', 'ffmpeg', 'pngquant', 'cjpeg', 'jpegtran')) {

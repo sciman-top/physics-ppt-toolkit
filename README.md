@@ -8,7 +8,7 @@ A Windows toolkit for normalizing, auditing, and exporting junior-high physics P
 
 核心原则：**只统一样式，不修改教学内容和对象位置。**
 
-产品边界、默认样式、目标架构、分阶段路线图和 AI 编码任务清单统一维护在 [`docs/产品需求与工程路线图.md`](docs/产品需求与工程路线图.md)。该文档是默认主线的单一事实源；公式、OCR、媒体和 AI 清晰化仅保留为非默认实验能力。
+产品边界、默认样式、目标架构、分阶段路线图和 AI 编码任务清单统一维护在 [`docs/产品需求与工程路线图.md`](docs/产品需求与工程路线图.md)。该文档是默认主线的单一事实源；白名单文本公式转 OMML 与自动视觉修复是仅有的显式非默认能力，OCR、媒体优化和 AI 清晰化链已于 2026-10-10 归档（git 历史可取回）。
 
 ---
 
@@ -17,7 +17,7 @@ A Windows toolkit for normalizing, auditing, and exporting junior-high physics P
 ```text
 physics-ppt-toolkit/
 ├─ README.md / AGENTS.md / CLAUDE.md
-├─ docs/                                  12 篇规范、SOP 与路线图
+├─ docs/                                  9 篇规范与 SOP
 │  ├─ 产品需求与工程路线图.md            产品边界单一事实源
 │  ├─ 初中物理PPT统一排版规范.md
 │  ├─ 使用方法.md
@@ -25,8 +25,7 @@ physics-ppt-toolkit/
 │  ├─ 编码与兼容性规范.md
 │  ├─ PPT母版制作说明.md
 │  ├─ GitHub远端迁移说明.md
-│  └─ 公式四篇（处理说明 / OLE转换执行计划 / 识别转换实施计划 / 排版优化路线图）
-│     与 媒体优化路线图、公式GoldSet编制SOP
+│  └─ 公式两篇（处理说明 / GoldSet编制SOP）
 ├─ config/
 │  └─ physics-ppt-style.config.json       样式运行配置（含公式白名单与安全开关）
 ├─ tools/                                 PowerShell 工具链
@@ -40,7 +39,6 @@ physics-ppt-toolkit/
 │  ├─ Export-Pptx* / Compare-Pptx*        视觉审查、不变量快照与 AI 复核包
 │  ├─ *Formula*.ps1                       公式盘点/候选/白名单/OMML 写回管线
 │  ├─ FormulaOfficeMathValidator/         .NET Open XML 结构校验器
-│  ├─ Optimize-PptxMedia.ps1              媒体优化（按功能启用）
 │  └─ Test-ToolkitFiles.ps1               最低门禁
 ├─ vba/                                   离线 VBA 备用实现（不读取 JSON）
 ├─ examples/                              示例命令与测试 fixture
@@ -132,7 +130,7 @@ reports/13.2内能（王耀强）_v12/
 .\tools\Invoke-PhysicsPptWorkflow.ps1 -InputPath "D:\课件\原始PPT" -Recurse -Mode ForceRebuild
 ```
 
-依赖按功能启用：默认规范化/检查只需要 PowerPoint；启用 `-ApplyFormulaOmmlWhitelist` 时才强制要求 .NET 验证器；sharp 媒体优化仅在对应功能使用时需要。可用 `tools\Assert-Toolchain.ps1 -Deep` 检查推荐组件，使用 `-RequireFormulaValidator` 或 `-RequireMediaOptimization` 将指定功能提升为必需门禁。
+依赖按功能启用：默认规范化/检查只需要 PowerPoint；启用 `-ApplyFormulaOmmlWhitelist` 时才强制要求 .NET 验证器。可用 `tools\Assert-Toolchain.ps1 -Deep` 检查推荐组件，使用 `-RequireFormulaValidator` 将其提升为必需门禁。
 
 批量递归输入会自动排除临时 `~$` 文件和工作流输出目录 `reports/`，避免重复处理生成文件。所有 CSV 报告统一写入 UTF-8 BOM，主路径使用 PowerShell 7，仍兼容 Windows PowerShell 5.1 和 Excel。
 

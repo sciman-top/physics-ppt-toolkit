@@ -29,18 +29,14 @@ $required = @(
     'AGENTS.md',
     '.gitattributes',
     'README.md',
-    'package.json',
     'docs\初中物理PPT统一排版规范.md',
     'docs\使用方法.md',
     'docs\GitHub远端迁移说明.md',
     'docs\PPT母版制作说明.md',
     'docs\自动化边界与风险控制.md',
     'docs\公式处理说明.md',
-    'docs\公式排版优化路线图.md',
-    'docs\公式识别转换实施计划.md',
     'docs\公式GoldSet编制SOP.md',
     'docs\编码与兼容性规范.md',
-    'docs\媒体优化路线图.md',
     'docs\产品需求与工程路线图.md',
     'manual\physics-ppt-visual-review\SKILL.md',
     'manual\physics-ppt-visual-review\references\review-result.schema.json',
@@ -60,7 +56,6 @@ $required = @(
     'tools\Invoke-FormulaOleBatch.ps1',
     'tools\Export-FormulaWhitelistSuggestions.ps1',
     'tools\Export-FormulaImageCandidates.ps1',
-    'tools\Export-FormulaImageCrops.ps1',
     'tools\Compare-FormulaConverters.ps1',
     'tools\Export-FormulaCarrierInventory.ps1',
     'tools\Export-FormulaOleMapping.ps1',
@@ -80,11 +75,7 @@ $required = @(
     'tools\Test-ToolkitFiles.ps1',
     'tools\Assert-Toolchain.ps1',
     'tools\Invoke-PhysicsPptWorkflow.ps1',
-    'tools\Optimize-PptxMedia.ps1',
-    'tools\Optimize-PptxMedia.worker.js',
     'tools\Export-PptxImageCandidates.ps1',
-    'tools\Invoke-PptxImageEnhancementProbe.ps1',
-    'tools\Apply-PptxImageEnhancement.ps1',
     'tools\Export-PptxInvariantSnapshot.ps1',
     'tools\Compare-PptxInvariantSnapshot.ps1',
     'tools\Export-PptxAiReviewPacket.ps1',
@@ -490,13 +481,6 @@ if (Test-Path -LiteralPath $reportsRoot) {
     if ($layoutViolations.Count -gt 0) {
         throw ("reports/ root layout violation: only <deck>_v<N> delivery dirs and _archive are allowed; move offenders into reports/_archive first (offenders: " + ($layoutViolations -join ', ') + ")")
     }
-}
-
-$packagePath = Join-Path $root 'package.json'
-$packageJson = Get-Content -LiteralPath $packagePath -Raw -Encoding UTF8 | ConvertFrom-Json
-$sharpDependency = $packageJson.dependencies.PSObject.Properties['sharp']
-if ($null -eq $sharpDependency -or [string]::IsNullOrWhiteSpace([string]$sharpDependency.Value)) {
-    throw "package.json dependencies.sharp is missing"
 }
 
 $visualSkillPath = Join-Path $root 'manual\physics-ppt-visual-review\SKILL.md'
