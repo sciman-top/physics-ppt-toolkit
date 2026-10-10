@@ -293,16 +293,22 @@ foreach ($invalidCase in @($unicodeMathInvalid.cases)) {
 # Structural OMML regression guard: superscript groups must render as raised
 # scripts without visible parentheses, and the escaped linear slash must stay
 # a division run instead of becoming a stacked fraction.
-# These mirror Export-FormulaOmmlCandidates.ps1's own $script: constants: the
-# parser functions are Invoke-Expression'd into THIS scope (section 2b), so
-# their bodies resolve these names here. Do not remove them as "unused" — the
-# references are invisible to single-file scans.
-$script:NsA14 = 'http://schemas.microsoft.com/office/drawing/2010/main'
-$script:NsA = 'http://schemas.openxmlformats.org/drawingml/2006/main'
-$script:NsM = 'http://schemas.openxmlformats.org/officeDocument/2006/math'
-$script:FormulaColorHex = '000000'
-$script:FormulaSizeHundredths = 3800
-$script:FormulaEastAsianFontName = '宋体'
+# The parser functions are Invoke-Expression'd into THIS scope (section 2b),
+# so their bodies resolve $script: constants here. Instead of hand-mirroring
+# the values, replay the exporter's own literal assignments: a renamed or
+# removed constant fails the gate below instead of silently keeping a stale
+# mirrored copy.
+$replayedConstants = @()
+foreach ($assignmentAst in $ommlCandidatesParserAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -like '$script:*' }, $true)) {
+    $rhsText = $assignmentAst.Right.Extent.Text
+    if ($rhsText -match "^'[^']*'$" -or $rhsText -match '^\d+$') {
+        Invoke-Expression $assignmentAst.Extent.Text
+        $replayedConstants += $assignmentAst.Left.Extent.Text
+    }
+}
+foreach ($requiredConstant in @('$script:NsA14', '$script:NsA', '$script:NsM', '$script:FormulaColorHex', '$script:FormulaSizeHundredths', '$script:FormulaEastAsianFontName')) {
+    if ($requiredConstant -notin $replayedConstants) { throw "OMML candidate exporter no longer defines literal constant: $requiredConstant" }
+}
 $supFragmentXml = (New-OmmlFragment -UnicodeMath '10^(-3)').OuterXml
 if ($supFragmentXml -notmatch ':sSup') { throw 'Superscript OMML regression: 10^(-3) no longer produces m:sSup.' }
 if ($supFragmentXml -match '\(|\)') { throw 'Superscript OMML regression: parentheses leaked into the m:sup script runs.' }
@@ -323,6 +329,15 @@ foreach ($goldSetColumn in @('ReviewStatus', 'Slide', 'ShapeIds', 'WhitelistName
 }
 foreach ($goldSetSampleRow in $goldSetSampleRows) {
     if ([string]$goldSetSampleRow.ReviewStatus -notin @('Draft', 'Approved')) { throw 'Formula gold set sample fixture has invalid ReviewStatus.' }
+}
+# WhitelistName is the live join key the OLE apply chain resolves against
+# config; a drifted name would only surface mid-batch as a failed conversion.
+$whitelistNames = @($config.formulaWhitelist | ForEach-Object { [string]$_.name })
+foreach ($goldSetSampleRow in $goldSetSampleRows) {
+    $goldSetWhitelistName = [string]$goldSetSampleRow.WhitelistName
+    if (-not [string]::IsNullOrWhiteSpace($goldSetWhitelistName) -and $goldSetWhitelistName -notin $whitelistNames) {
+        throw ("Formula gold set sample references unknown whitelist name: {0}" -f $goldSetWhitelistName)
+    }
 }
 
 & (Join-Path $root 'tools\Test-FormulaCanonicalContext.ps1')

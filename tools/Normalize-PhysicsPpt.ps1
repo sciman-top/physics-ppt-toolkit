@@ -28,9 +28,6 @@
 .PARAMETER NoPdf
   Skip exporting the normalized PPTX to a same-name PDF.
 
-.PARAMETER UpdateMaster
-  Also normalize the slide master text styles.
-
 .PARAMETER DisableAdvanceOnClick
   Explicitly disable mouse-click slide advance on every slide. The default is to
   preserve the source presentation's click behavior.
@@ -56,7 +53,6 @@ param(
     [switch]$ReportOnly,
     [switch]$NoBackup,
     [switch]$NoPdf,
-    [switch]$UpdateMaster,
     [switch]$DisableAdvanceOnClick,
     [switch]$Force,
     [switch]$FailOnError,
@@ -379,7 +375,6 @@ function Get-NormalizeSignature {
         safeName = $SafeName
         noPdf = [bool]$NoPdf
         reportOnly = [bool]$ReportOnly
-        updateMaster = [bool]$UpdateMaster
         disableAdvanceOnClick = [bool]$DisableAdvanceOnClick
         filePattern = [string]$FilePattern
         imageOutputDir = if ([string]::IsNullOrWhiteSpace($ImageOutputDir)) { '' } else { [System.IO.Path]::GetFullPath($ImageOutputDir) }
@@ -2213,24 +2208,6 @@ function Disable-SlideAdvanceOnClick {
     }
 }
 
-function Update-SlideMasterStyle {
-    param($Presentation, [string]$FileName)
-    try {
-        $master = $Presentation.SlideMaster
-        foreach ($shape in $master.Shapes) {
-            $text = Get-ShapeTextCom $shape
-            if ([string]::IsNullOrWhiteSpace($text)) { continue }
-            $isTitle = Test-IsTitleShape $shape
-            Set-TextRangeStyle -TextRange $shape.TextFrame2.TextRange `
-                -Size $(if ($isTitle) { $script:Style.SizeTitle1 } else { $script:Style.SizeBody }) `
-                -Color $script:Style.ColorBody -Bold $isTitle `
-                -FileName $FileName -SlideNumber 0 -ShapeName 'SlideMaster'
-        }
-    } catch {
-        Add-ReportRow -File $FileName -SlideNumber 0 -ShapeName 'SlideMaster' -Issue 'MasterUpdateFailed' -Details $_.Exception.Message
-    }
-}
-
 function Export-PresentationPdf {
     param(
         $Presentation,
@@ -2427,7 +2404,6 @@ function Normalize-Presentation {
         $pictureFillShapeIds = Get-PictureFillShapeIds -SourcePath $File.FullName
         $script:PresentationSlidePartMap = Get-SourceSlidePartMap -SourcePath $File.FullName
         Add-PresentationPreflightReports -Presentation $pres -FileName $File.Name | Out-Null
-        if ($UpdateMaster -and -not $ReportOnly) { Update-SlideMasterStyle -Presentation $pres -FileName $File.Name }
         $slideWidth = [double]$pres.PageSetup.SlideWidth
 
         for ($i = 1; $i -le $pres.Slides.Count; $i++) {
@@ -2623,7 +2599,6 @@ if ($DegreeOfParallelism -gt 1 -and $files.Count -gt 1) {
         if ($ReportOnly)    { $childArgs += '-ReportOnly' }
         if ($NoBackup)      { $childArgs += '-NoBackup' }
         if ($NoPdf)         { $childArgs += '-NoPdf' }
-        if ($UpdateMaster)  { $childArgs += '-UpdateMaster' }
         if ($DisableAdvanceOnClick) { $childArgs += '-DisableAdvanceOnClick' }
         if ($Force)         { $childArgs += '-Force' }
         $childArgs += @('-FileRetryCount', [string]$FileRetryCount, '-FileRetryDelayMs', [string]$FileRetryDelayMs)

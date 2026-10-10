@@ -333,15 +333,12 @@ try {
 }
 
 function Get-FileSha256Safe {
+    # Never-throw wrapper for delivery-manifest hashing; the shared
+    # Get-FileSha256Hex already opens with FileShare.ReadWrite for files a
+    # live PowerPoint session still holds.
     param([string]$Path)
     if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) { return '' }
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-        try {
-            return (($sha.ComputeHash($stream) | ForEach-Object { $_.ToString('x2') }) -join '')
-        } finally { $stream.Dispose() }
-    } catch { return '' } finally { $sha.Dispose() }
+    try { return (Get-FileSha256Hex -Path $Path) } catch { return '' }
 }
 
 $reportCsv = Join-Path $reportDir 'highlight-box-unify-report.csv'

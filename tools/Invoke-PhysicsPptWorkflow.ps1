@@ -28,9 +28,6 @@
 .PARAMETER Recurse
   Search subdirectories when InputPath is a directory.
 
-.PARAMETER UpdateMaster
-  Also normalize the slide master text styles.
-
 .PARAMETER OpenOutput
   Open the output folder when the workflow completes.
 
@@ -94,7 +91,6 @@ param(
     [string]$FilePattern = '*.ppt*',
 
     [switch]$Recurse,
-    [switch]$UpdateMaster,
     [switch]$OpenOutput,
     [switch]$OpenGeneratedPptx,
     [switch]$IncludeReviewArtifacts,
@@ -2075,7 +2071,6 @@ if ($Mode -eq 'CheckOnly') {
         InputPath = $inputFullPath
         OutputDir = $normalizedDir
         Recurse = [bool]$Recurse
-        UpdateMaster = [bool]$UpdateMaster
         DisableAdvanceOnClick = [bool]$DisableAdvanceOnClick
         NoPdf = (($Mode -eq 'SafeNormalize') -or $BrandRefresh -or $HighlightBox)
         Force = ($Mode -eq 'ForceRebuild')

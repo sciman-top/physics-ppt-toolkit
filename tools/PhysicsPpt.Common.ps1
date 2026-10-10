@@ -926,8 +926,19 @@ function Get-RowValue {
 }
 
 function Get-FileSha256Hex {
+    # Opens with FileShare.ReadWrite: outputs may still be held open by a live
+    # PowerPoint COM session minutes after SaveAs, which Get-FileHash's
+    # FileShare.Read open would refuse.
     param([Parameter(Mandatory = $true)][string]$Path)
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            return ([System.BitConverter]::ToString($sha.ComputeHash($stream)) -replace '-', '').ToLowerInvariant()
+        } finally { $stream.Dispose() }
+    } finally {
+        $sha.Dispose()
+    }
 }
 
 function Get-TextSha256Hex {

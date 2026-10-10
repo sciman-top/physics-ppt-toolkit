@@ -81,15 +81,9 @@ function Get-FileSha256 {
         $dirFullPath = [System.IO.Path]::GetFullPath($Path)
         $entries = @(Get-ChildItem -LiteralPath $dirFullPath -Recurse -File | Sort-Object FullName | ForEach-Object {
             $relative = $_.FullName.Substring($dirFullPath.Length).TrimStart('\', '/')
-            '{0}:{1}' -f $relative, (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            '{0}:{1}' -f $relative, (Get-FileSha256Hex -Path $_.FullName)
         })
-        $sha = [System.Security.Cryptography.SHA256]::Create()
-        try {
-            $bytes = [System.Text.Encoding]::UTF8.GetBytes(($entries -join "`n"))
-            return ([System.BitConverter]::ToString($sha.ComputeHash($bytes)) -replace '-', '').ToLowerInvariant()
-        } finally {
-            $sha.Dispose()
-        }
+        return (Get-TextSha256Hex -Text ($entries -join "`n"))
     }
     return (Get-FileSha256Hex -Path $Path)
 }
@@ -107,13 +101,7 @@ function New-StepSignature {
     $material = @($StepName) + @($Flags) + @($InputPaths | ForEach-Object { Get-FileSha256 -Path $_ }) + @(
         $script:SignatureToolHash, $script:SignatureConfigHash, [string]$MaxItems
     )
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        $bytes = [System.Text.Encoding]::UTF8.GetBytes(($material -join '|'))
-        return ([System.BitConverter]::ToString($sha.ComputeHash($bytes)) -replace '-', '').ToLowerInvariant()
-    } finally {
-        $sha.Dispose()
-    }
+    return (Get-TextSha256Hex -Text ($material -join '|'))
 }
 
 function Test-StepReusable {
