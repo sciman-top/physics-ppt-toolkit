@@ -71,6 +71,7 @@ $required = @(
     'tools\Export-FormulaEvidenceManifest.ps1',
     'tools\PhysicsPpt.Common.ps1',
     'tools\PhysicsPpt.ReviewArtifacts.ps1',
+    'tools\PhysicsPpt.Geometry.ps1',
     'tools\Export-PptxVisualAudit.ps1',
     'tools\Export-PptxVisualConfirmation.ps1',
     'tools\Apply-PptxVisualAuditFixes.ps1',
@@ -736,7 +737,8 @@ if ($normalizeContent -match [regex]::Escape('$font.Bold = $(if ($Bold) { $scrip
 # PreserveWhitespace=$false Load drops whitespace-only <a:t> runs and the
 # normalized copy silently loses formula spacing (regression: 14.1 slide9
 # 'Q放 = qm' arrived as 'Q放= qm' in the v39 invariant gate).
-if ($normalizeContent -notmatch '(?s)function Read-GeometrySlideXmlDocument \{.*?PreserveWhitespace\s*=\s*\$true') {
+$geometryContent = Get-Content -LiteralPath (Join-Path $root 'tools\PhysicsPpt.Geometry.ps1') -Raw -Encoding UTF8
+if ($geometryContent -notmatch '(?s)function Read-GeometrySlideXmlDocument \{.*?PreserveWhitespace\s*=\s*\$true') {
     throw 'Geometry slide XML loader must set PreserveWhitespace=$true before Load to keep whitespace-only a:t runs.'
 }
 $whitespaceRunDoc = New-Object System.Xml.XmlDocument
@@ -840,10 +842,15 @@ try {
 # slide-locating helper must resolve through the sldIdLst map, or guards
 # silently miss on reordered decks (18.2 blipFill re-bake class).
 $normalizeReorderAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'tools\Normalize-PhysicsPpt.ps1'), [ref]$null, [ref]$null)
+$geometryReorderAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'tools\PhysicsPpt.Geometry.ps1'), [ref]$null, [ref]$null)
 $reorderNormalizeFunctions = @('Read-GeometrySlideXmlDocument', 'Get-PictureFillShapeIds')
 $reorderFunctionText = ''
 foreach ($fnName in $reorderNormalizeFunctions) {
-    $fnAst = $normalizeReorderAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $fnName }, $true) | Select-Object -First 1
+    # Read-GeometrySlideXmlDocument lives in the geometry module; search both ASTs.
+    $fnAst = @(
+        $normalizeReorderAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $fnName }, $true)
+        $geometryReorderAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $fnName }, $true)
+    ) | Select-Object -First 1
     if ($null -eq $fnAst) { throw "Normalize slide-order function not found for the behavioral probe: $fnName" }
     $reorderFunctionText += "`n" + $fnAst.Extent.Text
 }
@@ -943,7 +950,11 @@ foreach ($oleIdCase in $oleIdProbeCases) {
 # inert, and any line-count or per-line text change is a relayout.
 $layoutDecisionText = ''
 foreach ($layoutFnName in @('Test-TextRangeLayoutUnchanged', 'Get-TextRangeLayoutChangeText', 'Get-AutoSizeGeometryDrift')) {
-    $layoutFnAst = $normalizeReorderAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $layoutFnName }, $true) | Select-Object -First 1
+    # Get-AutoSizeGeometryDrift lives in the geometry module; search both ASTs.
+    $layoutFnAst = @(
+        $normalizeReorderAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $layoutFnName }, $true)
+        $geometryReorderAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $layoutFnName }, $true)
+    ) | Select-Object -First 1
     if ($null -eq $layoutFnAst) { throw "Normalize guard function not found for the behavioral probe: $layoutFnName" }
     $layoutDecisionText += "`n" + $layoutFnAst.Extent.Text
 }
