@@ -81,6 +81,7 @@ $required = @(
     'tools\Export-PptxAiReviewPacket.ps1',
     'tools\Import-PptxAiReviewResult.ps1',
     'tools\Test-PhysicsPptPolicy.ps1',
+    'tools\Test-PageTypeClassification.ps1',
     'tools\Apply-PptxBrandVisualRefresh.ps1',
     'tools\Apply-PptxHighlightBoxStyle.ps1',
     'tools\generate_brand_assets.py',
@@ -332,6 +333,8 @@ if (-not $?) { throw 'Formula OLE visual adjudication fixture test failed.' }
 if (-not $?) { throw 'FormulaOfficeMathValidator fault-injection test failed.' }
 & (Join-Path $root 'tools\Test-ClosedWorldCircuitBreaker.ps1')
 if (-not $?) { throw 'Closed-world false-acceptance circuit-breaker test failed.' }
+& (Join-Path $root 'tools\Test-PageTypeClassification.ps1')
+if (-not $?) { throw 'Page-type classification probe failed.' }
 
 $requiredFontFields = @('chinese', 'compactChinese', 'latin', 'math')
 foreach ($field in $requiredFontFields) {
