@@ -45,8 +45,6 @@ $required = @(
     'tools\Export-FormulaOmmlCandidates.ps1',
     'tools\Test-FormulaIr.ps1',
     'tools\Test-FormulaOfficeMathValidator.ps1',
-    'tools\Test-ClosedWorldCircuitBreaker.ps1',
-    'tools\Plan-ClosedWorldUnattended.ps1',
     'tools\Test-FormulaPowerPointRepairHandling.ps1',
     'tools\Apply-FormulaOmmlWhitelist.ps1',
     'tools\Apply-FormulaOmmlForOle.ps1',
@@ -168,7 +166,7 @@ $formulaProcessingValue = $formulaProcessing.Value
 if ([int]$formulaProcessingValue.schemaVersion -ne 1) {
     throw "Unsupported formulaProcessing schemaVersion: $($formulaProcessingValue.schemaVersion)"
 }
-$allowedFormulaModes = @('ReportOnly', 'CandidateOnly', 'ReviewRequired', 'ClosedWorldUnattended', 'ExplicitMigration')
+$allowedFormulaModes = @('ReportOnly', 'CandidateOnly', 'ReviewRequired', 'ExplicitMigration')
 if ([string]$formulaProcessingValue.defaultMode -notin $allowedFormulaModes) {
     throw "Config formulaProcessing.defaultMode is invalid: $($formulaProcessingValue.defaultMode)"
 }
@@ -342,8 +340,6 @@ foreach ($goldSetSampleRow in $goldSetSampleRows) {
 if (-not $?) { throw 'Formula OLE visual adjudication fixture test failed.' }
 & (Join-Path $root 'tools\Test-FormulaOfficeMathValidator.ps1')
 if (-not $?) { throw 'FormulaOfficeMathValidator fault-injection test failed.' }
-& (Join-Path $root 'tools\Test-ClosedWorldCircuitBreaker.ps1')
-if (-not $?) { throw 'Closed-world false-acceptance circuit-breaker test failed.' }
 & (Join-Path $root 'tools\Test-PageTypeClassification.ps1')
 if (-not $?) { throw 'Page-type classification probe failed.' }
 

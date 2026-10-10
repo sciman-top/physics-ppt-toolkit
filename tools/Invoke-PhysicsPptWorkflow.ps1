@@ -102,7 +102,7 @@ param(
     [switch]$HighlightBox,
     [switch]$ApplyFormulaOmmlWhitelist,
     [switch]$FormulaOmmlVisualAudit,
-    [ValidateSet('ReportOnly', 'CandidateOnly', 'ReviewRequired', 'ClosedWorldUnattended', 'ExplicitMigration')]
+    [ValidateSet('ReportOnly', 'CandidateOnly', 'ReviewRequired', 'ExplicitMigration')]
     [string]$FormulaProcessingMode = '',
     [switch]$SkipPreflightReport,
     [switch]$DisableAdvanceOnClick,
@@ -148,9 +148,6 @@ if ($script:FormulaProcessingModeExplicit -and
     $script:FormulaProcessingMode -in @('ReportOnly', 'CandidateOnly', 'ReviewRequired') -and
     $ApplyFormulaOmmlWhitelist) {
     throw "Formula processing mode $($script:FormulaProcessingMode) forbids PPTX write-back; use ExplicitMigration or remove -ApplyFormulaOmmlWhitelist."
-}
-if ($script:FormulaProcessingMode -eq 'ClosedWorldUnattended' -and $ApplyFormulaOmmlWhitelist -and -not $FormulaOmmlVisualAudit) {
-    throw 'ClosedWorldUnattended write-back requires -FormulaOmmlVisualAudit so the rendered visual gate is present.'
 }
 if (($BrandRefresh -or $HighlightBox -or $ApplyFormulaOmmlWhitelist) -and $Mode -eq 'CheckOnly') {
     throw '-BrandRefresh/-HighlightBox/-ApplyFormulaOmmlWhitelist produce PPTX write-backs and require a normalization mode; CheckOnly never writes deliverables.'

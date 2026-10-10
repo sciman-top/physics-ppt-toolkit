@@ -507,7 +507,6 @@
       "ReportOnly",
       "CandidateOnly",
       "ReviewRequired",
-      "ClosedWorldUnattended",
       "ExplicitMigration"
     ],
     "writeBackEnabled": false,
