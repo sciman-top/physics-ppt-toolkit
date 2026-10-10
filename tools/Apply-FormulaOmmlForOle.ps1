@@ -632,7 +632,7 @@ try {
             }
             # Build entries (bldP/bldGraphic) also carry spid references into
             # the timing tree but have no spTgt child, so they need their own pass.
-            foreach ($buildNode in @($doc.SelectNodes('//p:timing//*[local-name()="bldP" or local-name()="bldGraphic"]'))) {
+            foreach ($buildNode in @($doc.SelectNodes('//p:timing//*[local-name()="bldP" or local-name()="bldGraphic"]', $ns))) {
                 $buildSpid = [string]$buildNode.GetAttribute('spid')
                 if (-not [string]::IsNullOrWhiteSpace($buildSpid)) { $timingSpids += $buildSpid }
             }

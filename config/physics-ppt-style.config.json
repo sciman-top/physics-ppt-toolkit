@@ -480,6 +480,13 @@
       "targetUnicodeMath": "I=0.3A",
       "targetTex": "I=0.3A",
       "note": "电流数值代入式；来源：15.4电流的测量 OLE slide5（黑色斜体）。"
+    },
+    {
+      "name": "电压数值代入式1.5V",
+      "sourcePattern": "^U=1\\.5V$",
+      "targetUnicodeMath": "U=1.5V",
+      "targetTex": "U=1.5V",
+      "note": "电压数值代入式；来源：16.1电压 OLE slide8（黑色斜体，标题区）。"
     }
   ],
   "rules": {
