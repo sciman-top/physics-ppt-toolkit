@@ -16,9 +16,9 @@
 
 - Windows 10 / Windows 11
 - Microsoft PowerPoint 桌面版
-- Node.js
-- .NET SDK 10
+- .NET SDK 10（启用 `-ApplyFormulaOmmlWhitelist` 时必需）
 - Git
+- Pandoc（可选，仅公式转换器对照评估使用）
 
 拉取仓库：
 
@@ -26,7 +26,6 @@
 cd D:\tools
 git clone https://github.com/sciman-top/physics-ppt-toolkit.git
 cd D:\tools\physics-ppt-toolkit
-npm install
 ```
 
 如果仓库启用了 Git LFS：

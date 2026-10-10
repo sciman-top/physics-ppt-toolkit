@@ -1,7 +1,6 @@
 # PowerPoint working files
 ~$*.ppt*
 *.tmp
-node_modules/
 __pycache__/
 *.pyc
 
@@ -24,7 +23,6 @@ reports/**
 *.normalized.pptx
 *.normalized.pptm
 *.normalized.pdf
-*.media-optimized.pptx
 *.formula-omml.pptx
 *.formula-svg.pptx
 *.visual-fixed.pptx

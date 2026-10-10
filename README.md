@@ -43,6 +43,7 @@ physics-ppt-toolkit/
 ├─ vba/                                   离线 VBA 备用实现（不读取 JSON）
 ├─ examples/                              示例命令与测试 fixture
 ├─ manual/                                宿主 AI 只读视觉复核 skill
+├─ assets/                                品牌图资产（brand/ 背景、图标、水印）
 ├─ PPTX/                                  真实样本资产
 └─ 一键*.cmd                              三个一键入口
 ```
