@@ -38,10 +38,6 @@ param(
     # this exact path inside the caller's delivery tree instead of claiming a
     # new reports/<stem>_v<N> generation; the caller owns backup and report dirs.
     [string]$OutputPath = '',
-    # Retired knob: dividers apply the 2026-09-15 sanctioned 80pt (see
-    # Update-DividerSlide / $script:DividerFontSizePt); kept for call
-    # compatibility only and no longer influences output.
-    [int]$DividerFontSize = 54,
     [int]$IconDiameterPt = 48
 )
 
@@ -147,15 +143,7 @@ function Resolve-ColorSpecToRgbLong {
     if ($script:Palette.ContainsKey($ColorSpec)) {
         $ColorSpec = $script:Palette[$ColorSpec]
     }
-    $digits = $ColorSpec.TrimStart('#')
-    if ($digits -notmatch '^[0-9A-Fa-f]{6}$') {
-        throw "Invalid colour spec: $ColorSpec"
-    }
-    return [int](
-        [Convert]::ToInt32($digits.Substring(0, 2), 16) +
-        [Convert]::ToInt32($digits.Substring(2, 2), 16) * 256 +
-        [Convert]::ToInt32($digits.Substring(4, 2), 16) * 65536
-    )
+    return Convert-HexToRgbLong -ColorSpec $ColorSpec
 }
 
 function Get-SlidePlainText {

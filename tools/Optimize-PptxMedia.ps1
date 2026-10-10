@@ -99,6 +99,8 @@ if ([string]::IsNullOrWhiteSpace($ToolRoot)) {
 }
 
 function Get-ImageInfo {
+    # Tolerant dimensions probe: a corrupt media file reports 0/0 instead of
+    # aborting the batch. (Common's Get-BasicImageInfo throws by design.)
     param([string]$Path)
     $image = $null
     try {
@@ -107,13 +109,11 @@ function Get-ImageInfo {
         return [pscustomobject]@{
             Width = [int]$image.Width
             Height = [int]$image.Height
-            Format = $image.RawFormat.ToString()
         }
     } catch {
         return [pscustomobject]@{
             Width = 0
             Height = 0
-            Format = ''
         }
     } finally {
         if ($null -ne $image) { $image.Dispose() }
@@ -377,7 +377,10 @@ function Get-ExternalToolMap {
         [string]$ToolRoot
     )
 
-    $names = @('oxipng', 'pngquant', 'magick', 'cjpeg', 'jpegtran', 'realesrgan-ncnn-vulkan', 'ffmpeg')
+    # Only oxipng is consumed by this tool; probing further names would pay a
+    # recursive vendor-directory scan per PATH miss for purely decorative
+    # manifest entries.
+    $names = @('oxipng')
     $map = @{}
     foreach ($name in $names) {
         $toolPath = Resolve-ExternalTool -Name $name -Root $ToolRoot

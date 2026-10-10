@@ -98,6 +98,17 @@ function Test-XmlInProtectedScope {
     return $false
 }
 
+function Convert-HexToRgbLong {
+    # #RRGGBB -> COM OLE COLOR (BGR order) shared by the brand and
+    # highlight-box stylers.
+    param([Parameter(Mandatory = $true)][string]$ColorSpec)
+    $digits = $ColorSpec.TrimStart('#')
+    if ($digits -notmatch '^[0-9A-Fa-f]{6}$') { throw "Invalid colour spec: $ColorSpec" }
+    return ([Convert]::ToInt32($digits.Substring(0, 2), 16) +
+        ([Convert]::ToInt32($digits.Substring(2, 2), 16) -shl 8) +
+        ([Convert]::ToInt32($digits.Substring(4, 2), 16) -shl 16))
+}
+
 function Get-NormalizedFormulaText {
     param([string]$Text)
     if ([string]::IsNullOrWhiteSpace($Text)) { return '' }

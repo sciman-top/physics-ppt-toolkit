@@ -83,15 +83,6 @@ function Get-BoxRuleNumber {
     return [double]$prop.Value
 }
 
-function Convert-HexToRgbLong {
-    param([Parameter(Mandatory = $true)][string]$ColorSpec)
-    $digits = $ColorSpec.TrimStart('#')
-    if ($digits -notmatch '^[0-9A-Fa-f]{6}$') { throw "Invalid colour spec: $ColorSpec" }
-    return ([Convert]::ToInt32($digits.Substring(0, 2), 16) +
-        ([Convert]::ToInt32($digits.Substring(2, 2), 16) -shl 8) +
-        ([Convert]::ToInt32($digits.Substring(4, 2), 16) -shl 16))
-}
-
 function Convert-RgbLongToHex {
     param([int]$Rgb)
     $r = $Rgb -band 0xFF
