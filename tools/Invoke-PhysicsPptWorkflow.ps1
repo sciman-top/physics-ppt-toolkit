@@ -2163,16 +2163,17 @@ if ($PrepareAiVisualReview -or -not [string]::IsNullOrWhiteSpace($AiVisualReview
     $manifest | Add-Member -NotePropertyName aiVisualReviewPacket -NotePropertyValue $null -Force
 }
 
+# Optional stages all share one convention: increment first, then print, so
+# enabled stages number consecutively from 5 regardless of the combination.
+$currentStep = 4
 if ($IncludeVisualAudit) {
-    $currentStep = 5
+    $currentStep++
     Write-Host "Step ${currentStep}/${stepCount}: visual audit and low-risk fixes"
     $visualAuditArtifacts = @(Invoke-VisualAuditArtifacts -Manifest $manifest -OutputRoot $OutputRoot -ApplyFixes ([bool]$ApplyVisualAuditFixes) -Mode $Mode)
     $manifest | Add-Member -NotePropertyName visualAuditEnabled -NotePropertyValue ([bool]$IncludeVisualAudit) -Force
     $manifest | Add-Member -NotePropertyName visualAuditFixesEnabled -NotePropertyValue ([bool]$ApplyVisualAuditFixes) -Force
     $manifest | Add-Member -NotePropertyName visualAuditArtifacts -NotePropertyValue $visualAuditArtifacts -Force
-    $currentStep++
 } else {
-    $currentStep = 5
     $manifest | Add-Member -NotePropertyName visualAuditEnabled -NotePropertyValue $false -Force
     $manifest | Add-Member -NotePropertyName visualAuditFixesEnabled -NotePropertyValue $false -Force
     $manifest | Add-Member -NotePropertyName visualAuditArtifacts -NotePropertyValue @() -Force
