@@ -127,6 +127,30 @@ function Get-PhysicsPptFormulaWhitelist {
     }
 }
 
+# Case-sensitive regexes for whitelist patterns, compiled once per pattern.
+# The .NET static regex cache holds only 15 entries while the sanctioned
+# whitelist carries 53 rules, so -cmatch re-parsed most patterns on every
+# candidate; [regex]::new() with default options is the same engine -cmatch
+# uses (case-sensitive, RegexOptions.None), just without the cache thrash.
+$script:CaseSensitiveRegexCache = @{}
+
+function Get-CachedCaseSensitiveRegex {
+    param([string]$Pattern)
+
+    if ([string]::IsNullOrWhiteSpace($Pattern)) { return $null }
+    $compiled = $script:CaseSensitiveRegexCache[$Pattern]
+    if ($null -eq $compiled) {
+        try {
+            $compiled = [regex]::new($Pattern)
+        } catch {
+            $compiled = $false
+        }
+        $script:CaseSensitiveRegexCache[$Pattern] = $compiled
+    }
+    if ($compiled -is [regex]) { return $compiled }
+    return $null
+}
+
 function Test-FormulaWhitelistMatch {
     <#
       Case-sensitive whitelist resolution. Physics formulas carry meaning in
@@ -144,12 +168,12 @@ function Test-FormulaWhitelistMatch {
     foreach ($rule in @($Whitelist)) {
         $pattern = Get-FormulaRuleValue -Rule $rule -Name 'sourcePattern'
         if ([string]::IsNullOrWhiteSpace($pattern)) { continue }
-        try {
-            if ($normalized -cmatch $pattern) { return $rule }
-        } catch {
+        $regex = Get-CachedCaseSensitiveRegex -Pattern $pattern
+        if ($null -eq $regex) {
             Write-Warning "Invalid formula whitelist pattern skipped: $pattern"
             continue
         }
+        if ($regex.IsMatch($normalized)) { return $rule }
     }
     return $null
 }
@@ -427,17 +451,36 @@ function Get-ShapeName {
     return '(unknown)'
 }
 
+# Positive Test-UsablePageImage results, keyed by content identity
+# (path|size|UTC write time); rewritten files invalidate their own entry.
+$script:UsablePageImageCache = @{}
+
 function Test-UsablePageImage {
     param([string]$Path)
 
-    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
     try {
-        if ((Get-Item -LiteralPath $Path).Length -le 0) { return $false }
-        $info = Get-BasicImageInfo -Path $Path
-        return ($info.Width -gt 0 -and $info.Height -gt 0)
+        $item = Get-Item -LiteralPath $Path -ErrorAction Stop
     } catch {
         return $false
     }
+    if ($item.PSIsContainer) { return $false }
+    # The same exported image set is validated several times per file (cache
+    # reuse checks and manifest validation); a full decode per check is wasted
+    # work. Only usable results are cached so a transient decode failure (e.g.
+    # a lock during export) is retried on the next call.
+    $key = '{0}|{1}|{2}' -f $item.FullName.ToLowerInvariant(), $item.Length, $item.LastWriteTimeUtc.Ticks
+    $cached = $script:UsablePageImageCache[$key]
+    if ($null -ne $cached) { return [bool]$cached }
+    try {
+        if ($item.Length -le 0) { return $false }
+        $info = Get-BasicImageInfo -Path $Path
+        $usable = ($info.Width -gt 0 -and $info.Height -gt 0)
+    } catch {
+        return $false
+    }
+    if ($usable) { $script:UsablePageImageCache[$key] = $true }
+    return $usable
 }
 
 function Test-PageImageSet {

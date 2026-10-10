@@ -696,13 +696,11 @@ function Get-FormulaWhitelistMatch {
     foreach ($rule in @($script:FormulaWhitelist)) {
         $pattern = Get-FormulaRuleValue -Rule $rule -Name 'sourcePattern'
         if ([string]::IsNullOrWhiteSpace($pattern)) { continue }
-        try {
-            # Case-sensitive on purpose: P=W/t (power) and p=F/S (pressure) differ only by case.
-            if ([string]$Profile.Normalized -cmatch $pattern) {
-                return $rule
-            }
-        } catch {
-            continue
+        # Case-sensitive on purpose: P=W/t (power) and p=F/S (pressure) differ only by case.
+        $regex = Get-CachedCaseSensitiveRegex -Pattern $pattern
+        if ($null -eq $regex) { continue }
+        if ($regex.IsMatch([string]$Profile.Normalized)) {
+            return $rule
         }
     }
 
@@ -1338,8 +1336,17 @@ function Add-IntentionalGeometryChange {
 }
 
 function Get-GeometrySlideXmlNames {
-    param([string]$PptxPath)
+    # Pass -Zip to enumerate an already-open archive; the geometry and restore
+    # passes each hold their package open, and a path-based call here reopened
+    # the same zip a second time on every file.
+    param([string]$PptxPath, $Zip)
     $names = New-Object System.Collections.Generic.List[string]
+    if ($null -ne $Zip) {
+        foreach ($entry in @($Zip.Entries)) {
+            if ($entry.FullName -match '^ppt/slides/slide(\d+)\.xml$') { $names.Add($entry.FullName) | Out-Null }
+        }
+        return $names
+    }
     $zip = $null
     $stream = $null
     try {
@@ -1423,7 +1430,7 @@ function Get-SourceShapeGeometryMap {
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         $zipStream = [System.IO.File]::Open($SourcePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
         $zip = New-Object System.IO.Compression.ZipArchive($zipStream, [System.IO.Compression.ZipArchiveMode]::Read)
-        foreach ($entryName in @(Get-GeometrySlideXmlNames -PptxPath $SourcePath)) {
+        foreach ($entryName in @(Get-GeometrySlideXmlNames -PptxPath $SourcePath -Zip $zip)) {
             if ($entryName -notmatch '^ppt/slides/slide\d+\.xml$') { continue }
             $doc = Read-GeometrySlideXmlDocument -Zip $zip -EntryName $entryName
             if ($null -eq $doc) { continue }
@@ -1459,21 +1466,27 @@ function Restore-SourceShapeGeometry {
     # PowerPoint keeps a handle on the SaveAs target until the automation
     # process actually exits, and Quit() completion is observed to lag one to
     # a few minutes behind the call (async teardown of large decks). The pass
-    # is idempotent, so the lock is polled with a five-second probe and a six
-    # minute budget before the failure is allowed to surface.
+    # is idempotent, so the lock is polled with front-loaded one-second probes
+    # for the common short-lag case and a five-second probe afterwards, with a
+    # six-plus minute budget before the failure is allowed to surface.
+    # The source map is read once before the loop: the source package never
+    # changes during a run, and re-parsing it on every lock retry wasted a
+    # full package parse per five-second wait.
     param(
         [string]$SourcePath,
         [string]$OutputPath,
         [string]$FileName
     )
-    $attempts = 72
+    $sourceMap = Get-SourceShapeGeometryMap -SourcePath $SourcePath
+    if ($sourceMap.Count -eq 0) { return 0 }
+    $attempts = 84
     for ($attempt = 1; $attempt -le $attempts; $attempt++) {
         try {
-            return Restore-SourceShapeGeometryOnce -SourcePath $SourcePath -OutputPath $OutputPath -FileName $FileName
+            return Restore-SourceShapeGeometryOnce -SourcePath $SourcePath -OutputPath $OutputPath -FileName $FileName -SourceMap $sourceMap
         } catch {
             if ($attempt -ge $attempts) { throw }
             if ($_.Exception.Message -notmatch 'being used by another process') { throw }
-            Start-Sleep -Seconds 5
+            Start-Sleep -Seconds $(if ($attempt -le 6) { 1 } else { 5 })
         }
     }
     return 0
@@ -1483,9 +1496,10 @@ function Restore-SourceShapeGeometryOnce {
     param(
         [string]$SourcePath,
         [string]$OutputPath,
-        [string]$FileName
+        [string]$FileName,
+        $SourceMap
     )
-    $sourceMap = Get-SourceShapeGeometryMap -SourcePath $SourcePath
+    $sourceMap = if ($null -ne $SourceMap) { $SourceMap } else { Get-SourceShapeGeometryMap -SourcePath $SourcePath }
     if ($sourceMap.Count -eq 0) { return 0 }
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $zip = $null
@@ -1496,7 +1510,7 @@ function Restore-SourceShapeGeometryOnce {
         # handles (antivirus/watcher) that would reject an exclusive open.
         $zipStream = [System.IO.File]::Open($OutputPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)
         $zip = New-Object System.IO.Compression.ZipArchive($zipStream, [System.IO.Compression.ZipArchiveMode]::Update)
-        foreach ($entryName in @(Get-GeometrySlideXmlNames -PptxPath $OutputPath)) {
+        foreach ($entryName in @(Get-GeometrySlideXmlNames -PptxPath $OutputPath -Zip $zip)) {
             $slideNumber = 0
             if ($entryName -notmatch '^ppt/slides/slide(\d+)\.xml$') { continue }
             $slideNumber = [int]$Matches[1]
@@ -2384,13 +2398,17 @@ function Clear-DecorativeEffects {
             }
         }
     } catch { }
-    try { $after.ShadowVisible = [string]$Shape.Shadow.Visible } catch { }
-    try { $after.ShadowTransparency = [string]$Shape.Shadow.Transparency } catch { }
-    try { $after.ShadowBlur = [string]$Shape.Shadow.Blur } catch { }
-    try { $after.ShadowOffsetX = [string]$Shape.Shadow.OffsetX } catch { }
-    try { $after.ShadowOffsetY = [string]$Shape.Shadow.OffsetY } catch { }
-    try { $after.GlowRadius = [string]$Shape.Glow.Radius } catch { }
-    try { $after.SoftEdgeRadius = [string]$Shape.SoftEdge.Radius } catch { }
+    # The after snapshot feeds only the applied-changes report row below, so
+    # shapes whose effects were already clean skip seven COM reads entirely.
+    if ($changed) {
+        try { $after.ShadowVisible = [string]$Shape.Shadow.Visible } catch { }
+        try { $after.ShadowTransparency = [string]$Shape.Shadow.Transparency } catch { }
+        try { $after.ShadowBlur = [string]$Shape.Shadow.Blur } catch { }
+        try { $after.ShadowOffsetX = [string]$Shape.Shadow.OffsetX } catch { }
+        try { $after.ShadowOffsetY = [string]$Shape.Shadow.OffsetY } catch { }
+        try { $after.GlowRadius = [string]$Shape.Glow.Radius } catch { }
+        try { $after.SoftEdgeRadius = [string]$Shape.SoftEdge.Radius } catch { }
+    }
     if ($FileName -ne '' -and $changed) {
         Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName -Issue 'DecorativeEffectsCleared' `
             -Details 'Shadow, glow, soft-edge, and text-outline effects were cleared.' `
