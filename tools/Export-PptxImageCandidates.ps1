@@ -28,12 +28,6 @@
 
 .PARAMETER SampleSize
   Maximum width/height used for fast color and edge sampling.
-
-.PARAMETER ExportCandidates
-  Copy LikelyPhoto and MaybePhoto image files to candidate-images.
-
-.PARAMETER ContactSheet
-  Build a PNG contact sheet from exported candidates.
 #>
 [CmdletBinding()]
 param(
@@ -54,14 +48,7 @@ param(
     [int]$MinPixels = 90000,
 
     [ValidateRange(16, 256)]
-    [int]$SampleSize = 64,
-
-    [switch]$ExportCandidates,
-
-    [switch]$ContactSheet,
-
-    [ValidateRange(1, 500)]
-    [int]$MaxContactSheetItems = 80
+    [int]$SampleSize = 64
 )
 
 Set-StrictMode -Version Latest
@@ -320,96 +307,10 @@ function Get-CandidateAssessment {
     }
 }
 
-function New-CandidateContactSheet {
-    param(
-        [object[]]$Rows,
-        [string]$OutputPath,
-        [int]$MaxItems
-    )
-
-    Add-Type -AssemblyName System.Drawing
-    $items = @($Rows | Where-Object { $_.EnhancementCandidate -and -not [string]::IsNullOrWhiteSpace($_.ExtractedPath) -and (Test-Path -LiteralPath $_.ExtractedPath) } |
-        Sort-Object PhotoScore -Descending |
-        Select-Object -First $MaxItems)
-    if ($items.Count -eq 0) { return $false }
-
-    $tileWidth = 280
-    $tileHeight = 230
-    $imageHeight = 156
-    $columns = 4
-    if ($items.Count -lt 4) { $columns = [Math]::Max(1, $items.Count) }
-    $rowsCount = [int][Math]::Ceiling($items.Count / [double]$columns)
-    $sheetWidth = $columns * $tileWidth
-    $sheetHeight = $rowsCount * $tileHeight
-
-    $bitmap = $null
-    $graphics = $null
-    $font = $null
-    $smallFont = $null
-    $brush = $null
-    $mutedBrush = $null
-    $pen = $null
-    try {
-        $bitmap = New-Object System.Drawing.Bitmap($sheetWidth, $sheetHeight)
-        $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-        $graphics.Clear([System.Drawing.Color]::FromArgb(248, 248, 248))
-        $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-        $font = New-Object System.Drawing.Font('Microsoft YaHei UI', 8.5)
-        $smallFont = New-Object System.Drawing.Font('Microsoft YaHei UI', 7.5)
-        $brush = [System.Drawing.Brushes]::Black
-        $mutedBrush = [System.Drawing.Brushes]::DimGray
-        $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(210, 210, 210), 1)
-
-        for ($i = 0; $i -lt $items.Count; $i++) {
-            $row = [int][Math]::Floor($i / $columns)
-            $col = $i % $columns
-            $x = $col * $tileWidth
-            $y = $row * $tileHeight
-            $graphics.FillRectangle([System.Drawing.Brushes]::White, $x + 6, $y + 6, $tileWidth - 12, $tileHeight - 12)
-            $graphics.DrawRectangle($pen, $x + 6, $y + 6, $tileWidth - 12, $tileHeight - 12)
-
-            $img = $null
-            try {
-                $img = [System.Drawing.Image]::FromFile($items[$i].ExtractedPath)
-                $maxW = $tileWidth - 24
-                $maxH = $imageHeight
-                $scale = [Math]::Min($maxW / [double]$img.Width, $maxH / [double]$img.Height)
-                $drawW = [Math]::Max(1, [int][Math]::Round($img.Width * $scale))
-                $drawH = [Math]::Max(1, [int][Math]::Round($img.Height * $scale))
-                $drawX = $x + [int](($tileWidth - $drawW) / 2)
-                $drawY = $y + 14 + [int](($imageHeight - $drawH) / 2)
-                $graphics.DrawImage($img, $drawX, $drawY, $drawW, $drawH)
-            } finally {
-                if ($null -ne $img) { $img.Dispose() }
-            }
-
-            $labelY = $y + $imageHeight + 18
-            $name = [System.IO.Path]::GetFileNameWithoutExtension([string]$items[$i].Deck)
-            if ($name.Length -gt 18) { $name = $name.Substring(0, 18) + '...' }
-            $line1 = "$($items[$i].CandidateLevel) score=$($items[$i].PhotoScore) $($items[$i].Width)x$($items[$i].Height)"
-            $line2 = "$name / $($items[$i].MediaPath)"
-            $line3 = "slides: $($items[$i].UsedOnSlides)"
-            $graphics.DrawString($line1, $font, $brush, $x + 12, $labelY)
-            $graphics.DrawString($line2, $smallFont, $mutedBrush, $x + 12, $labelY + 20)
-            $graphics.DrawString($line3, $smallFont, $mutedBrush, $x + 12, $labelY + 38)
-        }
-
-        $bitmap.Save($OutputPath, [System.Drawing.Imaging.ImageFormat]::Png)
-        return $true
-    } finally {
-        if ($null -ne $pen) { $pen.Dispose() }
-        if ($null -ne $smallFont) { $smallFont.Dispose() }
-        if ($null -ne $font) { $font.Dispose() }
-        if ($null -ne $graphics) { $graphics.Dispose() }
-        if ($null -ne $bitmap) { $bitmap.Dispose() }
-    }
-}
-
 function Scan-PresentationImages {
     param(
         [System.IO.FileInfo]$File,
         [string]$OutputDir,
-        [bool]$ExportCandidates,
         [int]$MinBytes,
         [int]$MinPixels,
         [int]$SampleSize
@@ -419,14 +320,6 @@ function Scan-PresentationImages {
     Add-Type -AssemblyName System.Drawing
 
     $rows = New-Object System.Collections.Generic.List[object]
-    # Use the full source identity rather than only the basename: recursive
-    # scans may contain same-named decks whose extracted candidates must remain
-    # distinct.
-    $safeDeck = Get-RelativePathSafeStem -RootPath $InputPath -TargetPath $File.FullName
-    $extractDir = Join-Path $OutputDir 'candidate-images'
-    if ($ExportCandidates -and -not (Test-Path -LiteralPath $extractDir)) {
-        New-Item -ItemType Directory -Path $extractDir -Force | Out-Null
-    }
 
     $workRoot = Join-Path $OutputDir ('_candidate_scan_' + [Guid]::NewGuid().ToString('N'))
     try {
@@ -478,11 +371,6 @@ function Scan-PresentationImages {
                     ''
                 }
                 $extractedPath = ''
-                if ($ExportCandidates -and $assessment.EnhancementCandidate) {
-                    $outName = Convert-ToSafeFileNameSegment -Name ($safeDeck + '__' + $media.Name)
-                    $extractedPath = Join-Path $extractDir $outName
-                    Copy-Item -LiteralPath $media.FullName -Destination $extractedPath -Force
-                }
 
                 $rows.Add([pscustomobject]@{
                     Deck = $File.Name
@@ -557,7 +445,7 @@ $allRows = New-Object System.Collections.Generic.List[object]
 foreach ($file in $files) {
     Write-Host "Scanning images: $($file.Name)"
     try {
-        foreach ($row in @(Scan-PresentationImages -File $file -OutputDir $OutputDir -ExportCandidates ([bool]$ExportCandidates) -MinBytes $MinBytes -MinPixels $MinPixels -SampleSize $SampleSize)) {
+        foreach ($row in @(Scan-PresentationImages -File $file -OutputDir $OutputDir -MinBytes $MinBytes -MinPixels $MinPixels -SampleSize $SampleSize)) {
             $allRows.Add($row) | Out-Null
         }
     } catch {
@@ -570,16 +458,10 @@ foreach ($file in $files) {
 $csvPath = Join-Path $OutputDir 'pptx-image-candidates.csv'
 $jsonPath = Join-Path $OutputDir 'pptx-image-candidates.json'
 $manifestPath = Join-Path $OutputDir 'pptx-image-candidates-manifest.json'
-$contactSheetPath = Join-Path $OutputDir 'pptx-image-candidates.contact-sheet.png'
 
 $sortedRows = @($allRows | Sort-Object Deck, @{ Expression = 'EnhancementCandidate'; Descending = $true }, @{ Expression = 'PhotoScore'; Descending = $true }, MediaPath)
 Write-Utf8BomCsv -InputObject $sortedRows -Path $csvPath
 $sortedRows | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $jsonPath -Encoding UTF8
-
-$contactSheetCreated = $false
-if ($ContactSheet) {
-    $contactSheetCreated = New-CandidateContactSheet -Rows $allRows.ToArray() -OutputPath $contactSheetPath -MaxItems $MaxContactSheetItems
-}
 
 $candidateRows = @($allRows | Where-Object { $_.EnhancementCandidate })
 $likelyRows = @($allRows | Where-Object { $_.CandidateLevel -eq 'LikelyPhoto' })
@@ -602,7 +484,6 @@ $manifest = [pscustomobject]@{
     sampleSize = $SampleSize
     csv = $csvPath
     json = $jsonPath
-    contactSheet = if ($contactSheetCreated) { $contactSheetPath } else { '' }
     note = 'Scanner is heuristic and read-only. Video poster frames are excluded from image enhancement candidates.'
 }
 $manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
