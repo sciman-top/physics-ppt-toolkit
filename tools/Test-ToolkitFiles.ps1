@@ -70,6 +70,7 @@ $required = @(
     'tools\Test-FormulaOleVisualAdjudication.ps1',
     'tools\Export-FormulaEvidenceManifest.ps1',
     'tools\PhysicsPpt.Common.ps1',
+    'tools\PhysicsPpt.ReviewArtifacts.ps1',
     'tools\Export-PptxVisualAudit.ps1',
     'tools\Export-PptxVisualConfirmation.ps1',
     'tools\Apply-PptxVisualAuditFixes.ps1',
@@ -716,6 +717,7 @@ foreach ($launcher in @('一键规范化并导出PDF.cmd', '一键检查PPT.cmd'
 foreach ($automationScript in @(
     'tools\Normalize-PhysicsPpt.ps1',
     'tools\Invoke-PhysicsPptWorkflow.ps1',
+    'tools\PhysicsPpt.ReviewArtifacts.ps1',
     'tools\Export-PptxInvariantSnapshot.ps1',
     'tools\Export-PptxVisualAudit.ps1',
     'tools\Apply-PptxVisualAuditFixes.ps1',
