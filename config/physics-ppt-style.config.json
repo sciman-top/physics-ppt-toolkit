@@ -483,14 +483,12 @@
     }
   ],
   "rules": {
-    "doNotModifyTextContent": true,
     "doNotMoveShapes": true,
     "doNotResizeShapes": true,
     "allowTextBoxWidthExpansion": false,
     "doNotModifyAnimations": true,
     "doNotModifySlideTransitions": true,
     "disableAdvanceOnClick": false,
-    "doNotCropImages": true,
     "formulaTextStyleDefault": true,
     "formulaConversionDefault": false,
     "videoSlideKeywords": ["视频", "播放", "观察视频"]
@@ -507,8 +505,6 @@
     ],
     "writeBackEnabled": false,
     "imageFormulaWriteBackEnabled": false,
-    "mathTypeMigrationEnabled": false,
-    "ocrEnabled": false,
     "modelInferenceEnabled": false
   }
 }

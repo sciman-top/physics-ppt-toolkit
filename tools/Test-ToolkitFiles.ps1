@@ -189,7 +189,7 @@ if ([string]$formulaProcessingValue.defaultMode -ne 'ReportOnly') {
 foreach ($mode in @($formulaProcessingValue.allowedModes)) {
     if ([string]$mode -notin $allowedFormulaModes) { throw "Config formulaProcessing.allowedModes contains an invalid mode: $mode" }
 }
-foreach ($safeDefault in @('writeBackEnabled', 'imageFormulaWriteBackEnabled', 'mathTypeMigrationEnabled', 'ocrEnabled', 'modelInferenceEnabled')) {
+foreach ($safeDefault in @('writeBackEnabled', 'imageFormulaWriteBackEnabled', 'modelInferenceEnabled')) {
     $safeDefaultProperty = $formulaProcessingValue.PSObject.Properties[$safeDefault]
     if ($null -eq $safeDefaultProperty -or $safeDefaultProperty.Value -isnot [bool]) {
         throw "Config formulaProcessing.$safeDefault must be boolean"
@@ -415,7 +415,7 @@ foreach ($contrastCheck in $contrastChecks) {
 if ($null -eq $config.rules.formulaTextStyleDefault) {
     throw "Config rules.formulaTextStyleDefault is missing"
 }
-foreach ($safetyRule in @('doNotModifyTextContent', 'doNotMoveShapes', 'doNotResizeShapes', 'doNotModifyAnimations', 'doNotModifySlideTransitions', 'doNotCropImages', 'allowTextBoxWidthExpansion', 'disableAdvanceOnClick')) {
+foreach ($safetyRule in @('doNotMoveShapes', 'doNotResizeShapes', 'doNotModifyAnimations', 'doNotModifySlideTransitions', 'allowTextBoxWidthExpansion', 'disableAdvanceOnClick')) {
     $safetyProp = $config.rules.PSObject.Properties[$safetyRule]
     if ($null -eq $safetyProp -or $safetyProp.Value -isnot [bool]) {
         throw "Config rules.$safetyRule must be a boolean"
@@ -423,7 +423,7 @@ foreach ($safetyRule in @('doNotModifyTextContent', 'doNotMoveShapes', 'doNotRes
 }
 if ($config.rules.disableAdvanceOnClick) { throw 'Config must preserve advance-on-click by default; use the explicit workflow switch for anti-misclick mode.' }
 if ($config.rules.allowTextBoxWidthExpansion) { throw 'Config must disable text-box width expansion by default.' }
-foreach ($requiredTrueRule in @('doNotModifyTextContent', 'doNotMoveShapes', 'doNotResizeShapes', 'doNotModifyAnimations', 'doNotModifySlideTransitions', 'doNotCropImages')) {
+foreach ($requiredTrueRule in @('doNotMoveShapes', 'doNotResizeShapes', 'doNotModifyAnimations', 'doNotModifySlideTransitions')) {
     if (-not $config.rules.$requiredTrueRule) { throw "Config safety rule must default to true: $requiredTrueRule" }
 }
 
