@@ -139,15 +139,6 @@ function New-CropBitmap {
     return [pscustomobject]@{ Bitmap = $output; X = $left; Y = $top; Width = $cropWidth; Height = $cropHeight; Scale = $Scale }
 }
 
-function Write-CsvRows {
-    param([object[]]$Rows, [string]$Path, [string[]]$Columns)
-    if (@($Rows).Count -eq 0) {
-        Write-Utf8BomText -Path $Path -Text (($Columns -join ',') + "`r`n")
-    } else {
-        Write-Utf8BomCsv -InputObject @($Rows | Select-Object $Columns) -Path $Path
-    }
-}
-
 $csvPath = [System.IO.Path]::GetFullPath($FormulaImageCandidateCsv)
 $outputDir = [System.IO.Path]::GetFullPath($OutputDir)
 $cropCsvPath = if ([string]::IsNullOrWhiteSpace($CropManifestCsv)) { '' } else { [System.IO.Path]::GetFullPath($CropManifestCsv) }
@@ -250,7 +241,7 @@ $resultCsv = Join-Path $outputDir 'formula-image-crops.csv'
 $resultJson = Join-Path $outputDir 'formula-image-crops.json'
 $resultManifest = Join-Path $outputDir 'formula-image-crops-manifest.json'
 $columns = @('Index', 'Deck', 'MediaPath', 'MediaRole', 'SourcePath', 'SourceSha256', 'SourceWidth', 'SourceHeight', 'CropX', 'CropY', 'CropWidth', 'CropHeight', 'PaddingPx', 'Scale', 'OutputPath', 'OutputSha256', 'OutputWidth', 'OutputHeight', 'Status', 'Reason', 'Rollback')
-Write-CsvRows -Rows $resultRows -Path $resultCsv -Columns $columns
+Write-Utf8BomCsvWithHeader -Rows $resultRows -Columns $columns -Path $resultCsv
 Write-Utf8BomText -Path $resultJson -Text ($resultRows | ConvertTo-Json -Depth 8)
 $manifest = [ordered]@{
     schemaVersion = 1

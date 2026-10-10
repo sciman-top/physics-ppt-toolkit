@@ -115,18 +115,6 @@ function New-SlideXmlNamespaceManager {
 }
 
 
-function Test-IsProtectedScopeNode {
-    # Shapes inside groups (invariant: groups are never modified) and inside
-    # mc:Fallback branches must never become replacement targets.
-    param([System.Xml.XmlElement]$Node)
-    $ancestor = $Node.ParentNode
-    while ($null -ne $ancestor) {
-        if ($ancestor.LocalName -eq 'grpSp' -or $ancestor.LocalName -eq 'Fallback') { return $true }
-        $ancestor = $ancestor.ParentNode
-    }
-    return $false
-}
-
 function Get-OleBlockShapeId {
     # The replaced block is one of three layouts:
     #   1. a bare p:graphicFrame whose mc:AlternateContent lives inside
@@ -183,7 +171,7 @@ function Get-OleInventory {
                 if ($child.NodeType -ne [System.Xml.XmlNodeType]::Element) { continue }
                 $isBlock = ($child.LocalName -eq 'AlternateContent' -or $child.LocalName -eq 'graphicFrame')
                 if (-not $isBlock) { continue }
-                if (Test-IsProtectedScopeNode -Node $child) { continue }
+                if (Test-XmlInProtectedScope -Node $child) { continue }
                 if ($null -ne $child.SelectSingleNode('.//p:cNvPr[contains(@name, "FormulaOmml")]', $ns)) { continue }
                 $oleObj = $child.SelectSingleNode('.//p:oleObj', $ns)
                 if ($null -eq $oleObj) { continue }

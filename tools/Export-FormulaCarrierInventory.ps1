@@ -685,11 +685,7 @@ $csvColumns = @(
     'PackagePart', 'MediaPaths', 'MediaSha256', 'OleProgId',
     'FallbackCarrier', 'EvidenceCsv'
 )
-if ($csvRows.Count -gt 0) {
-    Write-Utf8BomCsv -InputObject @($csvRows.ToArray() | Select-Object $csvColumns) -Path $csvPath
-} else {
-    Write-Utf8BomText -Text (($csvColumns -join ',') + "`r`n") -Path $csvPath
-}
+Write-Utf8BomCsvWithHeader -Rows @($csvRows.ToArray()) -Columns $csvColumns -Path $csvPath
 
 $counts = [ordered]@{}
 foreach ($carrierName in @('OfficeMath', 'MathTypeOle', 'TextFormula', 'FormulaImage', 'MixedImage', 'GroupFormula', 'Unknown')) {

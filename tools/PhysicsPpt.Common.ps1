@@ -67,6 +67,37 @@ function Write-Utf8BomText {
     [System.IO.File]::WriteAllText([System.IO.Path]::GetFullPath($Path), $Text, $utf8Bom)
 }
 
+function Write-Utf8BomCsvWithHeader {
+    # Empty row sets still emit the header line so downstream Import-Csv
+    # consumers never need an existence special-case for empty artifacts.
+    param(
+        [AllowNull()]
+        [object[]]$Rows,
+        [Parameter(Mandatory = $true)]
+        [string[]]$Columns,
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+    if (@($Rows).Count -gt 0) {
+        Write-Utf8BomCsv -InputObject @($Rows | Select-Object $Columns) -Path $Path
+    } else {
+        Write-Utf8BomText -Text (($Columns -join ',') + "`r`n") -Path $Path
+    }
+}
+
+function Test-XmlInProtectedScope {
+    # Ancestors only: shapes inside groups (groups are never modified) and
+    # inside mc:Fallback branches (writing there would corrupt fallback
+    # content) must never become modification targets.
+    param([System.Xml.XmlElement]$Node)
+    $ancestor = $Node.ParentNode
+    while ($null -ne $ancestor) {
+        if ($ancestor.LocalName -eq 'grpSp' -or $ancestor.LocalName -eq 'Fallback') { return $true }
+        $ancestor = $ancestor.ParentNode
+    }
+    return $false
+}
+
 function Get-NormalizedFormulaText {
     param([string]$Text)
     if ([string]::IsNullOrWhiteSpace($Text)) { return '' }

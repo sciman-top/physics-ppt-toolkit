@@ -36,11 +36,6 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$OutputDir,
 
-    # Formerly the standalone Export-FormulaIrFromOleMapping.ps1: after a
-    # Passed mapping, re-shape the approved rows into review-only FormulaIR
-    # artifacts via the single canonical parser in Export-FormulaOmmlCandidates.
-    [switch]$EmitFormulaIr,
-
     [ValidateRange(1, 100)]
     [int]$MaxItems = 20
 )
@@ -50,19 +45,6 @@ $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'PhysicsPpt.Common.ps1')
 
-
-function Write-CsvWithHeader {
-    param(
-        [object[]]$Rows,
-        [string[]]$Columns,
-        [string]$Path
-    )
-    if (@($Rows).Count -gt 0) {
-        Write-Utf8BomCsv -InputObject @($Rows | Select-Object $Columns) -Path $Path
-    } else {
-        Write-Utf8BomText -Text (($Columns -join ',') + "`r`n") -Path $Path
-    }
-}
 
 function Convert-ToHex {
     param([string]$Value)
@@ -282,8 +264,8 @@ $reviewPath = Join-Path $outputDir 'formula-ole-review.csv'
 $manifestPath = Join-Path $outputDir 'formula-ole-goldset-manifest.json'
 $mappingColumns = @('Slide', 'OleIndex', 'WhitelistName', 'SizePt', 'MainColorHex', 'SubColorHex', 'AccentColorHex', 'AccentTokens', 'Note', 'InventoryRecordIds', 'ShapeIds', 'EvidencePath')
 $reviewColumns = @('File', 'FilePath', 'FileRelativePath', 'Slide', 'Shape', 'FormulaText', 'WhitelistCandidate', 'SuggestedAction', 'SourceKind', 'EvidencePath', 'TargetUnicodeMath', 'TargetTex')
-Write-CsvWithHeader -Rows @($mappingRows.ToArray()) -Columns $mappingColumns -Path $mappingPath
-Write-CsvWithHeader -Rows @($reviewRows.ToArray()) -Columns $reviewColumns -Path $reviewPath
+Write-Utf8BomCsvWithHeader -Rows @($mappingRows.ToArray()) -Columns $mappingColumns -Path $mappingPath
+Write-Utf8BomCsvWithHeader -Rows @($reviewRows.ToArray()) -Columns $reviewColumns -Path $reviewPath
 
 $manifest = [ordered]@{
     schemaVersion = 1
@@ -303,50 +285,6 @@ Write-Utf8BomText -Text ($manifest | ConvertTo-Json -Depth 12) -Path $manifestPa
 
 if ($errors.Count -gt 0) {
     throw ("Formula OLE GoldSet validation failed: {0}" -f ($errors -join '; '))
-}
-
-if ($EmitFormulaIr) {
-    # mappingRows and validatedRows are appended 1:1 in the validation loop, so
-    # index pairing reproduces the former bridge's manifest-keyed join.
-    $irRows = New-Object System.Collections.Generic.List[object]
-    for ($i = 0; $i -lt $mappingRows.Count; $i++) {
-        $mappingRow = $mappingRows[$i]
-        $validated = $validatedRows[$i]
-        $irCandidate = 'name={0}; targetUnicodeMath={1}; targetTex={2}; note=approved OLE GoldSet mapping' -f $mappingRow.WhitelistName, $validated.TargetUnicodeMath, $validated.TargetTex
-        $irRows.Add([pscustomobject]@{
-            File = [System.IO.Path]::GetFileName($inputPath)
-            FilePath = $inputPath
-            FileRelativePath = ''
-            Slide = [int]$mappingRow.Slide
-            Shape = [string]$mappingRow.ShapeIds
-            FormulaText = [string]$validated.SourceFormulaText
-            CandidateClass = 'ApprovedMathTypeOleGoldSet'
-            WhitelistCandidate = $irCandidate
-            ConversionStatus = 'Approved'
-            StyleStatus = 'Reviewed'
-            SuggestedAction = 'ReviewWhitelistConversion'
-        }) | Out-Null
-    }
-    $irReviewCsv = Join-Path $outputDir 'formula-ole-ir-review.csv'
-    Write-Utf8BomCsv -InputObject $irRows.ToArray() -Path $irReviewCsv
-
-    $candidateTool = Join-Path $PSScriptRoot 'Export-FormulaOmmlCandidates.ps1'
-    $irHost = Resolve-PowerShellHost
-    & $irHost -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $candidateTool -FormulaReviewCsv $irReviewCsv -OutputDir $outputDir -MaxItems $MaxItems
-    if ($LASTEXITCODE -ne 0) { throw "FormulaIR candidate exporter failed with exit code $LASTEXITCODE." }
-
-    $candidateManifestPath = Join-Path $outputDir 'formula-omml-candidates-manifest.json'
-    $candidateManifest = Get-Content -LiteralPath $candidateManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    $irSummary = [ordered]@{
-        schemaVersion = 1
-        generatedAt = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-        input = [ordered]@{ mappingCsv = $mappingPath; mappingManifest = $manifestPath; sourcePptx = $inputPath }
-        policy = [ordered]@{ status = 'CandidateOnly'; writeBackAllowed = $false; sourceOfTruth = 'Approved OLE GoldSet mapping' }
-        counts = [ordered]@{ mappingRows = $mappingRows.Count; reviewRows = $irRows.Count; formulaIrResolved = [int]$candidateManifest.formulaIrResolvedCount; generated = [int]$candidateManifest.generatedCount; failed = [int]$candidateManifest.failedCount }
-        artifacts = [ordered]@{ reviewCsv = $irReviewCsv; candidatesCsv = [string]$candidateManifest.csv; candidatesJson = [string]$candidateManifest.json; formulaIrDir = [string]$candidateManifest.formulaIrDir }
-    }
-    $irSummary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $outputDir 'formula-ole-ir-manifest.json') -Encoding UTF8
-    Write-Output ("FormulaIR OLE mapping export: Resolved: {0} / Rows: {1}" -f $irSummary.counts.formulaIrResolved, $irSummary.counts.reviewRows)
 }
 
 Write-Output ("Formula OLE mapping done: {0}`nApproved rows: {1}; OLE inventory: {2}; mapping: {3}" -f $outputDir, $validatedRows.Count, $oleRecords.Count, $mappingPath)

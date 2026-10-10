@@ -136,18 +136,6 @@ function Get-ShapeTextXml {
     return ($texts -join '')
 }
 
-function Test-IsProtectedScopeShape {
-    # Shapes inside groups (invariant: groups are never modified) and inside
-    # mc:Fallback branches (writing there would corrupt fallback content).
-    param([System.Xml.XmlElement]$Shape)
-    $ancestor = $Shape.ParentNode
-    while ($null -ne $ancestor) {
-        if ($ancestor.LocalName -eq 'grpSp' -or $ancestor.LocalName -eq 'Fallback') { return $true }
-        $ancestor = $ancestor.ParentNode
-    }
-    return $false
-}
-
 function Find-TargetShape {
     param(
         [System.Xml.XmlDocument]$Document,
@@ -159,7 +147,7 @@ function Find-TargetShape {
     $fallback = $null
     $textMatches = New-Object System.Collections.Generic.List[object]
     foreach ($shape in @($Document.SelectNodes('//p:sp', $NamespaceManager))) {
-        if (Test-IsProtectedScopeShape -Shape $shape) { continue }
+        if (Test-XmlInProtectedScope -Node $shape) { continue }
         $shapeNorm = Get-NormalizedFormulaText -Text (Get-ShapeTextXml -Shape $shape -NamespaceManager $NamespaceManager)
         $textHit = (-not [string]::IsNullOrWhiteSpace($formulaNorm) -and $shapeNorm.Contains($formulaNorm))
         $nameNode = $shape.SelectSingleNode('./p:nvSpPr/p:cNvPr', $NamespaceManager)
