@@ -38,7 +38,6 @@ $required = @(
     'docs\公式处理说明.md',
     'docs\公式排版优化路线图.md',
     'docs\公式识别转换实施计划.md',
-    'docs\公式OLE转换执行计划.md',
     'docs\公式GoldSet编制SOP.md',
     'docs\编码与兼容性规范.md',
     'docs\媒体优化路线图.md',

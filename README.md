@@ -17,7 +17,7 @@ A Windows toolkit for normalizing, auditing, and exporting junior-high physics P
 ```text
 physics-ppt-toolkit/
 ├─ README.md / AGENTS.md / CLAUDE.md
-├─ docs/                                  13 篇规范、SOP 与路线图
+├─ docs/                                  12 篇规范、SOP 与路线图
 │  ├─ 产品需求与工程路线图.md            产品边界单一事实源
 │  ├─ 初中物理PPT统一排版规范.md
 │  ├─ 使用方法.md
