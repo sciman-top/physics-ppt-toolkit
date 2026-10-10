@@ -33,6 +33,8 @@ physics-ppt-toolkit/
 │  ├─ Invoke-PhysicsPptWorkflow.ps1       工作流编排入口
 │  ├─ Normalize-PhysicsPpt.ps1            核心规范化实现
 │  ├─ PhysicsPpt.Common.ps1               COM 边界与公共助手
+│  ├─ PhysicsPpt.Geometry.ps1             几何守卫纯 XML 模块（Normalize 点源加载）
+│  ├─ PhysicsPpt.ReviewArtifacts.ps1      复核产物与证据度量模块（Workflow 点源加载）
 │  ├─ Apply-PptxBrandVisualRefresh.ps1    品牌视觉刷新（链式步骤）
 │  ├─ Apply-PptxHighlightBoxStyle.ps1     强调框统一（链式步骤）
 │  ├─ Export-Pptx* / Compare-Pptx*        视觉审查、不变量快照与 AI 复核包

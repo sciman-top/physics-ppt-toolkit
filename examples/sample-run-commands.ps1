@@ -2,8 +2,8 @@
 
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
-# 进入工具包根目录
-cd D:\tools\physics-ppt-toolkit
+# 进入工具包根目录（本示例文件位于 <根目录>\examples\ 下）
+cd (Split-Path -Parent $PSScriptRoot)
 
 # 1. 推荐：检查、规范化、导出 PDF，不导出页面图片，并打开生成的 PPTX
 .\tools\Invoke-PhysicsPptWorkflow.ps1 `
