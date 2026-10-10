@@ -84,6 +84,7 @@ $required = @(
     'tools\Test-PageTypeClassification.ps1',
     'tools\Apply-PptxBrandVisualRefresh.ps1',
     'tools\Apply-PptxHighlightBoxStyle.ps1',
+    'tools\Set-PptxTextBold.ps1',
     'tools\generate_brand_assets.py',
     'assets\brand\sciman-icon.png',
     'assets\brand\sciman-icon-shadow.png',
