@@ -39,7 +39,6 @@ $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'PhysicsPpt.Common.ps1')
 
-$script:MsoTrue = -1
 $script:MsoFalse = 0
 $script:MsoGroup = 6
 

@@ -59,7 +59,6 @@ $script:NsA = 'http://schemas.openxmlformats.org/drawingml/2006/main'
 $script:NsP = 'http://schemas.openxmlformats.org/presentationml/2006/main'
 $script:NsMc = 'http://schemas.openxmlformats.org/markup-compatibility/2006'
 $script:NsA14 = 'http://schemas.microsoft.com/office/drawing/2010/main'
-$script:NsR = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
 
 # Apply-time whitelist re-validation: the scan-time match is never trusted on
 # its own, so a stale or hand-edited review CSV cannot smuggle in a formula

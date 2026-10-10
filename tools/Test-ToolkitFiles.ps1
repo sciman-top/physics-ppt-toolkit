@@ -259,6 +259,10 @@ foreach ($invalidCase in @($unicodeMathInvalid.cases)) {
 # Structural OMML regression guard: superscript groups must render as raised
 # scripts without visible parentheses, and the escaped linear slash must stay
 # a division run instead of becoming a stacked fraction.
+# These mirror Export-FormulaOmmlCandidates.ps1's own $script: constants: the
+# parser functions are Invoke-Expression'd into THIS scope (section 2b), so
+# their bodies resolve these names here. Do not remove them as "unused" — the
+# references are invisible to single-file scans.
 $script:NsA14 = 'http://schemas.microsoft.com/office/drawing/2010/main'
 $script:NsA = 'http://schemas.openxmlformats.org/drawingml/2006/main'
 $script:NsM = 'http://schemas.openxmlformats.org/officeDocument/2006/math'

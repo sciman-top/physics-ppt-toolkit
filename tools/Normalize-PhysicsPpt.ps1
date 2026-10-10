@@ -93,7 +93,6 @@ $script:MsoTextEffect = 15
 $script:PpPlaceholderTitle = 1
 $script:PpPlaceholderCenterTitle = 3
 $script:PpPlaceholderSubtitle = 2
-$script:PpAlignLeft = 1
 $script:PpAlignCenter = 2
 $script:MsoAnimEffectSplit = 16
 $script:MsoAnimationLevelNone = 0

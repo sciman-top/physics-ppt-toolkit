@@ -61,10 +61,6 @@ $ErrorActionPreference = 'Stop'
 
 $script:MsoTrue = -1
 $script:MsoFalse = 0
-$script:MsoGroup = 6
-$script:MsoPlaceholder = 14
-$script:MsoPicture = 13
-$script:MsoMedia = 16
 
 # Convert-ToSafePathSegment comes from PhysicsPpt.Common.ps1; the shared version
 # preserves dots (deliverable convention, e.g. "13.2内能") instead of collapsing them.

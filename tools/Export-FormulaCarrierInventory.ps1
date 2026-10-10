@@ -40,10 +40,6 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'PhysicsPpt.Common.ps1')
 
 $script:NsR = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
-$script:MsoGroup = 6
-$script:MsoPicture = 13
-$script:MsoTextBox = 17
-$script:MsoMedia = 16
 $script:EmuPerPoint = 12700.0
 
 
