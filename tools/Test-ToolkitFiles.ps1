@@ -140,6 +140,22 @@ $unregistered += @(Get-ChildItem -LiteralPath (Join-Path $root 'docs') -Filter '
 $unregistered += @(Get-ChildItem -LiteralPath $root -Filter '*.cmd' -File |
     ForEach-Object { $_.Name } |
     Where-Object { $_ -notin $required })
+$unregistered += @(Get-ChildItem -LiteralPath (Join-Path $root 'tools') -Recurse -File -Include '*.js', '*.py', '*.cs' |
+    Where-Object { $_.FullName -notmatch '\\vendor\\|\\obj\\|\\bin\\' } |
+    ForEach-Object { $_.FullName.Substring($root.Length + 1) } |
+    Where-Object { $_ -notin $required })
+$unregistered += @(Get-ChildItem -LiteralPath (Join-Path $root 'vba') -Filter '*.bas' -File |
+    ForEach-Object { $_.FullName.Substring($root.Length + 1) } |
+    Where-Object { $_ -notin $required })
+$unregistered += @(Get-ChildItem -LiteralPath (Join-Path $root 'config') -File |
+    ForEach-Object { $_.FullName.Substring($root.Length + 1) } |
+    Where-Object { $_ -notin $required })
+$unregistered += @(Get-ChildItem -LiteralPath (Join-Path $root 'manual') -Recurse -File |
+    ForEach-Object { $_.FullName.Substring($root.Length + 1) } |
+    Where-Object { $_ -notin $required })
+$unregistered += @(Get-ChildItem -LiteralPath (Join-Path $root 'assets\brand') -File |
+    ForEach-Object { $_.FullName.Substring($root.Length + 1) } |
+    Where-Object { $_ -notin $required })
 if ($unregistered.Count -gt 0) {
     throw ("Files present but not registered in the required list (add them or archive them): " + ($unregistered -join ', '))
 }
@@ -949,7 +965,7 @@ foreach ($oleIdCase in $oleIdProbeCases) {
 # only, but the decision semantics must hold: an unavailable probe stays
 # inert, and any line-count or per-line text change is a relayout.
 $layoutDecisionText = ''
-foreach ($layoutFnName in @('Test-TextRangeLayoutUnchanged', 'Get-TextRangeLayoutChangeText', 'Get-AutoSizeGeometryDrift')) {
+foreach ($layoutFnName in @('Get-TextRangeLineLayout', 'Test-TextRangeLayoutUnchanged', 'Get-TextRangeLayoutChangeText', 'Get-AutoSizeGeometryDrift')) {
     # Get-AutoSizeGeometryDrift lives in the geometry module; search both ASTs.
     $layoutFnAst = @(
         $normalizeReorderAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $layoutFnName }, $true)
@@ -968,6 +984,18 @@ $layoutCountChangeText = Get-TextRangeLayoutChangeText -Before $layoutBefore -Af
 if ($layoutCountChangeText -notmatch 'rendered lines 3 -> 2; first changed line 3') { throw "Line-layout probe: unexpected count-change report: $layoutCountChangeText" }
 $layoutTextChangeReport = Get-TextRangeLayoutChangeText -Before $layoutBefore -After @('答：', 'A、', 'B')
 if ($layoutTextChangeReport -notmatch 'first changed line 2') { throw "Line-layout probe: unexpected same-count change report: $layoutTextChangeReport" }
+# The capture itself must enumerate: PowerPoint COM TextRange has no Item
+# member, and the former $lines.Item($i) access threw on first use — the
+# decision assertions above stayed green while every real capture silently
+# returned $null and the rollback guard never fired. The mock exposes
+# enumeration only, so a regression back to .Item() fails right here.
+$mockLayoutLines = @([pscustomobject]@{ Text = '答： ' }, [pscustomobject]@{ Text = 'B' })
+$mockTextRange = New-Object PSObject
+$mockTextRange | Add-Member -MemberType ScriptMethod -Name Lines -Value { $mockLayoutLines }
+$mockCapturedLayout = Get-TextRangeLineLayout -TextRange $mockTextRange
+if ($null -eq $mockCapturedLayout -or @($mockCapturedLayout).Count -ne 2 -or [string]$mockCapturedLayout[0] -cne '答：' -or [string]$mockCapturedLayout[1] -cne 'B') {
+    throw ("Line-layout probe: capture must enumerate TextRange lines, not .Item() slices (mock captured: '{0}')." -f (($mockCapturedLayout | ForEach-Object { [string]$_ }) -join '|'))
+}
 
 # AutoSize geometry drift probe: the rollback trigger measures the max
 # per-axis delta across Left/Top/Width/Height. A partial-axis rewrite or an
@@ -979,6 +1007,29 @@ $axisDrift = Get-AutoSizeGeometryDrift -Shape $driftShape -Left 100.06 -Top 50.0
 if ([Math]::Abs([double]$axisDrift - 0.06) -gt 0.000001) { throw "Geometry drift probe: single-axis drift mismatch: $axisDrift" }
 $maxAxisDrift = Get-AutoSizeGeometryDrift -Shape $driftShape -Left 99.0 -Top 50.0 -Width 300.5 -Height 80.0
 if ([Math]::Abs([double]$maxAxisDrift - 1.0) -gt 0.000001) { throw "Geometry drift probe: max-across-axes semantics violated: $maxAxisDrift" }
+
+# Geometry-restore lock probe: retry gating must classify lock conflicts by
+# HRESULT (0x80070020/21) with the bilingual phrases as fallback — the 5.1
+# fallback host throws localized IO messages (zh-CN: 正由另一进程使用), which
+# the English-only match previously failed on the first attempt, leaving
+# SaveAs-relaid geometry unrestored in the delivered copy.
+$lockTestFnAst = $geometryReorderAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-GeometryRestoreLockConflict' }, $true) | Select-Object -First 1
+if ($null -eq $lockTestFnAst) { throw 'Test-GeometryRestoreLockConflict function definition not found for the behavioral probe.' }
+Invoke-Expression $lockTestFnAst.Extent.Text
+$lockProbeCases = @(
+    @('sharing violation HRESULT', (New-Object System.IO.IOException('x', -2147024864)), $true),
+    @('lock violation HRESULT', (New-Object System.IO.IOException('x', -2147024863)), $true),
+    @('english lock message', (New-Object Exception('The process cannot access the file because it is being used by another process.')), $true),
+    @('chinese lock message', (New-Object Exception('文件“x.pptx”正由另一进程使用，因此该进程无法访问此文件。')), $true),
+    @('wrapped inner conflict', (New-Object Exception('wrapper', (New-Object System.IO.IOException('inner', -2147024864)))), $true),
+    @('unrelated io failure', (New-Object System.IO.FileNotFoundException('File not found: x.pptx')), $false)
+)
+foreach ($lockCase in $lockProbeCases) {
+    $lockActual = Test-GeometryRestoreLockConflict -Exception $lockCase[1]
+    if ([bool]$lockActual -ne [bool]$lockCase[2]) {
+        throw ("Geometry lock probe failed for {0}: expected {1}, got {2}." -f $lockCase[0], $lockCase[2], $lockActual)
+    }
+}
 
 $aiImportContent = Get-Content -LiteralPath (Join-Path $root 'tools\Import-PptxAiReviewResult.ps1') -Raw -Encoding UTF8
 if ($aiImportContent -match 'PowerPoint\.Application|Presentations\.Open|SaveAs|Normalize-PhysicsPpt') { throw 'AI review import must remain read-only and must not access PPTX automation.' }

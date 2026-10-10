@@ -730,6 +730,35 @@ function Get-CanonicalDeckStem {
     return $stem
 }
 
+function Get-ManifestRelativePathOrThrow {
+    # .NET Framework (the Windows PowerShell 5.1 fallback host) has no
+    # Path.GetRelativePath / IsPathFullyQualified, so evidence manifests must
+    # compute the relative form with segment prefix logic. Matches the
+    # GetRelativePath contract for same-volume paths (including ..\ walk-up
+    # out of the base); a different volume refuses to become relative.
+    param(
+        [Parameter(Mandatory = $true)][string]$BaseDirectory,
+        [Parameter(Mandatory = $true)][string]$TargetPath
+    )
+    $base = [System.IO.Path]::GetFullPath($BaseDirectory).TrimEnd('\')
+    $full = [System.IO.Path]::GetFullPath($TargetPath).TrimEnd('\')
+    $baseSegments = @($base -split '\\')
+    $fullSegments = @($full -split '\\')
+    if (-not $baseSegments[0].Equals($fullSegments[0], [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Evidence path is on another volume and cannot be made manifest-relative: base=$base target=$full"
+    }
+    $common = 0
+    while ($common -lt $baseSegments.Count -and $common -lt $fullSegments.Count -and
+        $baseSegments[$common].Equals($fullSegments[$common], [System.StringComparison]::OrdinalIgnoreCase)) {
+        $common++
+    }
+    $parts = @()
+    for ($up = $common; $up -lt $baseSegments.Count; $up++) { $parts += '..' }
+    for ($down = $common; $down -lt $fullSegments.Count; $down++) { $parts += $fullSegments[$down] }
+    if ($parts.Count -eq 0) { return '.' }
+    return ($parts -join '/')
+}
+
 function New-VersionedDeliveryRoot {
     # Atomic claim of <root>/<stem>_v<N>: the highest _vN is the newest
     # generation, and the directory creation itself is the claim under normal

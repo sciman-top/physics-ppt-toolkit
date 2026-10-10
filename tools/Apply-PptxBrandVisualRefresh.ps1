@@ -38,6 +38,9 @@ param(
     # this exact path inside the caller's delivery tree instead of claiming a
     # new reports/<stem>_v<N> generation; the caller owns backup and report dirs.
     [string]$OutputPath = '',
+    # Retired knob: dividers apply the 2026-09-15 sanctioned 80pt (see
+    # Update-DividerSlide / $script:DividerFontSizePt); kept for call
+    # compatibility only and no longer influences output.
     [int]$DividerFontSize = 54,
     [int]$IconDiameterPt = 48
 )
@@ -66,10 +69,13 @@ $iconShadowPath = Join-Path $AssetsDir 'sciman-icon-shadow.png'
 $iconWatermarkPath = Join-Path $AssetsDir 'sciman-icon-watermark.png'
 foreach ($asset in @($bgPath, $iconShadowPath, $iconWatermarkPath)) {
     if (-not (Test-Path -LiteralPath $asset)) {
-        throw "Brand asset missing: $asset (run tools\generate_brand_assets.py first)"
+        throw "Brand asset missing: $asset — the shipped assets are tracked under assets\brand; full regeneration via tools\generate_brand_assets.py additionally requires PPTX\背景图.png, which is not tracked in the repository."
     }
 }
 $PptxPath = [System.IO.Path]::GetFullPath($PptxPath)
+# 2026-09-15 用户定版：分隔页统一 80pt（华文行楷）。单一真源同时供分隔页
+# 写入与 review-manifest.json 记录，避免证据文件与交付物漂移。
+$script:DividerFontSizePt = 80
 if (-not (Test-Path -LiteralPath $PptxPath)) {
     throw "Input PPTX not found: $PptxPath"
 }
@@ -593,7 +599,6 @@ function Update-DividerSlide {
         for 课时/拓展 section marks, section-title navy for topic titles.  #>
     param(
         $Slide,
-        [int]$FontSize,
         [System.Collections.Generic.List[string]]$Actions
     )
     $slideWidth = $Slide.Parent.PageSetup.SlideWidth
@@ -619,7 +624,7 @@ function Update-DividerSlide {
             $textRange.Font.Bold = -1
             # 2026-09-15 用户定版：分隔页统一 80pt（课时/拓展红、课题名蓝，
             # 拓展页与其他分隔页同字号，仅颜色按类型区分）。
-            $textRange.Font.Size = [single]80
+            $textRange.Font.Size = [single]$script:DividerFontSizePt
             $shape.TextFrame.AutoSize = 0  # ppAutoSizeNone
             $shape.TextFrame.WordWrap = 0  # msoFalse so the box hugs the text
             $shape.TextFrame.VerticalAnchor = 3  # msoAnchorMiddle
@@ -748,7 +753,7 @@ try {
                 }
                 'Divider' {
                     Add-BrandIcon -Slide $slide -IconPath $iconShadowPath -Diameter $IconDiameterPt -Actions $actions -WatermarkPath $iconWatermarkPath
-                    Update-DividerSlide -Slide $slide -FontSize $DividerFontSize -Actions $actions
+                    Update-DividerSlide -Slide $slide -Actions $actions
                 }
                 default {
                     Set-BackgroundImage -Slide $slide -ImagePath $bgPath -Actions $actions
@@ -833,7 +838,7 @@ $manifest = [pscustomobject]@{
         generatorScript = 'tools/generate_brand_assets.py'
         applyScript     = 'tools/Apply-PptxBrandVisualRefresh.ps1'
     }
-    dividerFontSize = $DividerFontSize
+    dividerFontSize = $script:DividerFontSizePt
     iconDiameterPt  = $IconDiameterPt
     slides        = @($slideRecords | ForEach-Object {
         [pscustomobject]@{ slide = $_.Slide; role = $_.Role; actions = $_.Actions; status = $_.Status }
@@ -863,7 +868,7 @@ $summaryLines = @(
     '- 资源页：页标题浅金加粗、网盘名白色加粗、链接天蓝 18pt 单行、说明文字浅蓝灰',
     '- 网盘群页：标题浅金加粗、群号数字行天蓝、说明行白色（版式与字号保持原样）',
     '- 分隔页（第N课时/课题名/拓展等短标题页）：不加背景图，白底 + 华文行楷加粗 80pt（课题名标题蓝、课时/拓展强调红），双居中，右上角不透明图标',
-    '- 正文等其余页面：右上角统一 45% 半透明水印图标（约 ${IconDiameterPt}pt，位置固定），保证每页品牌露出且不与正文抢读',
+    '- 正文等其余页面：不加背景图、不加图标（内容页按设计无品牌元素），并移除历史遗留的旧公众号图标，避免与正文抢读',
     '- 原空白页保持原样（不加背景、不加图标）',
     '',
     '## 复核方式',

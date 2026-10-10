@@ -18,6 +18,9 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Get-FileSha256Hex lives in the shared helpers; standalone runs (per README/docs) need this.
+. (Join-Path $PSScriptRoot 'PhysicsPpt.Common.ps1')
+
 function Get-PropertyValue {
     param($Object, [string]$Name, $Default = $null)
     if ($null -eq $Object) { return $Default }

@@ -31,8 +31,14 @@ function Add-IntentionalGeometryChange {
     if ($null -ne $script:PresentationSlidePartMap -and $script:PresentationSlidePartMap.ContainsKey([int]$SlideNumber)) {
         $partName = [string]$script:PresentationSlidePartMap[[int]$SlideNumber]
     }
-    $key = if ($partName) { "$partName|$ShapeId" } else { "$SlideNumber|$ShapeId" }
-    $script:IntentionalGeometryShapes[$key] = $Reason
+    if ([string]::IsNullOrWhiteSpace($partName)) {
+        # The restore pass only recognizes physical-part-name keys; a
+        # creation-order fallback key would never match, so the intentional
+        # change would be silently reverted by geometry conservation. Fail
+        # before the caller moves the shape instead of writing a dead key.
+        throw "Add-IntentionalGeometryChange: no slide part map entry for presentation slide $SlideNumber; refusing to book an unverifiable intentional geometry change (shape $ShapeId, reason '$Reason')."
+    }
+    $script:IntentionalGeometryShapes["$partName|$ShapeId"] = $Reason
 }
 
 function Get-GeometrySlideXmlNames {
@@ -156,6 +162,26 @@ function Get-SourceShapeGeometryMap {
     return $map
 }
 
+function Test-GeometryRestoreLockConflict {
+    # The SaveAs target can stay locked for minutes after PowerPoint quits.
+    # Lock conflicts are classified by HRESULT (0x80070020 sharing violation /
+    # 0x80070021 lock violation) because the IO error message is localized on
+    # the Windows PowerShell 5.1 fallback host (zh-CN throws 正由另一进程使用);
+    # the known phrases stay as a net for wrapper exceptions without an HResult.
+    param($Exception)
+    $current = $Exception
+    $visited = 0
+    while ($null -ne $current -and $visited -le 5) {
+        $hresult = 0
+        try { $hresult = [int]$current.HResult } catch { }
+        if ($hresult -eq -2147024864 -or $hresult -eq -2147024863) { return $true }
+        if ([string]$current.Message -match 'being used by another process|正由另一进程使用|正在使用') { return $true }
+        $current = $current.InnerException
+        $visited++
+    }
+    return $false
+}
+
 function Restore-SourceShapeGeometry {
     # Deterministic geometry conservation. COM restores of AutoSize bounds are
     # advisory: PowerPoint recomputes them from font metrics during SaveAs
@@ -185,7 +211,7 @@ function Restore-SourceShapeGeometry {
             return Restore-SourceShapeGeometryOnce -SourcePath $SourcePath -OutputPath $OutputPath -FileName $FileName -SourceMap $sourceMap
         } catch {
             if ($attempt -ge $attempts) { throw }
-            if ($_.Exception.Message -notmatch 'being used by another process') { throw }
+            if (-not (Test-GeometryRestoreLockConflict -Exception $_.Exception)) { throw }
             Start-Sleep -Seconds $(if ($attempt -le 6) { 1 } else { 5 })
         }
     }
@@ -201,6 +227,15 @@ function Restore-SourceShapeGeometryOnce {
     )
     $sourceMap = if ($null -ne $SourceMap) { $SourceMap } else { Get-SourceShapeGeometryMap -SourcePath $SourcePath }
     if ($sourceMap.Count -eq 0) { return 0 }
+    # Report rows use presentation order everywhere else in the evidence CSV;
+    # translate physical part names back through the host-owned map so the
+    # page numbers stay comparable for reordered decks.
+    $partToPresentationOrder = @{}
+    if ($null -ne $script:PresentationSlidePartMap) {
+        foreach ($order in @($script:PresentationSlidePartMap.Keys)) {
+            $partToPresentationOrder[[string]$script:PresentationSlidePartMap[$order]] = [int]$order
+        }
+    }
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $zip = $null
     $zipStream = $null
@@ -236,7 +271,8 @@ function Restore-SourceShapeGeometryOnce {
                 $ext.SetAttribute('cx', $sourceGeometry.Cx)
                 $ext.SetAttribute('cy', $sourceGeometry.Cy)
                 $after = '{0}|{1}|{2}|{3}' -f $sourceGeometry.X, $sourceGeometry.Y, $sourceGeometry.Cx, $sourceGeometry.Cy
-                Add-ReportRow -File $FileName -SlideNumber $slideNumber -ShapeName "shapeId=$($shape.ShapeId)" `
+                $reportSlideNumber = if ($partToPresentationOrder.ContainsKey($entryName)) { $partToPresentationOrder[$entryName] } else { $slideNumber }
+                Add-ReportRow -File $FileName -SlideNumber $reportSlideNumber -ShapeName "shapeId=$($shape.ShapeId)" `
                     -Issue 'AutoSizeDeferredReflowHealed' `
                     -Details 'PowerPoint re-grew the AutoSize bounds during SaveAs layout; the saved slide XML was restored to the exact source xfrm values.' `
                     -RuleId 'SAFETY.GEOMETRY.AUTOSIZE' -Property 'xfrm/off/ext' -Before $before -After $after `

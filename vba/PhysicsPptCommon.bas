@@ -15,6 +15,13 @@ Option Explicit
 ' The remaining fontSizes/colors keys (sectionTitle, title2, formula*, footer,
 ' sectionTitle/extensionTitle/formulaBlue/experimentGreen/darkGray) have no VBA counterpart:
 ' the VBA fallback intentionally normalizes to a smaller set than the PowerShell mainline.
+' BEHAVIOR DIFFERENCES (the VBA fallback is NOT at parity with the PowerShell
+' mainline guards — verify before trusting it on decks with author emphasis):
+'   - This fallback de-bolds non-titles and writes font color directly, while
+'     the PowerShell mainline never un-bolds and never writes author colors
+'     (author red/blue emphasis is teaching semantics, see 18.2 incident).
+'   - This fallback forces any non-title above 36pt down to 36pt; the
+'     mainline instead skips large display text (>=60pt) entirely.
 ' Background normalization is intentionally opt-in in the VBA fallback, matching the
 ' PowerShell default. Set this constant to True only after visual review of the deck.
 Public Const NORMALIZE_SLIDE_BACKGROUND As Boolean = False

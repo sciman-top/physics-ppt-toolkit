@@ -163,8 +163,8 @@ if ($script:FormulaProcessingModeExplicit -and
 if ($script:FormulaProcessingMode -eq 'ClosedWorldUnattended' -and $ApplyFormulaOmmlWhitelist -and -not $FormulaOmmlVisualAudit) {
     throw 'ClosedWorldUnattended write-back requires -FormulaOmmlVisualAudit so the rendered visual gate is present.'
 }
-if (($BrandRefresh -or $HighlightBox) -and $Mode -eq 'CheckOnly') {
-    throw '-BrandRefresh/-HighlightBox produce styled PPTX copies and require a normalization mode; CheckOnly never writes deliverables.'
+if (($BrandRefresh -or $HighlightBox -or $ApplyFormulaOmmlWhitelist) -and $Mode -eq 'CheckOnly') {
+    throw '-BrandRefresh/-HighlightBox/-ApplyFormulaOmmlWhitelist produce PPTX write-backs and require a normalization mode; CheckOnly never writes deliverables.'
 }
 
 if ($ApplyVisualAuditFixes -and -not $IncludeVisualAudit) {
@@ -1990,7 +1990,8 @@ if ($explicitOutputRoot) {
     # deliveries; an explicit OutputRoot must live somewhere else entirely.
     $reportsRoot = [System.IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $PSScriptRoot) 'reports'))
     $reportsPrefix = $reportsRoot.TrimEnd('\') + '\'
-    if ($OutputRoot.StartsWith($reportsPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+    if ($OutputRoot.StartsWith($reportsPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $OutputRoot.TrimEnd('\').Equals($reportsRoot.TrimEnd('\'), [System.StringComparison]::OrdinalIgnoreCase)) {
         throw ("reports/ is reserved for <deck>_v<N> versioned deliveries. Drop -OutputRoot to auto-version, or point -OutputRoot outside reports/ (got: {0})" -f $OutputRoot)
     }
 }
@@ -2079,6 +2080,10 @@ if ($Mode -eq 'CheckOnly' -or ($Mode -ne 'ForceRebuild' -and -not $SkipPreflight
         ReportOnly = $true
         FilePattern = $FilePattern
     }
+    # In-process `&` call (deliberate). pwsh 7.6 contract: any scriptblock
+    # later handed to Normalize's Invoke-WithComRetry must touch COM members
+    # only — calling script functions from inside one raises CommandNotFound
+    # in this child scope. See the brand stage for the subprocess pattern.
     & (Join-Path $PSScriptRoot 'Normalize-PhysicsPpt.ps1') @reportArgs
     $generatedReport = Join-Path $reportDir 'physics-ppt-normalize-report.csv'
     if (Test-Path -LiteralPath $generatedReport) {
@@ -2119,6 +2124,8 @@ if ($Mode -eq 'CheckOnly') {
             }
         }
     }
+    # In-process `&` call — same Invoke-WithComRetry scriptblock contract as
+    # the report-only call above.
     & (Join-Path $PSScriptRoot 'Normalize-PhysicsPpt.ps1') @normalizeArgs
 
     if (Test-Path -LiteralPath $normalizeReportPath) {
@@ -2318,6 +2325,21 @@ $blockReason = if ($invariantDeliveryBlocked) {
     }
 }
     throw "$blockReason Keep the generated files for investigation; do not deliver the normalized PPTX."
+}
+
+if ($Mode -eq 'CheckOnly') {
+    # Check-only still owns a truthful exit code: the one-key .cmd surface
+    # treats exit 0 as "every deck inspected cleanly". The reports stay on
+    # disk either way for review.
+    $failedChecks = @(@($Manifest.files) | Where-Object { [string](Get-ObjectPropertyValue -Object $_ -PropertyName 'status' -DefaultValue '') -eq 'failed' })
+    if ($failedChecks.Count -gt 0) {
+        $failedNames = @($failedChecks | ForEach-Object {
+            $name = [string](Get-ObjectPropertyValue -Object $_ -PropertyName 'displayName' -DefaultValue '')
+            if ([string]::IsNullOrWhiteSpace($name)) { $name = [string](Get-ObjectPropertyValue -Object $_ -PropertyName 'input' -DefaultValue '?') }
+            $name
+        }) -join '; '
+        throw ("CheckOnly inspection failed for {0} file(s): {1}. Reports remain in {2} for review." -f $failedChecks.Count, $failedNames, $OutputRoot)
+    }
 }
 
 Write-Host "Done"

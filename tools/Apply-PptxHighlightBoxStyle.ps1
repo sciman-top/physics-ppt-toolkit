@@ -362,7 +362,7 @@ Write-Utf8BomCsv -InputObject $reportRows -Path $reportCsv
 $deliverySource = if (Test-Path -LiteralPath (Join-Path $backupDir (Split-Path -Leaf $PptxPath))) { Join-Path $backupDir (Split-Path -Leaf $PptxPath) } else { $PptxPath }
 $deliveryManifest = [ordered]@{
     schemaVersion = 1
-    generatedAt = Get-Date -Format 'yyyy-MM-dd hh:mm:ss'
+    generatedAt = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     tool = 'Apply-PptxHighlightBoxStyle'
     source = [ordered]@{ path = $PptxPath; sha256 = (Get-FileSha256Safe -Path $deliverySource) }
     output = [ordered]@{ path = $workingPptx; sha256 = (Get-FileSha256Safe -Path $workingPptx) }

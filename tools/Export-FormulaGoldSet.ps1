@@ -49,11 +49,8 @@ $ErrorActionPreference = 'Stop'
 
 function Get-RelativeOrFail {
     param([string]$BaseDirectory, [string]$Path)
-    $base = [IO.Path]::GetFullPath($BaseDirectory)
-    $full = [IO.Path]::GetFullPath($Path)
-    $relative = [IO.Path]::GetRelativePath($base, $full)
-    if ([IO.Path]::IsPathRooted($relative)) { throw "Evidence path is on another volume and cannot be made manifest-relative: $full" }
-    return ($relative -replace '\\', '/')
+    # Shared helper: Path.GetRelativePath does not exist on the 5.1 fallback host.
+    return (Get-ManifestRelativePathOrThrow -BaseDirectory $BaseDirectory -TargetPath $Path)
 }
 
 if ($PSCmdlet.ParameterSetName -eq 'VerifyGoldSetEvidence') {

@@ -558,6 +558,15 @@ try {
                 $targets += $item
             }
         } else {
+            # Positional indexes only align when both inventories counted the
+            # same OLE population; the mapping exporter records MathType OLEs
+            # only, so any non-Equation OLE here shifts every index. Fail the
+            # row instead of risking a silent equation swap (14.1 class).
+            $foreignOle = @($inventory | Where-Object { $_.ProgId -notlike 'Equation*' } | Select-Object -First 1)
+            if (@($foreignOle).Count -gt 0) {
+                Add-ReportRow -Rows $reportRows -File $inputFileName -Slide $slideNo -Shape $name -Issue 'OlePositionalMappingUnreliable' -Details ("mapping row has no ShapeIds and the deck carries non-Equation OLE progId='{0}' ({1})" -f $foreignOle[0].ProgId, $rowLabel)
+                $ok = $false
+            }
             foreach ($piece in @([string]$row.OleIndex -split ';')) {
                 $idx = 0
                 if (-not [int]::TryParse($piece.Trim(), [ref]$idx)) {
@@ -632,6 +641,12 @@ try {
             $timingSpids = @()
             foreach ($spidNode in @($doc.SelectNodes('//p:timing//p:spTgt', $ns))) {
                 $timingSpids += [string]$spidNode.GetAttribute('spid')
+            }
+            # Build entries (bldP/bldGraphic) also carry spid references into
+            # the timing tree but have no spTgt child, so they need their own pass.
+            foreach ($buildNode in @($doc.SelectNodes('//p:timing//*[local-name()="bldP" or local-name()="bldGraphic"]'))) {
+                $buildSpid = [string]$buildNode.GetAttribute('spid')
+                if (-not [string]::IsNullOrWhiteSpace($buildSpid)) { $timingSpids += $buildSpid }
             }
             if (@($targets).Count -gt 1) {
                 $extraIds = @()

@@ -48,18 +48,8 @@ function Get-RelativeManifestPath {
         [Parameter(Mandatory = $true)][string]$BaseDirectory,
         [Parameter(Mandatory = $true)][string]$TargetPath
     )
-    $base = [System.IO.Path]::GetFullPath($BaseDirectory)
-    $target = [System.IO.Path]::GetFullPath($TargetPath)
-    $relative = [System.IO.Path]::GetRelativePath($base, $target)
-    if ([string]::IsNullOrWhiteSpace($relative)) { $relative = '.' }
-    # .NET returns an absolute path when the two paths are on different
-    # volumes.  Absolute paths would make a manifest machine-specific, so
-    # fail closed and ask the caller to keep the evidence root on the source
-    # volume (or provide a copied evidence file under the output root).
-    if ([System.IO.Path]::IsPathFullyQualified($relative)) {
-        throw "Cannot create a manifest-relative path across volumes: base=$base target=$target"
-    }
-    return $relative.Replace('\', '/')
+    # Shared helper: Path.GetRelativePath does not exist on the 5.1 fallback host.
+    return (Get-ManifestRelativePathOrThrow -BaseDirectory $BaseDirectory -TargetPath $TargetPath)
 }
 
 function Get-FileEvidence {

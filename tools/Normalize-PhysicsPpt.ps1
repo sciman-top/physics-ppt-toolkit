@@ -158,6 +158,25 @@ $missingStyleKeys = @($script:RequiredStyleKeys | Where-Object {
 if ($missingStyleKeys.Count -gt 0) {
     throw ("Style config is missing required keys: {0} (config: {1})" -f ($missingStyleKeys -join ', '), $ConfigPath)
 }
+# Presence alone is not enough: a type-drifted value (a quoted "46", a
+# truncated hex color) flows into COM writes and comparisons before any
+# converter complains, so validate shapes at startup.
+$styleTypeIssues = New-Object System.Collections.Generic.List[string]
+foreach ($styleKey in $script:RequiredStyleKeys) {
+    $keyParts = $styleKey.Split('.')
+    $rawStyleValue = $script:ConfigJson.PSObject.Properties[$keyParts[0]].Value.PSObject.Properties[$keyParts[1]].Value
+    if ($styleKey -like 'fontSizes.*') {
+        $parsedFontSize = 0.0
+        if (-not [double]::TryParse([string]$rawStyleValue, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$parsedFontSize)) {
+            $styleTypeIssues.Add("$styleKey must be numeric, got '$rawStyleValue'")
+        }
+    } elseif ($styleKey -like 'colors.*' -and [string]$rawStyleValue -notmatch '^#[0-9A-Fa-f]{6}$') {
+        $styleTypeIssues.Add("$styleKey must be a #RRGGBB hex color, got '$rawStyleValue'")
+    }
+}
+if ($styleTypeIssues.Count -gt 0) {
+    throw ("Style config has invalid values: {0} (config: {1})" -f ($styleTypeIssues -join '; '), $ConfigPath)
+}
 
 function Get-ConfigValue {
     param([string]$Category, [string]$Key, $Default)
@@ -898,14 +917,14 @@ function Get-TextRangeLineLayout {
     # than block normalization on a missing probe.
     param($TextRange)
     try {
-        $lines = $TextRange.Lines()
-        $lineCount = [int]$lines.Count
-        if ($lineCount -le 0) { return $null }
+        # PowerPoint COM TextRange exposes no Item member (the slice form is
+        # Lines(start,length)); foreach enumeration is the supported element
+        # access — an .Item() call throws and would leave the guard inert.
         $texts = New-Object 'System.Collections.Generic.List[string]'
-        for ($lineIndex = 1; $lineIndex -le $lineCount; $lineIndex++) {
-            $lineText = [string]$lines.Item($lineIndex).Text
-            $texts.Add($lineText.TrimEnd("`r", "`v", ' ', '　'))
+        foreach ($line in @($TextRange.Lines())) {
+            $texts.Add(([string]$line.Text).TrimEnd("`r", "`v", ' ', '　'))
         }
+        if ($texts.Count -le 0) { return $null }
         return ,$texts.ToArray()
     } catch {
         return $null
@@ -1350,9 +1369,7 @@ function Set-AutoSizeTextFontSafely {
     if ([string]::IsNullOrWhiteSpace($beforeName) -or [string]::IsNullOrWhiteSpace($beforeFarEast)) {
         $perRunBefore = New-Object System.Collections.Generic.List[object]
         try {
-            $runs = $textRange.Runs()
-            for ($runIndex = 1; $runIndex -le $runs.Count; $runIndex++) {
-                $runRange = $runs.Item($runIndex)
+            foreach ($runRange in @($textRange.Runs())) {
                 $runName = [string]$runRange.Font.Name
                 $runFarEast = [string]$runRange.Font.NameFarEast
                 if ([string]::IsNullOrWhiteSpace($runName) -or [string]::IsNullOrWhiteSpace($runFarEast)) {
@@ -2346,8 +2363,11 @@ function Invoke-NormalizeSlideShape {
                 Add-FormulaCandidateReport -FileName $FileName -SlideNumber $SlideNumber -ShapeName $shapeName -Text $text | Out-Null
             }
             try {
-                $fontSize = $Shape.TextFrame2.TextRange.Font.Size
-                if ($fontSize -lt $script:Style.SizeMinimum) {
+                # Font.Size returns msoSizeMixed (-2) on mixed-run ranges;
+                # the guarded helper maps that to $null instead of a bogus
+                # "SmallText -2pt" review row.
+                $fontSize = Get-TextRangeFontSize $Shape.TextFrame2.TextRange
+                if ($null -ne $fontSize -and $fontSize -lt $script:Style.SizeMinimum) {
                     Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName -Issue 'SmallText' -Details "$fontSize pt"
                 }
             } catch { }
@@ -2386,8 +2406,12 @@ function Normalize-Presentation {
         if (-not [string]::IsNullOrWhiteSpace($ImageOutputDir)) {
             $cacheArtifactsReady = $cacheArtifactsReady -and (Test-PageImageSet -ImageDir $cacheImageDir -ExpectedCount $cacheExpectedSlides)
         }
+        $cacheGeometryRestored = $false
+        if ($null -ne $cache -and $null -ne $cache.PSObject.Properties['geometryRestore']) {
+            $cacheGeometryRestored = [string]$cache.geometryRestore -eq 'completed'
+        }
         if ($null -ne $cache -and $cacheOutputReady -and [string]$cache.signature -eq $signature.Signature -and
-            [string]$cache.outputPath -eq $outFile -and $cacheArtifactsReady) {
+            [string]$cache.outputPath -eq $outFile -and $cacheArtifactsReady -and $cacheGeometryRestored) {
             Write-Verbose "Skip (up-to-date): $($File.Name)"
             Add-ReportRow -File $File.Name -FilePath $File.FullName -SlideNumber 0 -ShapeName '(presentation)' -Issue 'SkippedUpToDate' -Details $outFile
             return
@@ -2501,7 +2525,11 @@ function Normalize-Presentation {
         }
 
         if (-not $ReportOnly) {
-            Invoke-WithComRetry { $pres.SaveAs($outFile) }
+            # Pin the format by the output extension: ppSaveAsDefault follows
+            # the host's own save preference, and a .pptm input saved that way
+            # would silently drop its macro content into a .pptx container.
+            $saveFormat = if ([System.IO.Path]::GetExtension($outFile) -ieq '.pptm') { 25 } else { 24 } # ppSaveAsOpenXMLPresentationMacroEnabled / ppSaveAsOpenXMLPresentation
+            Invoke-WithComRetry { $pres.SaveAs($outFile, $saveFormat) }
         Add-ReportRow -File $File.Name -FilePath $File.FullName -SlideNumber 0 -ShapeName '(presentation)' -Issue 'SavedAs' -Details $outFile
             if (-not $NoPdf) {
                 Export-PresentationPdf -Presentation $pres -PdfPath $pdfFile -FileName $File.Name
@@ -2513,7 +2541,7 @@ function Normalize-Presentation {
             $fileFailureIssues = @(
                 for ($rowIndex = $fileRowStartIndex; $rowIndex -lt $script:ReportRows.Count; $rowIndex++) {
                     $sliceRow = $script:ReportRows[$rowIndex]
-                    if ($sliceRow.FilePath -eq $File.FullName -and $sliceRow.Issue -in @('PdfExportFailed', 'ImagesExportFailed', 'ImageExportCountMismatch', 'SlidePngExportFailed', 'SavedAsFailed')) { $sliceRow }
+                    if ($sliceRow.FilePath -eq $File.FullName -and $sliceRow.Issue -in @('PdfExportFailed', 'ImagesExportFailed', 'ImageExportCountMismatch', 'SlidePngExportFailed')) { $sliceRow }
                 }
             )
             $cacheImageDir = if ([string]::IsNullOrWhiteSpace($ImageOutputDir)) { '' } else { Join-Path $ImageOutputDir $safeName }
@@ -2523,6 +2551,7 @@ function Normalize-Presentation {
             if ($cacheReady) {
                 $cacheRecord = [ordered]@{
                     schemaVersion = 1
+                    geometryRestore = 'pending'
                     generatedAt = (Get-Date).ToUniversalTime().ToString('o')
                     signature = $signature.Signature
                     sourceSha256 = $signature.Payload.sourceSha256
@@ -2859,13 +2888,25 @@ $sw.Stop()
 # are lock-free. Restores run before the report write so healed shapes are
 # part of the same evidence CSV.
 foreach ($pending in $script:PendingGeometryRestores.ToArray()) {
+    $pendingCachePath = "$($pending.OutputPath).cache.json"
     try {
         $healedCount = Restore-SourceShapeGeometry -SourcePath $pending.SourcePath -OutputPath $pending.OutputPath -FileName $pending.FileName
         if ($healedCount -gt 0) {
             Add-ReportRow -File $pending.FileName -FilePath $pending.SourcePath -SlideNumber 0 -ShapeName '(presentation)' -Issue 'GeometryConservedByXmlRestore' -Details "$healedCount shape(s) re-grown by deferred AutoSize layout at SaveAs were restored to the source geometry."
         }
+        # The cache may only bless the output once conservation actually
+        # landed: blessing it inside Normalize-Presentation let a failed
+        # restore stay hidden behind SkippedUpToDate on every later run.
+        if (Test-Path -LiteralPath $pendingCachePath) {
+            $pendingCache = Get-Content -LiteralPath $pendingCachePath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $pendingCache | Add-Member -MemberType NoteProperty -Name geometryRestore -Value 'completed' -Force
+            [System.IO.File]::WriteAllText($pendingCachePath, ($pendingCache | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding -ArgumentList $false))
+        }
     } catch {
         Add-ReportRow -File $pending.FileName -FilePath $pending.SourcePath -SlideNumber 0 -ShapeName '(presentation)' -Issue 'GeometryRestoreFailed' -Details $_.Exception.Message
+        # Force a re-run next time instead of letting the up-to-date cache
+        # pin geometry that PowerPoint re-laid out.
+        if (Test-Path -LiteralPath $pendingCachePath) { Remove-Item -LiteralPath $pendingCachePath -Force }
     }
 }
 

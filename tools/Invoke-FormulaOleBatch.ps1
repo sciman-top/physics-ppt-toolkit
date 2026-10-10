@@ -152,13 +152,11 @@ if (-not [string]::IsNullOrWhiteSpace($DeliveryRoot)) {
     }
     if (-not (Test-Path -LiteralPath $deliveryFullPath)) { New-Item -ItemType Directory -Path $deliveryFullPath -Force | Out-Null }
 } else {
-    $stem = [System.IO.Path]::GetFileNameWithoutExtension($inputFullPath)
+    $stem = Get-CanonicalDeckStem -FileName ([System.IO.Path]::GetFileName($inputFullPath))
     # Pipeline-stage suffixes (.callout/.brand/.normalized) describe the file,
     # not the deck: deliveries must keep the <deck>_v<N> directory convention
-    # (a letter directly before _v<N> is a layout-gate violation).
-    foreach ($stageSuffix in @('.callout', '.brand', '.normalized')) {
-        if ($stem.EndsWith($stageSuffix)) { $stem = $stem.Substring(0, $stem.Length - $stageSuffix.Length) }
-    }
+    # (a letter directly before _v<N> is a layout-gate violation). The shared
+    # helper loops until stable, unlike a single pass over a fixed suffix list.
     if (-not (Test-Path -LiteralPath $reportsRoot)) { New-Item -ItemType Directory -Path $reportsRoot -Force | Out-Null }
     $maxVersion = 0
     $resumableVersion = 0

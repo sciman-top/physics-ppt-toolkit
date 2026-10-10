@@ -26,7 +26,7 @@ try {
         [pscustomobject]@{ File = 'fixture.pptx'; FilePath = 'fixture.pptx'; FileRelativePath = ''; Slide = 5; Shape = 'Text 5'; FormulaText = '=cmΔt'; CandidateClass = 'Test'; WhitelistCandidate = 'name=test-leading-equality; targetUnicodeMath==cmΔt; targetTex==cm\Delta t'; ConversionStatus = 'Test'; StyleStatus = ''; SuggestedAction = 'ReviewWhitelistConversion' }
     )
     Write-Utf8BomCsv -InputObject $rows -Path $csvPath
-    & pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'Export-FormulaOmmlCandidates.ps1') -FormulaReviewCsv $csvPath -OutputDir $outputDir -MaxItems 100
+    & (Resolve-PowerShellHost) -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'Export-FormulaOmmlCandidates.ps1') -FormulaReviewCsv $csvPath -OutputDir $outputDir -MaxItems 100
     if ($LASTEXITCODE -ne 0) { throw "FormulaIR exporter exited with $LASTEXITCODE." }
 
     $manifest = Get-Content -LiteralPath (Join-Path $outputDir 'formula-omml-candidates-manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json

@@ -18,6 +18,10 @@ Usage:
   python tools/generate_brand_assets.py [--check]
 
 --check verifies that the outputs exist and are loadable, without rewriting.
+
+Note: PPTX/背景图.png is NOT tracked in the repository, so full regeneration
+requires restoring that source sample first; --check works from the tracked
+outputs alone.
 """
 
 from __future__ import annotations
@@ -223,7 +227,13 @@ def main() -> int:
 
     for source in (ICON_SOURCE, BG_SOURCE):
         if not source.is_file():
-            raise SystemExit(f"missing input sample: {source}")
+            hint = (
+                " (not tracked in the repo; restore it to regenerate,"
+                " --check works without it)"
+                if source == BG_SOURCE
+                else ""
+            )
+            raise SystemExit(f"missing input sample: {source}{hint}")
 
     ASSET_DIR.mkdir(parents=True, exist_ok=True)
 
