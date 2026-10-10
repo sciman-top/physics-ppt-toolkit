@@ -18,9 +18,7 @@ param(
     [switch]$Deep,
     [switch]$LaunchPowerPoint,
     [switch]$RequireFormulaValidator,
-    [switch]$RequireMediaOptimization,
-    [switch]$Strict,
-    [switch]$AsJson
+    [switch]$RequireMediaOptimization
 )
 
 Set-StrictMode -Version Latest
@@ -37,7 +35,7 @@ $dotNetTier = if ($RequireFormulaValidator) { 'Required' } else { 'Recommended' 
 function Add-ToolchainCheck {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
-        [Parameter(Mandatory = $true)][ValidateSet('Required', 'Recommended', 'Optional', 'Experimental')][string]$Tier,
+        [Parameter(Mandatory = $true)][ValidateSet('Required', 'Recommended', 'Optional')][string]$Tier,
         [Parameter(Mandatory = $true)][ValidateSet('OK', 'WARN', 'MISSING', 'FAIL', 'SKIP')][string]$Status,
         [string]$Version = '',
         [string]$Path = '',
@@ -48,7 +46,6 @@ function Add-ToolchainCheck {
         'Required' { 1 }
         'Recommended' { 2 }
         'Optional' { 3 }
-        'Experimental' { 4 }
     }
 
     $checks.Add([pscustomobject]@{
@@ -262,17 +259,14 @@ function Test-NodePackage {
     $packagePath = Join-Path $root $RelativePackageJson
     if (-not (Test-Path -LiteralPath $packagePath)) {
         Add-ToolchainCheck -Name $PackageName -Tier $Tier -Status 'MISSING' -Path $packagePath -Details 'node_modules package is missing; run npm install if package-lock.json is trusted.'
-        return ''
+        return
     }
 
     try {
         $packageJson = Get-Content -LiteralPath $packagePath -Raw -Encoding UTF8 | ConvertFrom-Json
-        $version = [string]$packageJson.version
-        Add-ToolchainCheck -Name $PackageName -Tier $Tier -Status 'OK' -Version $version -Path $packagePath
-        return $version
+        Add-ToolchainCheck -Name $PackageName -Tier $Tier -Status 'OK' -Version ([string]$packageJson.version) -Path $packagePath
     } catch {
         Add-ToolchainCheck -Name $PackageName -Tier $Tier -Status 'FAIL' -Path $packagePath -Details $_.Exception.Message
-        return ''
     }
 }
 
@@ -414,7 +408,7 @@ if ([string]::IsNullOrWhiteSpace($npmPath)) {
     Add-ToolchainCheck -Name 'npm' -Tier 'Recommended' -Status $npmStatus -Version $npmVersion.Text -Path $npmPath
 }
 
-Test-NodePackage -PackageName 'sharp' -RelativePackageJson 'node_modules\sharp\package.json' -Tier $sharpTier | Out-Null
+Test-NodePackage -PackageName 'sharp' -RelativePackageJson 'node_modules\sharp\package.json' -Tier $sharpTier
 
 $runNodeSmoke = $Deep -or $RequireMediaOptimization
 if ($runNodeSmoke -and -not [string]::IsNullOrWhiteSpace($nodePath)) {
@@ -436,7 +430,7 @@ Test-VendoredExecutable -Name 'oxipng portable' -Tier 'Recommended' -RelativePat
 Test-VendoredExecutable -Name 'Real-ESRGAN ncnn Vulkan portable' -Tier 'Recommended' -RelativePath 'tools\vendor\realesrgan-ncnn-vulkan-20220424\realesrgan-ncnn-vulkan.exe'
 Test-VendoredExecutable -Name 'Pandoc portable' -Tier 'Optional' -RelativePath 'tools\vendor\pandoc\pandoc-3.9.0.2\pandoc.exe' -VersionArguments @('--version') -MaxLines 1
 
-foreach ($tool in @('magick', 'tesseract', 'ffmpeg', 'pngquant', 'cjpeg', 'jpegtran')) {
+foreach ($tool in @('magick', 'ffmpeg', 'pngquant', 'cjpeg', 'jpegtran')) {
     $path = Resolve-CommandPath $tool
     if ([string]::IsNullOrWhiteSpace($path)) {
         Add-ToolchainCheck -Name "optional command $tool" -Tier 'Optional' -Status 'MISSING'
@@ -447,30 +441,10 @@ foreach ($tool in @('magick', 'tesseract', 'ffmpeg', 'pngquant', 'cjpeg', 'jpegt
 
 $ordered = @($checks | Sort-Object Order, Name)
 $requiredFailures = @($ordered | Where-Object { $_.Tier -eq 'Required' -and $_.Status -in @('MISSING', 'FAIL') })
-$strictFailures = @()
-if ($Strict) {
-    $strictFailures = @($ordered | Where-Object { $_.Tier -in @('Required', 'Recommended') -and $_.Status -in @('MISSING', 'FAIL') })
-}
 
-if ($AsJson) {
-    [pscustomobject]@{
-        generatedAt = (Get-Date).ToString('s')
-        root = $root
-        deep = [bool]$Deep
-        launchPowerPoint = [bool]$LaunchPowerPoint
-        strict = [bool]$Strict
-        requireFormulaValidator = [bool]$RequireFormulaValidator
-        requireMediaOptimization = [bool]$RequireMediaOptimization
-        requiredFailureCount = $requiredFailures.Count
-        strictFailureCount = $strictFailures.Count
-        checks = $ordered
-    } | ConvertTo-Json -Depth 6
-} else {
-    $ordered | Select-Object Tier, Name, Status, Version, Path, Details | Format-Table -AutoSize
-    Write-Host ("Required failures: {0}" -f $requiredFailures.Count)
-    if ($Strict) { Write-Host ("Strict failures: {0}" -f $strictFailures.Count) }
-}
+$ordered | Select-Object Tier, Name, Status, Version, Path, Details | Format-Table -AutoSize
+Write-Host ("Required failures: {0}" -f $requiredFailures.Count)
 
-if ($requiredFailures.Count -gt 0 -or ($Strict -and $strictFailures.Count -gt 0)) {
-    throw "Toolchain check failed: required=$($requiredFailures.Count), strict=$($strictFailures.Count)."
+if ($requiredFailures.Count -gt 0) {
+    throw "Toolchain check failed: required=$($requiredFailures.Count)."
 }

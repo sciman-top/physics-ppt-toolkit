@@ -19,11 +19,6 @@
   for versioned deliveries (<deck>_v<N>) and the toolkit refuses ad-hoc
   output roots inside it. Omit this switch for normal deliveries.
 
-.PARAMETER VersionedDelivery
-  Accepted for compatibility; versioned delivery (reports/<source>_v<N>, the
-  highest _vN is the newest) is always the default now. Cannot be combined
-  with -OutputRoot.
-
 .PARAMETER Mode
   CheckOnly: only generate report.
   SafeNormalize: generate normalized PPTX without PDF.
@@ -97,8 +92,6 @@ param(
     [string]$Mode = 'NormalizeAndPdf',
 
     [string]$FilePattern = '*.ppt*',
-
-    [switch]$VersionedDelivery,
 
     [switch]$Recurse,
     [switch]$UpdateMaster,
@@ -209,15 +202,10 @@ function Convert-ReportCsv {
 }
 
 function Get-IssueCount {
-    param($Rows, [string]$Issue, $Index)
-    # $Index is a precomputed issue-name -> count map (see Write-Summary); it
-    # turns the ~30 summary count passes over every report row into O(1)
-    # lookups. The scan path stays for callers without an index.
-    if ($null -ne $Index) {
-        $count = $Index[$Issue]
-        return $(if ($null -eq $count) { 0 } else { [int]$count })
-    }
-    return @($Rows | Where-Object { $_.Issue -eq $Issue }).Count
+    param([string]$Issue, $Index)
+    # $Index is the precomputed issue-name -> count map built in Write-Summary.
+    $count = $Index[$Issue]
+    return $(if ($null -eq $count) { 0 } else { [int]$count })
 }
 
 function Get-VideoCandidateCount {
@@ -226,25 +214,19 @@ function Get-VideoCandidateCount {
 }
 
 function Get-SmallTextCount {
-    param($Rows, $Index)
-    if ($null -ne $Index) {
-        $total = 0
-        foreach ($name in @('SmallText', 'SmallTextPreserved', 'SmallTextAfterNormalize')) {
-            $count = $Index[$name]
-            if ($null -ne $count) { $total += [int]$count }
-        }
-        return $total
+    param($Index)
+    $total = 0
+    foreach ($name in @('SmallText', 'SmallTextPreserved', 'SmallTextAfterNormalize')) {
+        $count = $Index[$name]
+        if ($null -ne $count) { $total += [int]$count }
     }
-    return @($Rows | Where-Object { $_.Issue -in @('SmallText', 'SmallTextPreserved', 'SmallTextAfterNormalize') }).Count
+    return $total
 }
 
 function Get-ImageExportMismatchCount {
-    param($Rows, $Index)
-    if ($null -ne $Index) {
-        $count = $Index['ImageExportCountMismatch']
-        return $(if ($null -eq $count) { 0 } else { [int]$count })
-    }
-    return @($Rows | Where-Object { $_.Issue -eq 'ImageExportCountMismatch' }).Count
+    param($Index)
+    $count = $Index['ImageExportCountMismatch']
+    return $(if ($null -eq $count) { 0 } else { [int]$count })
 }
 
 
@@ -931,12 +913,12 @@ function Write-Summary {
     $aiVisualReview = Get-ObjectPropertyValue -Object $Manifest -PropertyName 'aiVisualReview' -DefaultValue $null
     $aiVisualReviewStatus = [string](Get-ObjectPropertyValue -Object $aiVisualReview -PropertyName 'status' -DefaultValue 'NotPrepared')
     $deliveryStatus = [string](Get-ObjectPropertyValue -Object $Manifest -PropertyName 'deliveryStatus' -DefaultValue 'Pending')
-    $configuredFontsAvailableCount = Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'ConfiguredFontsAvailable'
-    $configuredFontsMissingCount = Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'ConfiguredFontsMissing'
-    $configuredFontCheckUnavailableCount = Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'ConfiguredFontCheckUnavailable'
-    $slideAspect16By9Count = Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'SlideAspectRatio16By9'
-    $slideAspectMismatchCount = Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'SlideAspectRatioMismatch'
-    $slideAspectCheckUnavailableCount = Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'SlideAspectRatioCheckUnavailable'
+    $configuredFontsAvailableCount = Get-IssueCount -Index $rowIssueIndex -Issue 'ConfiguredFontsAvailable'
+    $configuredFontsMissingCount = Get-IssueCount -Index $rowIssueIndex -Issue 'ConfiguredFontsMissing'
+    $configuredFontCheckUnavailableCount = Get-IssueCount -Index $rowIssueIndex -Issue 'ConfiguredFontCheckUnavailable'
+    $slideAspect16By9Count = Get-IssueCount -Index $rowIssueIndex -Issue 'SlideAspectRatio16By9'
+    $slideAspectMismatchCount = Get-IssueCount -Index $rowIssueIndex -Issue 'SlideAspectRatioMismatch'
+    $slideAspectCheckUnavailableCount = Get-IssueCount -Index $rowIssueIndex -Issue 'SlideAspectRatioCheckUnavailable'
     $pdfCount = @($manifestFiles | Where-Object { -not [string]::IsNullOrWhiteSpace($_.pdf) -and (Test-Path -LiteralPath $_.pdf) }).Count
     $visualAuditCount = @($visualAuditItems | Where-Object { (Get-ObjectPropertyValue -Object $_ -PropertyName 'visualAuditStatus' -DefaultValue '') -eq 'Completed' }).Count
     $visualAuditFailedCount = @($visualAuditItems | Where-Object { (Get-ObjectPropertyValue -Object $_ -PropertyName 'visualAuditStatus' -DefaultValue '') -eq 'Failed' }).Count
@@ -1060,33 +1042,33 @@ function Write-Summary {
         }
         $lines.Add("- OMML 自动门禁通过/失败：$formulaOmmlGatePassedCount / $formulaOmmlGateFailedCount")
     }
-    $lines.Add("- 疑似公式：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'FormulaCandidate')")
-    $lines.Add("- 已归一低风险文本公式：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'FormulaTextStyleNormalized')")
-    $lines.Add("- 公式样式跳过：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'FormulaStyleSkipped')")
-    $lines.Add("- 白名单公式候选：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'FormulaWhitelistCandidate')")
-    $lines.Add("- 公式转换跳过：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'FormulaConversionSkipped')")
-    $lines.Add("- 小字号：$(Get-SmallTextCount -Rows $Rows -Index $rowIssueIndex)")
-    $lines.Add("- 大图/位图文字需复核：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'RasterPicturePreserved')")
-    $lines.Add("- 分节标题页：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'SectionTitleSlide')")
-    $lines.Add("- 封面页保留样式：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'CoverSlideStylePreserved')")
-    $lines.Add("- 结束页保留样式：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'EndingSlideStylePreserved')")
-    $lines.Add("- 资源页保留样式：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'ResourceSlideStylePreserved')")
-    $lines.Add("- 补充说明页保留样式：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'AppendixTextSlideStylePreserved')")
-    $lines.Add("- 已横向扩展文本框：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'TextBoxWidthExpanded')")
-    $lines.Add("- 已上下对齐答案框：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'AnswerTextAligned')")
-    $lines.Add("- 已检查答案框对齐：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'AnswerTextAlignmentChecked')")
-    $lines.Add("- 已设置答案劈裂动画：$((Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'AnswerAnimationSet') + (Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'AnswerAnimationAdded'))")
-    $lines.Add("- 组合对象跳过：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'GroupShapeSkipped')")
-    $lines.Add("- 空白页候选：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'EmptySlideCandidate')")
-    $lines.Add("- 页面背景候选/写回：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'SlideBackgroundCandidate') / $(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'SlideBackgroundNormalized')")
-    $lines.Add("- 装饰效果清理：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'DecorativeEffectsCleared')")
-    $lines.Add("- 已禁用单击换片：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'AdvanceOnClickDisabled')")
+    $lines.Add("- 疑似公式：$(Get-IssueCount -Index $rowIssueIndex -Issue 'FormulaCandidate')")
+    $lines.Add("- 已归一低风险文本公式：$(Get-IssueCount -Index $rowIssueIndex -Issue 'FormulaTextStyleNormalized')")
+    $lines.Add("- 公式样式跳过：$(Get-IssueCount -Index $rowIssueIndex -Issue 'FormulaStyleSkipped')")
+    $lines.Add("- 白名单公式候选：$(Get-IssueCount -Index $rowIssueIndex -Issue 'FormulaWhitelistCandidate')")
+    $lines.Add("- 公式转换跳过：$(Get-IssueCount -Index $rowIssueIndex -Issue 'FormulaConversionSkipped')")
+    $lines.Add("- 小字号：$(Get-SmallTextCount -Index $rowIssueIndex)")
+    $lines.Add("- 大图/位图文字需复核：$(Get-IssueCount -Index $rowIssueIndex -Issue 'RasterPicturePreserved')")
+    $lines.Add("- 分节标题页：$(Get-IssueCount -Index $rowIssueIndex -Issue 'SectionTitleSlide')")
+    $lines.Add("- 封面页保留样式：$(Get-IssueCount -Index $rowIssueIndex -Issue 'CoverSlideStylePreserved')")
+    $lines.Add("- 结束页保留样式：$(Get-IssueCount -Index $rowIssueIndex -Issue 'EndingSlideStylePreserved')")
+    $lines.Add("- 资源页保留样式：$(Get-IssueCount -Index $rowIssueIndex -Issue 'ResourceSlideStylePreserved')")
+    $lines.Add("- 补充说明页保留样式：$(Get-IssueCount -Index $rowIssueIndex -Issue 'AppendixTextSlideStylePreserved')")
+    $lines.Add("- 已横向扩展文本框：$(Get-IssueCount -Index $rowIssueIndex -Issue 'TextBoxWidthExpanded')")
+    $lines.Add("- 已上下对齐答案框：$(Get-IssueCount -Index $rowIssueIndex -Issue 'AnswerTextAligned')")
+    $lines.Add("- 已检查答案框对齐：$(Get-IssueCount -Index $rowIssueIndex -Issue 'AnswerTextAlignmentChecked')")
+    $lines.Add("- 已设置答案劈裂动画：$((Get-IssueCount -Index $rowIssueIndex -Issue 'AnswerAnimationSet') + (Get-IssueCount -Index $rowIssueIndex -Issue 'AnswerAnimationAdded'))")
+    $lines.Add("- 组合对象跳过：$(Get-IssueCount -Index $rowIssueIndex -Issue 'GroupShapeSkipped')")
+    $lines.Add("- 空白页候选：$(Get-IssueCount -Index $rowIssueIndex -Issue 'EmptySlideCandidate')")
+    $lines.Add("- 页面背景候选/写回：$(Get-IssueCount -Index $rowIssueIndex -Issue 'SlideBackgroundCandidate') / $(Get-IssueCount -Index $rowIssueIndex -Issue 'SlideBackgroundNormalized')")
+    $lines.Add("- 装饰效果清理：$(Get-IssueCount -Index $rowIssueIndex -Issue 'DecorativeEffectsCleared')")
+    $lines.Add("- 已禁用单击换片：$(Get-IssueCount -Index $rowIssueIndex -Issue 'AdvanceOnClickDisabled')")
     $lines.Add("- 视频页候选：$(Get-VideoCandidateCount -Rows $Rows)")
     if ($exportsPdf) {
-        $lines.Add("- PDF 导出失败：$(Get-IssueCount -Rows $Rows -Index $rowIssueIndex -Issue 'PdfExportFailed')")
+        $lines.Add("- PDF 导出失败：$(Get-IssueCount -Index $rowIssueIndex -Issue 'PdfExportFailed')")
     }
     if ($IncludeReviewArtifacts) {
-        $lines.Add("- 页面图片数量异常：$(Get-ImageExportMismatchCount -Rows $Rows -Index $rowIssueIndex)")
+        $lines.Add("- 页面图片数量异常：$(Get-ImageExportMismatchCount -Index $rowIssueIndex)")
         $lines.Add("- 页面总览图：$contactSheetCount")
         $lines.Add("- 重点复核图：$reviewSheetCount")
         $lines.Add("- 前后对比图：$beforeAfterSheetCount")
@@ -1981,8 +1963,6 @@ if (-not $explicitOutputRoot) {
     # reports/. Re-check the computed version right before adoption so two
     # concurrent runs cannot claim the same _vN directory.
     $OutputRoot = New-VersionedDeliveryRoot -InputItem $inputItem
-} elseif ($VersionedDelivery) {
-    throw 'Specify either -OutputRoot or -VersionedDelivery, not both.'
 }
 $OutputRoot = [System.IO.Path]::GetFullPath($OutputRoot)
 if ($explicitOutputRoot) {
@@ -2017,9 +1997,9 @@ $formulaOmmlAuditDir = Join-Path $OutputRoot '15_公式OMML审查'
 $exportsPdf = $Mode -notin @('CheckOnly', 'SafeNormalize')
 $invariantDir = Join-Path $OutputRoot '16_不可变快照'
 $existingManifestPath = Join-Path $OutputRoot 'review-manifest.json'
-$existingAiPacketPath = Join-Path $OutputRoot 'ai-visual-review-request.json'
+$aiReviewPacketPath = Join-Path $OutputRoot 'ai-visual-review-request.json'
 $preparedAiEvidence = if (-not [string]::IsNullOrWhiteSpace($AiVisualReviewResult)) {
-    Get-ExistingPreparedAiEvidence -ManifestPath $existingManifestPath -PacketPath $existingAiPacketPath -InputFullPath $inputFullPath -OutputRoot $OutputRoot -Mode $Mode -Files $files
+    Get-ExistingPreparedAiEvidence -ManifestPath $existingManifestPath -PacketPath $aiReviewPacketPath -InputFullPath $inputFullPath -OutputRoot $OutputRoot -Mode $Mode -Files $files
 } else {
     [pscustomobject]@{ reusable = $false; manifest = $null; sourceImageDirs = @{} }
 }
@@ -2175,7 +2155,6 @@ $manifest | Add-Member -NotePropertyName formulaWhitelistSuggestionArtifacts -No
 # The prepared packet binds itself to the exact bytes of review-manifest.json.
 # Populate the packet metadata before the first manifest write so the packet
 # hash remains valid for the rest of this workflow turn.
-$aiReviewPacketPath = Join-Path $OutputRoot 'ai-visual-review-request.json'
 if ($PrepareAiVisualReview -or -not [string]::IsNullOrWhiteSpace($AiVisualReviewResult)) {
     $manifest | Add-Member -NotePropertyName aiVisualReviewPrepared -NotePropertyValue $true -Force
     $manifest | Add-Member -NotePropertyName aiVisualReviewPacket -NotePropertyValue $aiReviewPacketPath -Force
@@ -2239,6 +2218,7 @@ if ($BrandRefresh -or $HighlightBox) {
 }
 
 if ($ApplyFormulaOmmlWhitelist) {
+    $currentStep++
     Write-Host "Step ${currentStep}/${stepCount}: formula OMML whitelist copies"
     $formulaOmmlArtifacts = Invoke-FormulaOmmlArtifacts -Manifest $manifest -FormulaReviewIndex $formulaReviewIndex -OutputRoot $OutputRoot -MaxItems $FormulaOmmlMaxItems -RunVisualAudit ([bool]$FormulaOmmlVisualAudit)
     $manifest | Add-Member -NotePropertyName formulaOmmlEnabled -NotePropertyValue $true -Force
@@ -2262,10 +2242,16 @@ $manifest.formulaProcessing.actualWriteCount = $actualFormulaWriteCount
 
 Write-Host "Step ${stepCount}/${stepCount}: write summary and manifest"
 $currentManifest = $manifest
-$preparedManifest = if (Test-Path -LiteralPath $manifestPath) { Read-JsonObject -Path $manifestPath } else { $null }
-$preparedManifestMatchesCurrent = Test-PreparedManifestMatchesCurrent -Prepared $preparedManifest -Current $manifest
-$preparedPacket = if (Test-Path -LiteralPath $aiReviewPacketPath) { Read-JsonObject -Path $aiReviewPacketPath } else { $null }
-$preparedPacketMatchesCurrent = Test-PreparedPacketMatchesCurrent -Packet $preparedPacket -Current $manifest
+# Both deep comparisons bind a *previously prepared* AI packet to the current
+# run; they are consumed only when -AiVisualReviewResult was supplied.
+$preparedManifestMatchesCurrent = $false
+$preparedPacketMatchesCurrent = $false
+if (-not [string]::IsNullOrWhiteSpace($AiVisualReviewResult)) {
+    $preparedManifest = if (Test-Path -LiteralPath $manifestPath) { Read-JsonObject -Path $manifestPath } else { $null }
+    $preparedManifestMatchesCurrent = Test-PreparedManifestMatchesCurrent -Prepared $preparedManifest -Current $manifest
+    $preparedPacket = if (Test-Path -LiteralPath $aiReviewPacketPath) { Read-JsonObject -Path $aiReviewPacketPath } else { $null }
+    $preparedPacketMatchesCurrent = Test-PreparedPacketMatchesCurrent -Packet $preparedPacket -Current $manifest
+}
 $reusePreparedManifest = (-not [string]::IsNullOrWhiteSpace($AiVisualReviewResult) -and
     (Test-Path -LiteralPath $manifestPath) -and (Test-Path -LiteralPath $aiReviewPacketPath) -and $preparedManifestMatchesCurrent -and $preparedPacketMatchesCurrent)
 if (-not [string]::IsNullOrWhiteSpace($AiVisualReviewResult) -and
