@@ -1001,6 +1001,27 @@ if ([Math]::Abs([double]$axisDrift - 0.06) -gt 0.000001) { throw "Geometry drift
 $maxAxisDrift = Get-AutoSizeGeometryDrift -Shape $driftShape -Left 99.0 -Top 50.0 -Width 300.5 -Height 80.0
 if ([Math]::Abs([double]$maxAxisDrift - 1.0) -gt 0.000001) { throw "Geometry drift probe: max-across-axes semantics violated: $maxAxisDrift" }
 
+# Formula latin-family decision probe: formula-like text must resolve to the
+# math family so serif italic letterforms keep I distinct from lowercase l
+# (15.5 slide18 shipped Arial and read as "l"); body text and URL-like text
+# stay on the latin UI family. The decider is IEX'd into THIS scope, so the
+# $script:Style swap below is its execution environment and is restored after.
+foreach ($familyFnName in @('Test-IsFormulaCandidateText', 'Get-NormalizeLatinFontFamily')) {
+    $familyFnAst = $normalizeReorderAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $familyFnName }, $true) | Select-Object -First 1
+    if ($null -eq $familyFnAst) { throw "Normalize font-family function not found for the behavioral probe: $familyFnName" }
+    Invoke-Expression $familyFnAst.Extent.Text
+}
+$probeStyleBackup = Get-Variable -Name Style -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+$script:Style = [pscustomobject]@{ FontMath = 'Cambria Math'; FontLatin = 'Arial' }
+try {
+    if ((Get-NormalizeLatinFontFamily -Text 'I = I1 = I2') -ne 'Cambria Math') { throw 'Formula family probe: I = I1 = I2 must resolve to the math font.' }
+    if ((Get-NormalizeLatinFontFamily -Text 'IA =IB =IC？') -ne 'Cambria Math') { throw 'Formula family probe: subscripted quantity symbols must resolve to the math font.' }
+    if ((Get-NormalizeLatinFontFamily -Text '一、教学目标') -ne 'Arial') { throw 'Formula family probe: body text must stay on the latin UI font.' }
+    if ((Get-NormalizeLatinFontFamily -Text 'https://example.com/I=1') -ne 'Arial') { throw 'Formula family probe: URL-like text must stay on the latin UI font.' }
+} finally {
+    Set-Variable -Name Style -Scope Script -Value $probeStyleBackup -ErrorAction SilentlyContinue
+}
+
 # Geometry-restore lock probe: retry gating must classify lock conflicts by
 # HRESULT (0x80070020/21) with the bilingual phrases as fallback — the 5.1
 # fallback host throws localized IO messages (zh-CN: 正由另一进程使用), which

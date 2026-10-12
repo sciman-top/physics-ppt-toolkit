@@ -654,6 +654,15 @@ function Test-IsFormulaCandidateText {
     return $false
 }
 
+function Get-NormalizeLatinFontFamily {
+    # Formula-like text follows the math family: serif italic letterforms keep
+    # quantity letters (I, U, R) readable as symbols instead of lowercase l.
+    # Body text follows the latin UI family.
+    param([string]$Text)
+    if (Test-IsFormulaCandidateText -Text $Text) { return $script:Style.FontMath }
+    return $script:Style.FontLatin
+}
+
 function Get-FormulaCandidateProfile {
     param([string]$Text)
 
@@ -1339,9 +1348,13 @@ function Set-AutoSizeTextFontSafely {
     param(
         $Shape,
         [int]$SlideNumber,
-        [string]$FileName
+        [string]$FileName,
+        [string]$LatinFamily = ''
     )
 
+    # Empty means the default latin UI family; formula-like AutoSize shapes
+    # pass the math family so quantity letters keep serif italic letterforms.
+    $latinTarget = if ([string]::IsNullOrWhiteSpace($LatinFamily)) { $script:Style.FontLatin } else { $LatinFamily }
     $shapeName = Get-ShapeName $Shape
     if (-not (Test-StyleRuleEnabled -RuleId 'STYLE.TEXT.FONT')) {
         Add-RuleSkippedReport -FileName $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
@@ -1417,7 +1430,7 @@ function Set-AutoSizeTextFontSafely {
     try {
         $beforeFit = Test-TextRangeFitsShape -TextRange $textRange -ShapeWidth $width -ShapeHeight $height
         $beforeLayout = Get-TextRangeLineLayout -TextRange $textRange
-        & $setFontFamily $script:Style.FontLatin $script:Style.FontChinese
+        & $setFontFamily $latinTarget $script:Style.FontChinese
 
         # Same-geometry re-wrap guard.  The fit and drift checks below cannot
         # see a re-wrap that keeps the box bounds and line count: the glyphs
@@ -1429,7 +1442,7 @@ function Set-AutoSizeTextFontSafely {
             & $setFontFamily '' '' -Rollback
             Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
                 -Issue 'TextStyleSkippedLineRelayout' `
-                -Details ("Target font {0}/{1} re-wrapped the shape ({2}); the original font and line layout were rolled back." -f $script:Style.FontLatin, $script:Style.FontChinese, $layoutChange) `
+                -Details ("Target font {0}/{1} re-wrapped the shape ({2}); the original font and line layout were rolled back." -f $latinTarget, $script:Style.FontChinese, $layoutChange) `
                 -RuleId 'STYLE.TEXT.FONT' -Property 'FontName/NameFarEast' -Before $beforeSummary -After $beforeSummary `
                 -RiskLevel 'R0' -Result 'Skipped'
             return
@@ -1462,7 +1475,7 @@ function Set-AutoSizeTextFontSafely {
             $Shape.Height = [single]$height
             Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
                 -Issue 'TextStyleSkippedContentFitRisk' `
-                -Details ("Target font {0}/{1} produced text bounds {2} against protected shape {3:N1}x{4:N1}; original bounds were {5}. Font and geometry were rolled back." -f $script:Style.FontLatin, $script:Style.FontChinese, $targetBoundsText, $width, $height, $beforeBoundsText) `
+                -Details ("Target font {0}/{1} produced text bounds {2} against protected shape {3:N1}x{4:N1}; original bounds were {5}. Font and geometry were rolled back." -f $latinTarget, $script:Style.FontChinese, $targetBoundsText, $width, $height, $beforeBoundsText) `
                 -RuleId 'SAFETY.GEOMETRY.AUTOSIZE' -Property 'FontName/NameFarEast' -Before $beforeSummary -After $beforeSummary `
                 -RiskLevel 'R0' -Result 'Skipped'
             return
@@ -1483,7 +1496,7 @@ function Set-AutoSizeTextFontSafely {
                     -Issue 'TextStyleNormalizedGeometryRestored' `
                     -Details ("Microsoft YaHei reflowed the AutoSize shape by {0:N2} pt; the normalized font was kept and the original geometry was restored." -f $drift) `
                     -RuleId 'STYLE.TEXT.FONT' -Property 'FontName/NameFarEast' -Before "$beforeName|$beforeFarEast" `
-                    -After "$($script:Style.FontLatin)|$($script:Style.FontChinese)" -RiskLevel 'R1' -Result 'Applied'
+                    -After "$latinTarget|$($script:Style.FontChinese)" -RiskLevel 'R1' -Result 'Applied'
                 Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
                     -Issue 'AutoSizeGeometryRestored' -Details 'Font normalization completed with AutoSize geometry restored to the original bounds.' `
                     -RuleId 'SAFETY.GEOMETRY.AUTOSIZE' -Property 'Left/Top/Width/Height/AutoSize' `
@@ -1493,7 +1506,7 @@ function Set-AutoSizeTextFontSafely {
                 return
             }
             $compactChineseFont = $script:Style.FontCompactChinese
-            & $setFontFamily $script:Style.FontLatin $compactChineseFont
+            & $setFontFamily $latinTarget $compactChineseFont
             $fallbackDrift = Get-AutoSizeGeometryDrift -Shape $Shape -Left $left -Top $top -Width $width -Height $height
             if ($fallbackDrift -gt 0.05) {
                 $Shape.Left = [single]$left
@@ -1505,7 +1518,7 @@ function Set-AutoSizeTextFontSafely {
                         -Issue 'TextStyleNormalizedCompactFallbackGeometryRestored' `
                         -Details ("Microsoft YaHei UI reflowed the AutoSize shape by {0:N2} pt; the compatible fallback font was kept and the original geometry was restored." -f $fallbackDrift) `
                         -RuleId 'STYLE.TEXT.FONT' -Property 'FontName/NameFarEast' -Before $beforeSummary `
-                        -After "$($script:Style.FontLatin)|$compactChineseFont" -RiskLevel 'R1' -Result 'Applied'
+                        -After "$latinTarget|$compactChineseFont" -RiskLevel 'R1' -Result 'Applied'
                     Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
                         -Issue 'AutoSizeGeometryRestored' -Details 'Compatible font fallback completed with AutoSize geometry restored to the original bounds.' `
                         -RuleId 'SAFETY.GEOMETRY.AUTOSIZE' -Property 'Left/Top/Width/Height/AutoSize' `
@@ -1519,7 +1532,7 @@ function Set-AutoSizeTextFontSafely {
                     -Issue 'TextStyleNormalizedCompactFallback' `
                     -Details 'Microsoft YaHei changed AutoSize geometry; Microsoft YaHei UI preserved geometry and was used as the compatible fallback.' `
                     -RuleId 'STYLE.TEXT.FONT' -Property 'FontName/NameFarEast' -Before $beforeSummary `
-                    -After "$($script:Style.FontLatin)|$compactChineseFont" -RiskLevel 'R1' -Result 'Applied'
+                    -After "$latinTarget|$compactChineseFont" -RiskLevel 'R1' -Result 'Applied'
                 Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
                     -Issue 'AutoSizeGeometryRestored' -Details 'Compatible font fallback completed without changing AutoSize or object geometry.' `
                     -RuleId 'SAFETY.GEOMETRY.AUTOSIZE' -Property 'Left/Top/Width/Height/AutoSize' `
@@ -1548,7 +1561,7 @@ function Set-AutoSizeTextFontSafely {
             -Issue 'TextStyleNormalized' `
             -Details 'Font family normalized; original size, emphasis, color, AutoSize, and geometry were preserved.' `
             -RuleId 'STYLE.TEXT.FONT' -Property 'FontName/NameFarEast' -Before $beforeSummary `
-            -After "$($script:Style.FontLatin)|$($script:Style.FontChinese)" -RiskLevel 'R1' -Result 'Applied'
+            -After "$latinTarget|$($script:Style.FontChinese)" -RiskLevel 'R1' -Result 'Applied'
         Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
             -Issue 'AutoSizeGeometryRestored' `
             -Details 'Font-only normalization completed without changing AutoSize or object geometry.' `
@@ -1754,18 +1767,24 @@ function Normalize-TextShape {
     }
 
     if (Test-ShapeUsesAutomaticSizing -Shape $Shape) {
+        $latinFamily = Get-NormalizeLatinFontFamily -Text $Text
         if (Test-IsFormulaCandidateText -Text $Text) {
             $autoFormulaProfile = Add-FormulaCandidateReport -FileName $FileName -SlideNumber $SlideNumber -ShapeName (Get-ShapeName $Shape) -Text $Text
+            # The math family keeps quantity letters (I, U, R) serif-italic and
+            # distinct from lowercase l; the fit, relayout, and geometry guards
+            # in Set-AutoSizeTextFontSafely apply to it unchanged. Only semantic
+            # styling (size/alignment) stays deferred to the reviewed OMML path.
+            $mathFamilyApplied = (Test-StyleRuleEnabled -RuleId 'STYLE.TEXT.FONT') -and ($latinFamily -eq $script:Style.FontMath)
             Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName (Get-ShapeName $Shape) `
-                -Issue 'FormulaStyleSkippedAutoSize' `
-                -Details ("Formula-like text detected as {0}; automatic-size font normalization is kept geometry-safe and semantic formula styling is deferred to the reviewed OMML path." -f $autoFormulaProfile.Kind) `
-                -RuleId 'STYLE.FORMULA.TEXT' -Property 'FontName/NameFarEast/Size/Color/ParagraphAlignment' -RiskLevel 'R0' -Result 'Skipped'
+                -Issue 'FormulaStyleAutoSizeMathFamily' `
+                -Details ("Formula-like text detected as {0}; latin family follows the math font while size, color, alignment, and AutoSize geometry stay protected; semantic formula styling is deferred to the reviewed OMML path." -f $autoFormulaProfile.Kind) `
+                -RuleId 'STYLE.FORMULA.TEXT' -Property 'FontName' -RiskLevel 'R1' -Result $(if ($mathFamilyApplied) { 'Applied' } else { 'Skipped' })
         }
         $capLeft = [double]$Shape.Left
         $capTop = [double]$Shape.Top
         $capWidth = [double]$Shape.Width
         $capHeight = [double]$Shape.Height
-        Set-AutoSizeTextFontSafely -Shape $Shape -SlideNumber $SlideNumber -FileName $FileName
+        Set-AutoSizeTextFontSafely -Shape $Shape -SlideNumber $SlideNumber -FileName $FileName -LatinFamily $latinFamily
         Set-AutoSizeFontSizeCapSafely -Shape $Shape -MaxSize $maxSize -Left $capLeft -Top $capTop -Width $capWidth -Height $capHeight `
             -FileName $FileName -SlideNumber $SlideNumber -ShapeName (Get-ShapeName $Shape)
         return

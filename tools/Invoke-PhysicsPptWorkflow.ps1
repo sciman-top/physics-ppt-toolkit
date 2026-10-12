@@ -641,6 +641,7 @@ function New-FormulaReviewIndex {
         'FormulaConversionSkipped',
         'FormulaConversionPending',
         'FormulaTextStyleNormalized',
+        'FormulaStyleAutoSizeMathFamily',
         'FormulaStyleSkipped',
         'FormulaTextStyleFailed'
     )
@@ -661,6 +662,7 @@ function New-FormulaReviewIndex {
             FormulaConversionSkipped = ''
             FormulaConversionPending = ''
             FormulaTextStyleNormalized = ''
+            FormulaStyleAutoSizeMathFamily = ''
             FormulaStyleSkipped = ''
             FormulaTextStyleFailed = ''
         }
@@ -683,6 +685,8 @@ function New-FormulaReviewIndex {
             $suggestedAction = 'ManualReview'
         } elseif (-not [string]::IsNullOrWhiteSpace($details.FormulaTextStyleNormalized)) {
             $suggestedAction = 'TextStyleNormalized'
+        } elseif (-not [string]::IsNullOrWhiteSpace($details.FormulaStyleAutoSizeMathFamily)) {
+            $suggestedAction = 'MathFamilyNormalized'
         }
 
         $items.Add([pscustomobject]@{
@@ -695,7 +699,7 @@ function New-FormulaReviewIndex {
             CandidateClass = $details.FormulaCandidateClass
             WhitelistCandidate = $details.FormulaWhitelistCandidate
             ConversionStatus = if (-not [string]::IsNullOrWhiteSpace($details.FormulaConversionPending)) { $details.FormulaConversionPending } else { $details.FormulaConversionSkipped }
-            StyleStatus = if (-not [string]::IsNullOrWhiteSpace($details.FormulaTextStyleNormalized)) { $details.FormulaTextStyleNormalized } elseif (-not [string]::IsNullOrWhiteSpace($details.FormulaTextStyleFailed)) { $details.FormulaTextStyleFailed } else { $details.FormulaStyleSkipped }
+            StyleStatus = if (-not [string]::IsNullOrWhiteSpace($details.FormulaTextStyleNormalized)) { $details.FormulaTextStyleNormalized } elseif (-not [string]::IsNullOrWhiteSpace($details.FormulaStyleAutoSizeMathFamily)) { $details.FormulaStyleAutoSizeMathFamily } elseif (-not [string]::IsNullOrWhiteSpace($details.FormulaTextStyleFailed)) { $details.FormulaTextStyleFailed } else { $details.FormulaStyleSkipped }
             SuggestedAction = $suggestedAction
         }) | Out-Null
     }
@@ -1018,6 +1022,7 @@ function Write-Summary {
     }
     $lines.Add("- 疑似公式：$(Get-IssueCount -Index $rowIssueIndex -Issue 'FormulaCandidate')")
     $lines.Add("- 已归一低风险文本公式：$(Get-IssueCount -Index $rowIssueIndex -Issue 'FormulaTextStyleNormalized')")
+    $lines.Add("- 公式类文本数学字体（AutoSize 几何保护）：$(Get-IssueCount -Index $rowIssueIndex -Issue 'FormulaStyleAutoSizeMathFamily')")
     $lines.Add("- 公式样式跳过：$(Get-IssueCount -Index $rowIssueIndex -Issue 'FormulaStyleSkipped')")
     $lines.Add("- 白名单公式候选：$(Get-IssueCount -Index $rowIssueIndex -Issue 'FormulaWhitelistCandidate')")
     $lines.Add("- 公式转换跳过：$(Get-IssueCount -Index $rowIssueIndex -Issue 'FormulaConversionSkipped')")
