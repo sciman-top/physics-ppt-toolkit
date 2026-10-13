@@ -1639,6 +1639,12 @@ function Invoke-FormulaOmmlArtifacts {
     $dotnet = Resolve-DotNetCommand
     $validatorProject = Join-Path $PSScriptRoot 'FormulaOfficeMathValidator\FormulaOfficeMathValidator.csproj'
     $items = New-Object System.Collections.Generic.List[object]
+    $formulaReviewRows = @()
+    try {
+        $formulaReviewRows = @(Import-Csv -LiteralPath $FormulaReviewIndex -Encoding UTF8)
+    } catch {
+        $formulaReviewRows = @()
+    }
 
     foreach ($file in @($Manifest.files)) {
         $inputName = Split-Path $file.input -Leaf
@@ -1710,19 +1716,15 @@ function Invoke-FormulaOmmlArtifacts {
         $automationGateStatus = 'Skipped'
         $automationGateReason = ''
 
-        try {
-            $fileCandidateCount = @(
-                Import-Csv -LiteralPath $FormulaReviewIndex -Encoding UTF8 |
-                    Where-Object {
-                        $_.SuggestedAction -eq 'ReviewWhitelistConversion' -and (
-                            ($null -ne $_.PSObject.Properties['FilePath'] -and $_.FilePath -eq $file.input) -or
-                            ($null -ne $_.PSObject.Properties['FileRelativePath'] -and $_.FileRelativePath -eq $file.inputRelativePath)
-                        )
-                    }
-            ).Count
-        } catch {
-            $fileCandidateCount = 0
-        }
+        $fileCandidateCount = @(
+            $formulaReviewRows |
+                Where-Object {
+                    $_.SuggestedAction -eq 'ReviewWhitelistConversion' -and (
+                        ($null -ne $_.PSObject.Properties['FilePath'] -and $_.FilePath -eq $file.input) -or
+                        ($null -ne $_.PSObject.Properties['FileRelativePath'] -and $_.FileRelativePath -eq $file.inputRelativePath)
+                    )
+                }
+        ).Count
 
         if ($fileCandidateCount -le 0) {
             $applyStatus = 'SkippedNoFormulaWhitelistCandidate'
