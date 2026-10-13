@@ -1,7 +1,7 @@
 # AGENTS.md - physics-ppt-toolkit
 **项目契约**: 2.0
-**全局规则复核**: 9.85
-**最后更新**: 2026-10-09
+**全局规则复核**: 9.86
+**最后更新**: 2026-10-13
 
 ## 1. 产品边界与入口
 - `docs/产品需求与工程路线图.md` 是产品边界与默认主线的 source of truth；`config/physics-ppt-style.config.json` 是 PowerShell 样式运行配置，VBA 常量与 JSON 的逐值一致由最低门禁自动校验（漏改会被门禁拦截）。

@@ -490,17 +490,6 @@ function Convert-ToSafeFormulaPathSegment {
     return $safe
 }
 
-function Convert-ToSafeFileNameSegment {
-    param([string]$Name)
-    $safe = [string]$Name
-    foreach ($character in [System.IO.Path]::GetInvalidFileNameChars()) {
-        $safe = $safe.Replace([string]$character, '_')
-    }
-    $safe = $safe.Trim()
-    if ([string]::IsNullOrWhiteSpace($safe)) { return 'presentation' }
-    return $safe
-}
-
 function Get-BasicImageInfo {
     param([string]$Path)
     Add-Type -AssemblyName System.Drawing
