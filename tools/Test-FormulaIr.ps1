@@ -12,6 +12,7 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'PhysicsPpt.Common.ps1')
+. (Join-Path $PSScriptRoot 'PhysicsPpt.Formula.ps1')
 
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('physics-formula-ir-' + [Guid]::NewGuid().ToString('N'))
 $outputDir = Join-Path $testRoot 'output'
@@ -35,14 +36,20 @@ try {
     }
     $records = @(Get-ChildItem -LiteralPath (Join-Path $outputDir 'formula-ir') -Filter '*.json' -File)
     if ($records.Count -ne 5) { throw "Expected 5 FormulaIR records, found $($records.Count)." }
-    $all = @(Get-Content -LiteralPath (Join-Path $outputDir 'formula-omml-candidates.json') -Raw -Encoding UTF8 | ConvertFrom-Json)
+    $all = Get-Content -LiteralPath (Join-Path $outputDir 'formula-omml-candidates.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     $bySlide = @{}
+    $fragmentProbe = Join-Path $testRoot 'fragment-probe.xml'
+    $expectedFormula = 'x=2'
+    (New-OmmlFragment $expectedFormula).Save($fragmentProbe)
+    if (-not (Test-FormulaOmmlFragment $fragmentProbe $expectedFormula)) { throw 'Unmodified OMML fragment was rejected.' }
+    (New-OmmlFragment 'x=3').Save($fragmentProbe)
+    if (Test-FormulaOmmlFragment $fragmentProbe $expectedFormula) { throw 'OMML fragment with a different mathematical value was accepted.' }
     foreach ($row in $all) { $bySlide[[int]$row.Slide] = $row }
     foreach ($slide in 1..5) {
         if ([string]$bySlide[$slide].FormulaIrStatus -ne 'Resolved') { throw "Slide $slide was not resolved." }
         $ir = Get-Content -LiteralPath ([string]$bySlide[$slide].FormulaIrFragment) -Raw -Encoding UTF8 | ConvertFrom-Json
         if ([string]$ir.decision.status -ne 'CandidateOnly' -or [bool]$ir.decision.writeBackAllowed) { throw "Slide $slide violated CandidateOnly/writeBackAllowed=false." }
-        if ([string]$ir.canonical.unicodeMath -eq '' -or [string]$ir.canonical.tex -eq '' -or $ir.canonical.tokens.Count -eq 0) { throw "Slide $slide has incomplete canonical output." }
+        if ([string]$ir.canonical.unicodeMath -eq '' -or [string]$ir.canonical.tex -eq '' -or @($ir.canonical.tokens).Count -eq 0) { throw "Slide $slide has incomplete canonical output." }
     }
     $fraction = Get-Content -LiteralPath ([string]$bySlide[2].FormulaIrFragment) -Raw -Encoding UTF8 | ConvertFrom-Json
     $fractionJson = $fraction.canonical.tokens | ConvertTo-Json -Depth 20 -Compress

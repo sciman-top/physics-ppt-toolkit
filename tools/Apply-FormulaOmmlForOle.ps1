@@ -66,6 +66,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'PhysicsPpt.Common.ps1')
+. (Join-Path $PSScriptRoot 'PhysicsPpt.Formula.ps1')
 
 if ([string]::IsNullOrWhiteSpace($EastAsianFontName)) {
     $styleConfigPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'config\physics-ppt-style.config.json'
@@ -453,7 +454,7 @@ if ([string]::Equals($InputPath, $OutputPath, [System.StringComparison]::Ordinal
 
 $whitelist = Get-PhysicsPptFormulaWhitelist
 $whitelistNames = @{}
-foreach ($rule in $whitelist) { $whitelistNames[[string]$rule.name] = $true }
+foreach ($rule in $whitelist) { $whitelistNames[[string]$rule.name] = $rule }
 
 $candidateRows = @(Import-Csv -LiteralPath $OmmlCandidateCsv -Encoding UTF8 | Where-Object { $_.Status -eq 'Generated' })
 $candidateByName = @{}
@@ -506,6 +507,12 @@ try {
         $fragmentPath = [string]$candidate.OmmlFragment
         if ([string]::IsNullOrWhiteSpace($fragmentPath) -or -not (Test-Path -LiteralPath $fragmentPath)) {
             Add-ReportRow -Rows $reportRows -File $inputFileName -Slide $slideNo -Shape $name -Issue 'OleFragmentMissing' -Details $fragmentPath
+            continue
+        }
+        $ruleTarget = Get-FormulaRuleValue -Rule $whitelistNames[$name] -Name 'targetUnicodeMath'
+        if ([string]$candidate.TargetUnicodeMath -cne $ruleTarget -or
+            -not (Test-FormulaOmmlFragment -Path $fragmentPath -UnicodeMath $ruleTarget)) {
+            Add-ReportRow -Rows $reportRows -File $inputFileName -Slide $slideNo -Shape $name -Issue 'OleWhitelistRejected' -Details 'Candidate target/OMML differs from the current whitelist formula.'
             continue
         }
 

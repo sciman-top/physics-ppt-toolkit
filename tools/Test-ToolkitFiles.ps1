@@ -43,6 +43,7 @@ $required = @(
     'config\physics-ppt-style.config.json',
     'tools\Normalize-PhysicsPpt.ps1',
     'tools\Export-FormulaOmmlCandidates.ps1',
+    'tools\PhysicsPpt.Formula.ps1',
     'tools\Test-FormulaIr.ps1',
     'tools\Test-FormulaOfficeMathValidator.ps1',
     'tools\Test-FormulaPowerPointRepairHandling.ps1',
@@ -237,7 +238,7 @@ $unicodeMathInvalid = Get-Content -LiteralPath $unicodeMathInvalidPath -Raw -Enc
 if ([int]$unicodeMathValid.schemaVersion -ne 1 -or [int]$unicodeMathInvalid.schemaVersion -ne 1) {
     throw 'UnicodeMath fixtures must use schemaVersion 1.'
 }
-$ommlCandidatesParserPath = Join-Path $root 'tools\Export-FormulaOmmlCandidates.ps1'
+$ommlCandidatesParserPath = Join-Path $root 'tools\PhysicsPpt.Formula.ps1'
 $parserTokens = $null
 $parserParseErrors = $null
 $ommlCandidatesParserAst = [System.Management.Automation.Language.Parser]::ParseFile($ommlCandidatesParserPath, [ref]$parserTokens, [ref]$parserParseErrors)

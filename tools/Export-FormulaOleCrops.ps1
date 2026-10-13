@@ -147,6 +147,14 @@ foreach ($record in $allRecords) {
         $missingPages.Add("$recordId -> $pageName") | Out-Null
         continue
     }
+    # Pre-rendered pages need not use the default width or the slide's aspect
+    # ratio. Use the decoded image dimensions to map points to pixels.
+    $pageMetadata = [System.Drawing.Bitmap]::new($pagePath)
+    try {
+        $pageWidthPx = [double]$pageMetadata.Width
+        $pageHeightPx = [double]$pageMetadata.Height
+        $ptPerPx = $slideHeightPt / $pageHeightPx
+    } finally { $pageMetadata.Dispose() }
     $bbox = $record.source.bbox
     if ($null -eq $bbox -or $null -eq $bbox.left -or $null -eq $bbox.width) {
         $missingPages.Add("$recordId -> bbox missing") | Out-Null

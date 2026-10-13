@@ -95,7 +95,7 @@ try {
     $json
 } finally {
     if ($null -ne $presentation) { try { $presentation.Close() | Out-Null } catch { }; Release-ComObjectSafe -ComObject $presentation }
-    if ($null -ne $pp) { try { $pp.Quit() | Out-Null } catch { }; Release-ComObjectSafe -ComObject $pp }
+    if ($null -ne $pp) { try { Stop-PowerPointApplicationIfIdle -Application $pp | Out-Null } catch { }; Release-ComObjectSafe -ComObject $pp }
     [GC]::Collect()
     [GC]::WaitForPendingFinalizers()
     if (Test-Path -LiteralPath $testRoot) { Remove-Item -LiteralPath $testRoot -Recurse -Force }

@@ -42,6 +42,30 @@ try {
     $inventory = [ordered]@{ schemaVersion = 1; generatedAt = 'fixture'; input = [ordered]@{ path = $sourceCopy; sha256 = $sourceSha }; records = @($record) }
     Write-Utf8BomText -Text ($inventory | ConvertTo-Json -Depth 20) -Path $inventoryPath
     $inventorySha = (Get-FileHash -LiteralPath $inventoryPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    # Non-default widths and aspect ratios must use decoded pixel dimensions.
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [IO.Compression.ZipFile]::OpenRead($sourceCopy)
+    try {
+        $reader = [IO.StreamReader]::new($zip.GetEntry('ppt/presentation.xml').Open())
+        try { [xml]$presentationXml = $reader.ReadToEnd() } finally { $reader.Dispose() }
+        $size = $presentationXml.DocumentElement.ChildNodes | Where-Object { $_.LocalName -eq 'sldSz' } | Select-Object -First 1
+        $widthPt = [double]$size.cx / 12700; $heightPt = [double]$size.cy / 12700
+    } finally { $zip.Dispose() }
+    $cropInventory = $inventory | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+    $cropInventory.records[0].source.bbox = [pscustomobject]@{ left=$widthPt/4; top=$heightPt/4; width=$widthPt/2; height=$heightPt/2 }
+    $cropInventoryPath = Join-Path $testRoot 'crop-inventory.json'
+    Write-Utf8BomText -Path $cropInventoryPath -Text ($cropInventory | ConvertTo-Json -Depth 20)
+    foreach ($dimensions in @(@(12,12), @(800,600))) {
+        $probePages = Join-Path $testRoot ("pages-$($dimensions[0])")
+        New-Item -ItemType Directory -Path $probePages | Out-Null
+        $bitmap = [Drawing.Bitmap]::new($dimensions[0], $dimensions[1])
+        try { $bitmap.Save((Join-Path $probePages 'slide-001.png'), [Drawing.Imaging.ImageFormat]::Png) } finally { $bitmap.Dispose() }
+        $cropOutput = Join-Path $testRoot ("crop-output-$($dimensions[0])")
+        & (Join-Path $PSScriptRoot 'Export-FormulaOleCrops.ps1') -CarrierInventoryJson $cropInventoryPath -PagesDir $probePages -OutputDir $cropOutput -PaddingPx 0 | Out-Null
+        $cropRow = @(Import-Csv (Join-Path $cropOutput 'ole-crops.csv'))[0]
+        $expectedRect = '{0},{1},{2},{3}' -f ($dimensions[0]/4), ($dimensions[1]/4), ($dimensions[0]/2), ($dimensions[1]/2)
+        if ($cropRow.CropRectPx -cne $expectedRect) { throw "Decoded image dimensions were ignored: $($cropRow.CropRectPx), expected $expectedRect" }
+    }
     $cropCsv = Join-Path $testRoot 'ole-crops.csv'
     Write-Utf8BomCsv -InputObject @([pscustomobject]@{ RecordId = 's1-sh1-MathTypeOle'; CropPng = $cropPath; CropSha256 = $cropSha; PageSha256 = $pageSha }) -Path $cropCsv
     $cropManifestPath = Join-Path $testRoot 'formula-ole-crops-manifest.json'
@@ -62,6 +86,10 @@ try {
     $failedAsExpected = $false
     try { & $tool -CarrierInventoryJson $inventoryPath -CropManifestJson $cropManifestPath -AdjudicationCsv $badAdjudication -OutputDir $badOutput | Out-Null } catch { $failedAsExpected = $true }
     if (-not $failedAsExpected) { throw 'Drifted crop hash was not rejected.' }
+    [IO.File]::WriteAllText($pagePath, 'tampered page')
+    $failedAsExpected = $false
+    try { & $tool -CarrierInventoryJson $inventoryPath -CropManifestJson $cropManifestPath -AdjudicationCsv $adjudicationPath -OutputDir $badOutput | Out-Null } catch { $failedAsExpected = $true }
+    if (-not $failedAsExpected) { throw 'Drifted page image was not rejected.' }
     Write-Host 'Formula OLE visual adjudication tests passed.'
 } finally {
     if (Test-Path -LiteralPath $testRoot) { Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue }

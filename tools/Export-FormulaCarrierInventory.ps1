@@ -463,7 +463,7 @@ finally {
     # Close/Quit would otherwise mask the inventory result (same guarded
     # pattern as the other COM tools' finally blocks).
     if ($null -ne $pres) { try { $pres.Close() | Out-Null } catch { }; Release-ComObjectSafe $pres }
-    if ($null -ne $ppt) { try { $ppt.Quit() | Out-Null } catch { }; Release-ComObjectSafe $ppt }
+    if ($null -ne $ppt) { try { Stop-PowerPointApplicationIfIdle -Application $ppt | Out-Null } catch { }; Release-ComObjectSafe $ppt }
     [GC]::Collect()
     [GC]::WaitForPendingFinalizers()
 }

@@ -15,6 +15,59 @@ $toolRoot = $PSScriptRoot
 $testRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('physics-ppt-policy-' + [Guid]::NewGuid().ToString('N'))
 try {
     New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
+    . (Join-Path $toolRoot 'PhysicsPpt.Common.ps1')
+    foreach ($counts in @(@(0,0), @(1,0), @(0,1))) {
+        $mockApplication = [pscustomobject]@{ Presentations = @{ Count = $counts[0] }; ProtectedViewWindows = @{ Count = $counts[1] }; quitCalled = $false }
+        $mockApplication | Add-Member ScriptMethod Quit { $this.quitCalled = $true }
+        Stop-PowerPointApplicationIfIdle $mockApplication
+        if ($mockApplication.quitCalled -ne ($counts[0] -eq 0 -and $counts[1] -eq 0)) { throw 'PowerPoint cleanup closed an occupied instance or failed to close an idle instance.' }
+    }
+    $batchAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $toolRoot 'Invoke-FormulaOleBatch.ps1'), [ref]$null, [ref]$null)
+    foreach ($name in @('Get-FileSha256', 'New-StepSignature', 'Test-StepReusable', 'Get-RecordedStep', 'Invoke-BatchStep')) {
+        $node = $batchAst.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name }, $true) | Select-Object -First 1
+        Invoke-Expression $node.Extent.Text
+    }
+    $script:SignatureToolHash = 'tools'; $script:SignatureConfigHash = 'config'; $MaxItems = 20; $Resume = $false
+    $batchSteps = New-Object System.Collections.Generic.List[object]
+    $artifact = Join-Path $testRoot 'batch-artifact.txt'
+    Invoke-BatchStep -StepName 'probe' -Outputs @($artifact) -Action { [IO.File]::WriteAllText($artifact, 'original') } | Out-Null
+    if (-not (Test-StepReusable $batchSteps[0])) { throw 'Unchanged batch artifact was not reusable.' }
+    $Resume = $true
+    $currentInput = Join-Path $testRoot 'current-input.txt'
+    [IO.File]::WriteAllText($currentInput, 'new input')
+    Invoke-BatchStep -StepName 'probe' -Inputs @($currentInput) -Outputs @($artifact) -Action { [IO.File]::WriteAllText($artifact, 'current') } | Out-Null
+    if ([IO.File]::ReadAllText($artifact) -cne 'current') { throw 'Resume reused a step bound to a different input.' }
+    $Resume = $false
+    [IO.File]::WriteAllText($artifact, 'tampered')
+    if (Test-StepReusable $batchSteps[0]) { throw 'Modified batch artifact was reused.' }
+    $directoryArtifact = Join-Path $testRoot 'batch-directory'
+    New-Item -ItemType Directory -Path $directoryArtifact | Out-Null
+    Invoke-BatchStep -StepName 'directory' -Outputs @($directoryArtifact) -Action { [IO.File]::WriteAllText((Join-Path $directoryArtifact 'fragment.xml'), 'original') } | Out-Null
+    if (-not (Test-StepReusable $batchSteps[1])) { throw 'Directory output was not reusable.' }
+    [IO.File]::WriteAllText((Join-Path $directoryArtifact 'fragment.xml'), 'tampered')
+    if (Test-StepReusable $batchSteps[1]) { throw 'Tampered directory output was reused.' }
+    $missingOutputRejected = $false
+    try { Invoke-BatchStep -StepName 'missing' -Outputs @((Join-Path $testRoot 'missing.txt')) -Action { } | Out-Null } catch { $missingOutputRejected = $true }
+    if (-not $missingOutputRejected -or $batchSteps.Count -ne 2) { throw 'Missing batch output was recorded as Passed.' }
+    $snapshotAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $toolRoot 'Export-PptxInvariantSnapshot.ps1'), [ref]$null, [ref]$null)
+    Invoke-Expression ($snapshotAst.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-RunFormatFingerprint' }, $true) | Select-Object -First 1).Extent.Text
+    function New-FormatProbeShape {
+        param([string[]]$Texts, [int[]]$Colors)
+        $runs = @()
+        for ($i = 0; $i -lt $Texts.Count; $i++) {
+            $runs += [pscustomobject]@{ Text = $Texts[$i]; Font = @{ Bold = 0; Fill = @{ ForeColor = @{ RGB = $Colors[$i] } } } }
+        }
+        $line = [pscustomobject]@{ items = $runs }
+        $line | Add-Member ScriptMethod Runs { return $this.items }
+        $range = [pscustomobject]@{ line = $line }
+        $range | Add-Member ScriptMethod Lines { return $this.line }
+        return [pscustomobject]@{ TextFrame2 = @{ TextRange = $range } }
+    }
+    $readFailed = $false
+    $normalEmphasis = Get-RunFormatFingerprint (New-FormatProbeShape @('ab', 'cd') @(255, 0)) ([ref]$readFailed)
+    $splitEmphasis = Get-RunFormatFingerprint (New-FormatProbeShape @('a', 'b', 'c', 'd') @(255, 255, 0, 0)) ([ref]$readFailed)
+    $swappedEmphasis = Get-RunFormatFingerprint (New-FormatProbeShape @('ab', 'cd') @(0, 255)) ([ref]$readFailed)
+    if ($readFailed -or $normalEmphasis -cne $splitEmphasis -or $normalEmphasis -ceq $swappedEmphasis) { throw 'Emphasis fingerprint lost positions or depended on run splitting.' }
     $workflowAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $toolRoot 'Invoke-PhysicsPptWorkflow.ps1'), [ref]$null, [ref]$null)
     $propertyFunction = $workflowAst.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-ObjectPropertyValue' }, $true) | Select-Object -First 1
     Invoke-Expression $propertyFunction.Extent.Text

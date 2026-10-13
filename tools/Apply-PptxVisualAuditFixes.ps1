@@ -66,6 +66,14 @@ function Add-FixRow {
 $InputPath = [System.IO.Path]::GetFullPath($InputPath)
 $VisualAuditCsv = [System.IO.Path]::GetFullPath($VisualAuditCsv)
 $OutputPath = [System.IO.Path]::GetFullPath($OutputPath)
+if ([IO.Path]::GetExtension($InputPath) -notin @('.pptx', '.pptm') -or
+    [IO.Path]::GetExtension($InputPath) -ine [IO.Path]::GetExtension($OutputPath)) {
+    throw 'OutputPath must retain the source .pptx/.pptm format.'
+}
+$resultReportPath = Join-Path (Split-Path -Parent $OutputPath) 'pptx-visual-audit-fixes.csv'
+if ($OutputPath -ieq $VisualAuditCsv -or $InputPath -ieq $resultReportPath -or $VisualAuditCsv -ieq $resultReportPath) {
+    throw 'Output/report paths must not overwrite an input.'
+}
 if (-not (Test-Path -LiteralPath $InputPath)) { throw "InputPath not found: $InputPath" }
 if (-not (Test-Path -LiteralPath $VisualAuditCsv)) { throw "VisualAuditCsv not found: $VisualAuditCsv" }
 
@@ -75,9 +83,20 @@ if ([string]::Equals([System.IO.Path]::GetFullPath($InputPath), $OutputPath, [Sy
     throw "OutputPath must differ from InputPath; the source PPTX is never modified in place."
 }
 
+$auditRows = @(Import-Csv -LiteralPath $VisualAuditCsv -Encoding UTF8)
+foreach ($row in $auditRows) {
+    if ($null -eq $row.PSObject.Properties['FilePath'] -or [string]::IsNullOrWhiteSpace($row.FilePath)) {
+        throw 'Visual audit source identity is missing. Re-export the audit before applying fixes.'
+    }
+}
 $rows = @(
-    Import-Csv -LiteralPath $VisualAuditCsv -Encoding UTF8 |
+    $auditRows |
         Where-Object {
+            $(if ($null -ne $_.PSObject.Properties['FilePath'] -and -not [string]::IsNullOrWhiteSpace($_.FilePath)) {
+                [IO.Path]::GetFullPath($_.FilePath) -ieq $InputPath
+            } else {
+                $false
+            }) -and
             $_.Issue -eq 'ShapeOutOfSlideBounds' -and
             $_.Shape -ne '(slide)' -and
             ($_.Severity -eq 'Error' -or ($IncludeWarnings -and $_.Severity -eq 'Warning'))
@@ -172,7 +191,8 @@ try {
 
     # Same COM retry discipline as every other Save/SaveAs write boundary: a
     # transient rejection here would abort the batch after all fixes applied.
-    Invoke-WithComRetry -Action { $pres.SaveAs($OutputPath) } | Out-Null
+    $saveFormat = if ([IO.Path]::GetExtension($OutputPath) -ieq '.pptm') { 25 } else { 24 }
+    Invoke-WithComRetry -Action { $pres.SaveAs($OutputPath, $saveFormat) } | Out-Null
     Add-FixRow -Rows $reportRows -File ([System.IO.Path]::GetFileName($InputPath)) -Slide 0 -Shape '(presentation)' -Issue 'SavedAs' -Status 'Saved' -Details $OutputPath
 } finally {
     if ($null -ne $pres) {
@@ -180,7 +200,7 @@ try {
         Release-ComObjectSafe -ComObject $pres
     }
     if ($null -ne $pp) {
-        try { $pp.Quit() | Out-Null } catch { }
+        try { Stop-PowerPointApplicationIfIdle -Application $pp | Out-Null } catch { }
         Release-ComObjectSafe -ComObject $pp
     }
     [System.GC]::Collect()
@@ -189,6 +209,9 @@ try {
 
 $reportPath = Join-Path $outDir 'pptx-visual-audit-fixes.csv'
 Write-Utf8BomCsv -Rows $reportRows.ToArray() -Path $reportPath
+if (@($reportRows | Where-Object { $_.Status -eq 'Failed' }).Count -gt 0) {
+    throw "Visual fixes failed for one or more shapes; inspect $reportPath"
+}
 
 Write-Host "Visual audit fixes done: $OutputPath"
 Write-Host "Report saved: $reportPath"

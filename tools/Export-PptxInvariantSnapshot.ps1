@@ -102,7 +102,7 @@ function Get-RunFormatFingerprint {
     param($Shape, [ref]$ReadFailed)
     try {
         $textRange = $Shape.TextFrame2.TextRange
-        $lines = @()
+        $formats = New-Object System.Text.StringBuilder
         foreach ($line in @($textRange.Lines())) {
             foreach ($run in @($line.Runs())) {
                 $text = [string]$run.Text
@@ -111,11 +111,17 @@ function Get-RunFormatFingerprint {
                 try { $color = ('{0:X6}' -f ($run.Font.Fill.ForeColor.RGB -band 0xFFFFFF)) } catch { $color = 'inherit' }
                 $bold = ''
                 try { $bold = [string]$run.Font.Bold } catch { $bold = '?' }
-                $lines += ("{0}|{1}" -f $color, $bold)
+                foreach ($character in $text.ToCharArray()) {
+                    if (-not [char]::IsWhiteSpace($character)) {
+                        [void]$formats.Append(("{0:X4}:{1}|{2};" -f [int]$character, $color, $bold))
+                    }
+                }
             }
         }
-        if ($lines.Count -eq 0) { return $null }
-        return (($lines | Sort-Object -Unique) -join ';')
+        if ($formats.Length -eq 0) { return $null }
+        # Character positions survive run splitting and soft line wrapping;
+        # a set of colors alone cannot detect swapped emphasis positions.
+        return ('v2:' + (Get-TextSha256Hex -Text $formats.ToString()))
     } catch {
         $ReadFailed.Value = $true
         return $null
@@ -308,6 +314,6 @@ try {
     Write-Output $outputFullPath
 } finally {
     if ($null -ne $presentation) { try { $presentation.Close() | Out-Null } catch { }; Release-ComObjectSafe $presentation }
-    if ($null -ne $powerPoint) { try { $powerPoint.Quit() } catch { }; Release-ComObjectSafe $powerPoint }
+    if ($null -ne $powerPoint) { try { Stop-PowerPointApplicationIfIdle -Application $powerPoint } catch { }; Release-ComObjectSafe $powerPoint }
     [GC]::Collect(); [GC]::WaitForPendingFinalizers()
 }

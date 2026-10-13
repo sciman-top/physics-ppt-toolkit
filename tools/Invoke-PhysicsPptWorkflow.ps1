@@ -1573,7 +1573,7 @@ function Export-FinalChainPdf {
             Release-ComObjectSafe $presentation
         }
         if ($null -ne $application) {
-            try { $application.Quit() } catch { }
+            try { Stop-PowerPointApplicationIfIdle -Application $application } catch { }
             Release-ComObjectSafe $application
         }
         [GC]::Collect()

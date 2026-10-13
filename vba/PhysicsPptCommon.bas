@@ -77,6 +77,29 @@ Public Function GetReportPath(ByVal pres As Presentation, ByVal fileName As Stri
     End If
 End Function
 
+Public Function NewWorkingPresentationCopy(ByVal source As Presentation) As Presentation
+    Dim folder As String
+    Dim stem As String
+    Dim outputPath As String
+    Dim backupPath As String
+    Dim suffix As String
+    Dim index As Long
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    folder = source.path
+    If Len(folder) = 0 Then folder = Environ("USERPROFILE") & "\Desktop"
+    stem = fso.GetBaseName(source.Name)
+    suffix = Format$(Now, "yyyymmdd-hhnnss")
+    Do
+        outputPath = folder & "\" & stem & ".vba-" & suffix & "-" & CStr(index) & ".pptm"
+        backupPath = folder & "\" & stem & ".original-" & suffix & "-" & CStr(index) & "." & fso.GetExtensionName(source.Name)
+        index = index + 1
+    Loop While fso.FileExists(outputPath) Or fso.FileExists(backupPath)
+    If Len(source.path) > 0 Then fso.CopyFile source.FullName, backupPath, False
+    source.SaveCopyAs outputPath, ppSaveAsOpenXMLPresentationMacroEnabled
+    Set NewWorkingPresentationCopy = Presentations.Open(outputPath)
+End Function
+
 ' --- Shape helpers ---
 Public Function ShapeHasText(ByVal shp As Shape) As Boolean
     On Error GoTo Failed
@@ -109,7 +132,7 @@ End Function
 Public Function TryGetTextSize(ByVal shp As Shape, ByRef size As Single) As Boolean
     On Error GoTo Failed
     size = shp.TextFrame2.TextRange.Font.Size
-    TryGetTextSize = True
+    TryGetTextSize = (size > 0)
     Exit Function
 Failed:
     TryGetTextSize = False
@@ -164,6 +187,9 @@ Public Sub SaveReport(ByVal report As Collection, ByVal path As String)
     Dim stm As Object
     Dim sb As String
     Dim i As Long
+    Dim errorNumber As Long
+    Dim errorSource As String
+    Dim errorDescription As String
 
     On Error GoTo Cleanup
     sb = "File,Slide,Shape,Issue,Details" & vbCrLf
@@ -179,8 +205,13 @@ Public Sub SaveReport(ByVal report As Collection, ByVal path As String)
     stm.SaveToFile path, 2 ' adSaveCreateOverWrite
 
 Cleanup:
+    errorNumber = Err.Number
+    errorSource = Err.Source
+    errorDescription = Err.Description
+    On Error Resume Next
     If Not stm Is Nothing Then
         If stm.State <> 0 Then stm.Close
     End If
-    If Err.Number <> 0 Then Err.Raise Err.Number, Err.Source, Err.Description
+    On Error GoTo 0
+    If errorNumber <> 0 Then Err.Raise errorNumber, errorSource, errorDescription
 End Sub

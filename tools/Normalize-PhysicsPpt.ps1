@@ -2398,9 +2398,22 @@ function Normalize-Presentation {
             [void][int]::TryParse([string]$cache.expectedSlides, [ref]$cacheExpectedSlides)
         }
         $cacheOutputReady = (Test-Path -LiteralPath $outFile) -and (Get-Item -LiteralPath $outFile).Length -gt 0
+        if ($cacheOutputReady) {
+            $cacheOutputReady = $null -ne $cache -and $null -ne $cache.PSObject.Properties['outputSha256'] -and
+                (Get-FileSha256Hex -Path $outFile) -ceq [string]$cache.outputSha256
+        }
         $cacheArtifactsReady = $NoPdf -or ((Test-Path -LiteralPath $pdfFile) -and ((Get-Item -LiteralPath $pdfFile).Length -gt 0))
+        if (-not $NoPdf -and $cacheArtifactsReady) {
+            $cacheArtifactsReady = $null -ne $cache -and $null -ne $cache.PSObject.Properties['pdfSha256'] -and
+                (Get-FileSha256Hex -Path $pdfFile) -ceq [string]$cache.pdfSha256
+        }
         if (-not [string]::IsNullOrWhiteSpace($ImageOutputDir)) {
             $cacheArtifactsReady = $cacheArtifactsReady -and (Test-PageImageSet -ImageDir $cacheImageDir -ExpectedCount $cacheExpectedSlides)
+            if ($cacheArtifactsReady) {
+                $currentPageHashes = @(Get-ChildItem -LiteralPath $cacheImageDir -Filter 'page-*.png' -File | Sort-Object Name | ForEach-Object { $_.Name + ':' + (Get-FileSha256Hex -Path $_.FullName) })
+                $cacheArtifactsReady = $null -ne $cache.PSObject.Properties['pageHashes'] -and
+                    ((@($cache.pageHashes) -join "`n") -ceq ($currentPageHashes -join "`n"))
+            }
         }
         $cacheGeometryRestored = $false
         if ($null -ne $cache -and $null -ne $cache.PSObject.Properties['geometryRestore']) {
@@ -2414,6 +2427,11 @@ function Normalize-Presentation {
         }
     }
 
+    # A failed rebuild must not leave a previous successful cache available
+    # for the deferred geometry pass to bless with stale export artifacts.
+    if (-not $ReportOnly -and (Test-Path -LiteralPath $cachePath)) {
+        Remove-Item -LiteralPath $cachePath -Force
+    }
     if (-not $NoBackup -and -not $ReportOnly) {
         if (-not (Test-Path -LiteralPath $backupDir)) { New-Item -ItemType Directory -Path $backupDir -Force | Out-Null }
         # The backup name mirrors the collision-safe output stem so same-named
@@ -2878,7 +2896,7 @@ if ($DegreeOfParallelism -gt 1 -and $files.Count -gt 1) {
         Write-Progress -Activity $activity -Completed
     } finally {
         if ($null -ne $pp) {
-            try { $pp.Quit() | Out-Null } catch { }
+            try { Stop-PowerPointApplicationIfIdle -Application $pp | Out-Null } catch { }
             Release-ComObjectSafe -ComObject $pp
         }
         [System.GC]::Collect()
@@ -2903,6 +2921,12 @@ foreach ($pending in $script:PendingGeometryRestores.ToArray()) {
         if (Test-Path -LiteralPath $pendingCachePath) {
             $pendingCache = Get-Content -LiteralPath $pendingCachePath -Raw -Encoding UTF8 | ConvertFrom-Json
             $pendingCache | Add-Member -MemberType NoteProperty -Name geometryRestore -Value 'completed' -Force
+            $pendingCache | Add-Member -MemberType NoteProperty -Name outputSha256 -Value (Get-FileSha256Hex -Path $pending.OutputPath) -Force
+            $pendingCache | Add-Member -MemberType NoteProperty -Name pdfSha256 -Value $(if ([string]::IsNullOrWhiteSpace($pendingCache.pdfPath)) { '' } else { Get-FileSha256Hex -Path $pendingCache.pdfPath }) -Force
+            $pageHashes = if ([string]::IsNullOrWhiteSpace($pendingCache.imageDir)) { @() } else {
+                @(Get-ChildItem -LiteralPath $pendingCache.imageDir -Filter 'page-*.png' -File | Sort-Object Name | ForEach-Object { $_.Name + ':' + (Get-FileSha256Hex -Path $_.FullName) })
+            }
+            $pendingCache | Add-Member -MemberType NoteProperty -Name pageHashes -Value @($pageHashes) -Force
             [System.IO.File]::WriteAllText($pendingCachePath, ($pendingCache | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding -ArgumentList $false))
         }
     } catch {

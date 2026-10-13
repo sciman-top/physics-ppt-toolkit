@@ -376,7 +376,7 @@ function Export-SourcePageImages {
         Write-Warning "PowerPoint original export setup failed: $($_.Exception.Message)"
     } finally {
         if ($null -ne $pp) {
-            try { $pp.Quit() | Out-Null } catch { }
+            try { Stop-PowerPointApplicationIfIdle -Application $pp | Out-Null } catch { }
         }
         Release-ComObjectSafe -ComObject $presentations
         Release-ComObjectSafe -ComObject $pp

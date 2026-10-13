@@ -1,0 +1,770 @@
+﻿$script:NsA14 = 'http://schemas.microsoft.com/office/drawing/2010/main'
+$script:NsA = 'http://schemas.openxmlformats.org/drawingml/2006/main'
+$script:NsM = 'http://schemas.openxmlformats.org/officeDocument/2006/math'
+$script:NsMathMl = 'http://www.w3.org/1998/Math/MathML'
+$script:FormulaWhitelist = @()
+$script:FormulaColorHex = ''
+$script:FormulaSizeHundredths = 3200
+$script:FormulaEastAsianFontName = '宋体'
+
+$configPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'config\physics-ppt-style.config.json'
+if (Test-Path -LiteralPath $configPath) {
+    try {
+        $config = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($null -ne $config.formulaWhitelist) {
+            $script:FormulaWhitelist = @($config.formulaWhitelist)
+        }
+        $configuredFormulaColor = [string]$config.colors.formulaBlue
+        if ($configuredFormulaColor -notmatch '^#[0-9A-Fa-f]{6}$') {
+            throw "colors.formulaBlue must be a six-digit #RRGGBB value; received '$configuredFormulaColor'."
+        }
+        $script:FormulaColorHex = $configuredFormulaColor.TrimStart('#').ToUpperInvariant()
+        $configuredFormulaSize = [int]$config.fontSizes.formulaStandalone
+        if ($configuredFormulaSize -ge 8 -and $configuredFormulaSize -le 96) {
+            $script:FormulaSizeHundredths = $configuredFormulaSize * 100
+        }
+        if ($null -ne $config.fonts.mathEastAsian -and -not [string]::IsNullOrWhiteSpace([string]$config.fonts.mathEastAsian)) {
+            $script:FormulaEastAsianFontName = [string]$config.fonts.mathEastAsian
+        }
+    } catch {
+        throw "Formula config could not be loaded: $($_.Exception.Message)"
+    }
+}
+if ([string]::IsNullOrWhiteSpace($script:FormulaColorHex)) {
+    throw "Formula config is missing colors.formulaBlue; OMML candidate generation cannot choose a safe color."
+}
+
+function Get-CurrentWhitelistRule {
+    param([string]$FormulaText)
+    # Shared helper keeps matching case-sensitive and warns on invalid patterns.
+    return (Test-FormulaWhitelistMatch -Text $FormulaText -Whitelist $script:FormulaWhitelist)
+}
+
+function New-Element {
+    param(
+        [System.Xml.XmlDocument]$Document,
+        [string]$Prefix,
+        [string]$Name,
+        [string]$Namespace
+    )
+    return $Document.CreateElement($Prefix, $Name, $Namespace)
+}
+
+function Add-TextElement {
+    param(
+        [System.Xml.XmlDocument]$Document,
+        [System.Xml.XmlElement]$Parent,
+        [string]$Prefix,
+        [string]$Name,
+        [string]$Namespace,
+        [string]$Text
+    )
+    $el = New-Element -Document $Document -Prefix $Prefix -Name $Name -Namespace $Namespace
+    $el.AppendChild($Document.CreateTextNode($Text)) | Out-Null
+    $Parent.AppendChild($el) | Out-Null
+    return $el
+}
+
+function Get-FormulaTokens {
+    param([string]$Text)
+    $tokens = New-Object System.Collections.Generic.List[object]
+    $i = 0
+    while ($i -lt $Text.Length) {
+        $ch = $Text[$i]
+        if ([char]::IsWhiteSpace($ch)) { $i++; continue }
+
+        if ([string]$ch -cmatch '^[0-9]$') {
+            $start = $i
+            $i++
+            while ($i -lt $Text.Length -and ([string]$Text[$i] -cmatch '^[0-9.]$')) { $i++ }
+            $tokens.Add([pscustomobject]@{ Kind = 'Number'; Text = $Text.Substring($start, $i - $start) }) | Out-Null
+            continue
+        }
+
+        if ([string]$ch -cmatch '^[A-Za-z]$') {
+            $start = $i
+            $i++
+            while ($i -lt $Text.Length -and ([string]$Text[$i] -cmatch '^[A-Za-z]$')) { $i++ }
+            $tokens.Add([pscustomobject]@{ Kind = 'Word'; Text = $Text.Substring($start, $i - $start) }) | Out-Null
+            continue
+        }
+
+        if ([string]$ch -eq '\' -and $i + 1 -lt $Text.Length -and [string]$Text[$i + 1] -eq '/') {
+            # Escaped linear slash: unit notation like J\/(kg·℃) must stay a
+            # linear division run instead of becoming a stacked fraction.
+            $tokens.Add([pscustomobject]@{ Kind = 'Char'; Text = '\/' }) | Out-Null
+            $i += 2
+            continue
+        }
+
+        $tokens.Add([pscustomobject]@{ Kind = 'Char'; Text = [string]$ch }) | Out-Null
+        $i++
+    }
+    return ,$tokens.ToArray()
+}
+
+function Convert-SuperscriptSubscriptCharsToAscii {
+    # OLE crops routinely transcribe as Unicode super/subscript glyphs (10³, R₁).
+    # The controlled grammar only accepts ASCII ^/_ markers, so merge each run of
+    # script glyphs into ^( ) / _( ) before tokenizing; unknown glyphs pass through.
+    param([string]$Text)
+    if ([string]::IsNullOrEmpty($Text)) { return $Text }
+    $superscriptMap = @{
+        '⁰' = '0'; '¹' = '1'; '²' = '2'; '³' = '3'; '⁴' = '4'; '⁵' = '5'
+        '⁶' = '6'; '⁷' = '7'; '⁸' = '8'; '⁹' = '9'; '⁺' = '+'; '⁻' = '-'; 'ⁿ' = 'n'
+    }
+    $subscriptMap = @{
+        '₀' = '0'; '₁' = '1'; '₂' = '2'; '₃' = '3'; '₄' = '4'; '₅' = '5'
+        '₆' = '6'; '₇' = '7'; '₈' = '8'; '₉' = '9'; '₊' = '+'; '₋' = '-'
+    }
+    $builder = New-Object System.Text.StringBuilder
+    $i = 0
+    while ($i -lt $Text.Length) {
+        $ch = [string]$Text[$i]
+        if ($superscriptMap.ContainsKey($ch)) {
+            $digits = New-Object System.Text.StringBuilder
+            while ($i -lt $Text.Length -and $superscriptMap.ContainsKey([string]$Text[$i])) {
+                [void]$digits.Append($superscriptMap[[string]$Text[$i]])
+                $i++
+            }
+            [void]$builder.Append('^(').Append($digits.ToString()).Append(')')
+            continue
+        }
+        if ($subscriptMap.ContainsKey($ch)) {
+            $digits = New-Object System.Text.StringBuilder
+            while ($i -lt $Text.Length -and $subscriptMap.ContainsKey([string]$Text[$i])) {
+                [void]$digits.Append($subscriptMap[[string]$Text[$i]])
+                $i++
+            }
+            [void]$builder.Append('_(').Append($digits.ToString()).Append(')')
+            continue
+        }
+        [void]$builder.Append($ch)
+        $i++
+    }
+    return $builder.ToString()
+}
+
+function Parse-FormulaAtom {
+    param(
+        [object[]]$Tokens,
+        [ref]$Index
+    )
+    if ($Index.Value -ge $Tokens.Count) { throw 'Formula ended where an atom was required.' }
+    $token = $Tokens[$Index.Value]
+    if ([string]$token.Text -eq '(') {
+        $Index.Value++
+        $inner = Parse-FormulaExpression -Tokens $Tokens -Index $Index
+        if ($Index.Value -ge $Tokens.Count -or [string]$Tokens[$Index.Value].Text -ne ')') {
+            throw 'Unmatched opening parenthesis in UnicodeMath.'
+        }
+        $Index.Value++
+        $node = [pscustomobject]@{ Kind = 'Group'; Inner = $inner }
+    } else {
+        if ([string]$token.Text -in @(')', '=', '/', '_', '^', '\/')) {
+            throw "Unexpected formula token '$($token.Text)'."
+        }
+        $Index.Value++
+        $node = [pscustomobject]@{ Kind = 'Token'; Text = [string]$token.Text; TokenKind = [string]$token.Kind }
+    }
+
+    while ($Index.Value -lt $Tokens.Count -and [string]$Tokens[$Index.Value].Text -in @('_', '^')) {
+        $marker = [string]$Tokens[$Index.Value].Text
+        $Index.Value++
+        if ($Index.Value -lt $Tokens.Count -and [string]$Tokens[$Index.Value].Text -in @('+', '-', '−', '×', '·', '⋅', '∙', '*', '/')) {
+            throw "Sub/superscript must not begin with operator '$($Tokens[$Index.Value].Text)'; parenthesize it (10^(-3)) instead."
+        }
+        $scriptNode = Parse-FormulaAtom -Tokens $Tokens -Index $Index
+        # A parenthesized script group is grouping syntax, not visible
+        # content: 10^(-3) must render as a raised -3 without parentheses.
+        # The canonical UnicodeMath emitter re-adds ^(...) so round-trips
+        # stay stable; only the structural renderers see the bare script.
+        if ($scriptNode.Kind -eq 'Group') { $scriptNode = $scriptNode.Inner }
+        if ($marker -eq '_') {
+            $node = [pscustomobject]@{ Kind = 'Subscript'; Base = $node; Script = $scriptNode }
+        } else {
+            $node = [pscustomobject]@{ Kind = 'Superscript'; Base = $node; Script = $scriptNode }
+        }
+    }
+    return $node
+}
+
+function Parse-FormulaSequence {
+    param(
+        [object[]]$Tokens,
+        [ref]$Index
+    )
+    $items = New-Object System.Collections.Generic.List[object]
+    while ($Index.Value -lt $Tokens.Count) {
+        $text = [string]$Tokens[$Index.Value].Text
+        if ($text -in @('=', ')')) { break }
+        if ($text -eq '\/') {
+            # Linear slash escape: an ordinary division run, never a fraction.
+            $items.Add([pscustomobject]@{ Kind = 'Token'; Text = '\/'; TokenKind = 'Operator' }) | Out-Null
+            $Index.Value++
+            continue
+        }
+        if ($text -eq '/') {
+            if ($items.Count -eq 0) { throw 'Fraction has no numerator.' }
+            $Index.Value++
+            if ($Index.Value -ge $Tokens.Count) { throw 'Fraction has no denominator.' }
+            $nextText = [string]$Tokens[$Index.Value].Text
+            if ($nextText -in @('=', ')', '/', '×', '·', '⋅', '∙', '*', '+', '-', '−')) {
+                throw 'Fraction has no denominator.'
+            }
+            # Denominator = the juxtaposed run after '/': implicit multiplication
+            # stays inside it (Q/mΔt), an explicit operator ends it so the chain
+            # continues at the outer level (J/(kg·℃)×50kg×20℃).
+            $denominatorItems = New-Object System.Collections.Generic.List[object]
+            do {
+                $denominatorItems.Add((Parse-FormulaAtom -Tokens $Tokens -Index $Index)) | Out-Null
+            } while ($Index.Value -lt $Tokens.Count -and
+                ( [string]$Tokens[$Index.Value].Text -notin @('=', ')', '×', '·', '⋅', '∙', '*', '+', '-', '−', '<', '>', '≤', '≥') ))
+            $right = if ($denominatorItems.Count -eq 1) { $denominatorItems[0] } else { [pscustomobject]@{ Kind = 'Sequence'; Items = @($denominatorItems.ToArray()) } }
+            $left = if ($items.Count -eq 1) { $items[0] } else { [pscustomobject]@{ Kind = 'Sequence'; Items = @($items.ToArray()) } }
+            # The fraction rejoins the current sequence instead of returning, so
+            # an explicit multiplication after it (…/(kg·℃)×50kg) stays parseable.
+            $items.Clear()
+            $items.Add([pscustomobject]@{ Kind = 'Fraction'; Numerator = $left; Denominator = $right }) | Out-Null
+            continue
+        }
+        $items.Add((Parse-FormulaAtom -Tokens $Tokens -Index $Index)) | Out-Null
+    }
+    if ($items.Count -eq 0) { throw 'Formula contains an empty expression.' }
+    if ($items.Count -eq 1) { return $items[0] }
+    return [pscustomobject]@{ Kind = 'Sequence'; Items = @($items.ToArray()) }
+}
+
+function Parse-FormulaExpression {
+    param(
+        [object[]]$Tokens,
+        [ref]$Index
+    )
+    if ($Index.Value -lt $Tokens.Count -and [string]$Tokens[$Index.Value].Text -eq '=') {
+        $Index.Value++
+        if ($Index.Value -ge $Tokens.Count -or [string]$Tokens[$Index.Value].Text -eq ')') {
+            throw 'Leading equality has no right-hand expression.'
+        }
+        $right = Parse-FormulaExpression -Tokens $Tokens -Index $Index
+        return [pscustomobject]@{ Kind = 'LeadingEquality'; Right = $right }
+    }
+    $left = Parse-FormulaSequence -Tokens $Tokens -Index $Index
+    if ($Index.Value -lt $Tokens.Count -and [string]$Tokens[$Index.Value].Text -eq '=') {
+        $Index.Value++
+        if ($Index.Value -ge $Tokens.Count -or [string]$Tokens[$Index.Value].Text -eq ')') {
+            # Trailing equality (e.g. the derivation-link segment "P=W/t=")
+            # is a legitimate OLE fragment: the original MathType object ends
+            # with an equals sign that continues into the next object.
+            return [pscustomobject]@{ Kind = 'TrailingEquality'; Left = $left }
+        }
+        $right = Parse-FormulaExpression -Tokens $Tokens -Index $Index
+        return [pscustomobject]@{ Kind = 'Equality'; Left = $left; Right = $right }
+    }
+    return $left
+}
+
+function Find-FormulaStructureIssue {
+    # Equality fragments are legal ONLY as: the whole expression, or the right
+    # side of an equality (derivation chains end with "a=b="). Everything else
+    # parses and round-trips but is not canonical: "a==b", "=a=", "(a=)",
+    # "a/(b=)" must be rejected per the §4.1 deterministic-rejection promise.
+    param($Node, [bool]$AllowLeadingEquality, [bool]$AllowTrailingEquality)
+    $kind = [string]$Node.Kind
+    if ($kind -eq 'LeadingEquality') {
+        if (-not $AllowLeadingEquality) { return 'LeadingEquality nested inside a larger expression' }
+        return (Find-FormulaStructureIssue -Node $Node.Right -AllowLeadingEquality $false -AllowTrailingEquality $false)
+    }
+    if ($kind -eq 'TrailingEquality') {
+        if (-not $AllowTrailingEquality) { return 'TrailingEquality nested inside a larger expression' }
+        return (Find-FormulaStructureIssue -Node $Node.Left -AllowLeadingEquality $false -AllowTrailingEquality $false)
+    }
+    if ($kind -eq 'Equality') {
+        $leftIssue = Find-FormulaStructureIssue -Node $Node.Left -AllowLeadingEquality $false -AllowTrailingEquality $false
+        if ($leftIssue) { return $leftIssue }
+        return (Find-FormulaStructureIssue -Node $Node.Right -AllowLeadingEquality $false -AllowTrailingEquality $true)
+    }
+    $children = @()
+    switch ($kind) {
+        'Sequence' { $children = @($Node.Items) }
+        'Group' { $children = @($Node.Inner) }
+        'Fraction' { $children = @($Node.Numerator, $Node.Denominator) }
+        'Subscript' { $children = @($Node.Base, $Node.Script) }
+        'Superscript' { $children = @($Node.Base, $Node.Script) }
+        default { return $null }
+    }
+    foreach ($child in $children) {
+        $childIssue = Find-FormulaStructureIssue -Node $child -AllowLeadingEquality $false -AllowTrailingEquality $false
+        if ($childIssue) { return $childIssue }
+    }
+    return $null
+}
+
+function Parse-FormulaAst {
+    param([string]$UnicodeMath)
+    if ([string]::IsNullOrWhiteSpace($UnicodeMath)) { throw 'UnicodeMath is empty.' }
+    $normalized = Convert-SuperscriptSubscriptCharsToAscii -Text $UnicodeMath
+    $tokens = Get-FormulaTokens -Text $normalized
+    if ($tokens.Count -eq 0) { throw 'UnicodeMath contains no tokens.' }
+    $index = 0
+    $ast = Parse-FormulaExpression -Tokens $tokens -Index ([ref]$index)
+    if ($index -ne $tokens.Count) { throw "Unsupported trailing formula token '$($tokens[$index].Text)'." }
+    $structureIssue = Find-FormulaStructureIssue -Node $ast -AllowLeadingEquality $true -AllowTrailingEquality $true
+    if ($null -ne $structureIssue) { throw "Unsupported formula structure: $structureIssue." }
+    return $ast
+}
+
+function Get-FormulaTokenRole {
+    # Gate contract: the gate extracts and executes parser functions from this
+    # file, so this name must stay defined here. The canonical classification
+    # table is Get-PhysicsTokenRole in PhysicsPpt.Common.ps1 — do not fork it.
+    param([string]$Token)
+    return (Get-PhysicsTokenRole -Token $Token)
+}
+
+function Convert-AstToFormulaIrToken {
+    param($Node)
+    switch ([string]$Node.Kind) {
+        'Token' {
+            $text = [string]$Node.Text
+            # The escaped linear slash renders as a plain division slash.
+            if ($text -eq '\/') { $text = '/' }
+            $role = Get-FormulaTokenRole -Token $text
+            # In the controlled physics grammar, adjacent Latin letters are
+            # implicit multiplication (cm, qm, ...), not one opaque symbol.
+            # Keep known units intact so kg/J remain upright unit tokens.
+            if ($Node.TokenKind -eq 'Word' -and $text.Length -gt 1 -and $role -ne 'Unit') {
+                return [ordered]@{ type = 'Sequence'; implicitMultiplication = $true; children = @($text.ToCharArray() | ForEach-Object {
+                    $part = [string]$_
+                    [ordered]@{ type = 'Identifier'; text = $part; role = 'Variable' }
+                }) }
+            }
+            $type = switch ($role) {
+                'Number' { 'Number' }
+                'Variable' { 'Identifier' }
+                'Unit' { 'Unit' }
+                'Chinese' { 'Text' }
+                'Operator' { 'Operator' }
+                default { 'Text' }
+            }
+            return [ordered]@{ type = $type; text = $text; role = $role }
+        }
+        'Sequence' {
+            return [ordered]@{ type = 'Sequence'; children = @($Node.Items | ForEach-Object { Convert-AstToFormulaIrToken -Node $_ }) }
+        }
+        'Equality' {
+            return [ordered]@{
+                type = 'Equality'
+                children = @(
+                    (Convert-AstToFormulaIrToken -Node $Node.Left)
+                    ([ordered]@{ type = 'Operator'; text = '='; role = 'Operator' })
+                    (Convert-AstToFormulaIrToken -Node $Node.Right)
+                )
+            }
+        }
+        'LeadingEquality' {
+            return [ordered]@{
+                type = 'LeadingEquality'
+                children = @(
+                    ([ordered]@{ type = 'Operator'; text = '='; role = 'Operator' })
+                    (Convert-AstToFormulaIrToken -Node $Node.Right)
+                )
+            }
+        }
+        'TrailingEquality' {
+            return [ordered]@{
+                type = 'TrailingEquality'
+                children = @(
+                    (Convert-AstToFormulaIrToken -Node $Node.Left)
+                    ([ordered]@{ type = 'Operator'; text = '='; role = 'Operator' })
+                )
+            }
+        }
+        'Group' {
+            return [ordered]@{
+                type = 'Delimiter'
+                delimiter = 'parentheses'
+                children = @(
+                    ([ordered]@{ type = 'Operator'; text = '('; role = 'Operator' })
+                    (Convert-AstToFormulaIrToken -Node $Node.Inner)
+                    ([ordered]@{ type = 'Operator'; text = ')'; role = 'Operator' })
+                )
+            }
+        }
+        'Fraction' {
+            return [ordered]@{
+                type = 'Fraction'
+                numerator = Convert-AstToFormulaIrToken -Node $Node.Numerator
+                denominator = Convert-AstToFormulaIrToken -Node $Node.Denominator
+            }
+        }
+        'Subscript' {
+            return [ordered]@{
+                type = 'Subscript'
+                base = Convert-AstToFormulaIrToken -Node $Node.Base
+                script = Convert-AstToFormulaIrToken -Node $Node.Script
+            }
+        }
+        'Superscript' {
+            return [ordered]@{
+                type = 'Superscript'
+                base = Convert-AstToFormulaIrToken -Node $Node.Base
+                script = Convert-AstToFormulaIrToken -Node $Node.Script
+            }
+        }
+        default { throw "Unsupported FormulaIR AST node kind: $($Node.Kind)" }
+    }
+}
+
+function Convert-AstToUnicodeMath {
+    param($Node)
+    switch ([string]$Node.Kind) {
+        'Token' { return ([string]$Node.Text) }
+        'Sequence' { return (@($Node.Items | ForEach-Object { Convert-AstToUnicodeMath -Node $_ }) -join '') }
+        'Equality' {
+            return ((Convert-AstToUnicodeMath -Node $Node.Left) + '=' + (Convert-AstToUnicodeMath -Node $Node.Right))
+        }
+        'LeadingEquality' {
+            return ('=' + (Convert-AstToUnicodeMath -Node $Node.Right))
+        }
+        'TrailingEquality' {
+            return ((Convert-AstToUnicodeMath -Node $Node.Left) + '=')
+        }
+        'Group' {
+            return ('(' + (Convert-AstToUnicodeMath -Node $Node.Inner) + ')')
+        }
+        'Fraction' {
+            return ((Convert-AstToUnicodeMath -Node $Node.Numerator) + '/' + (Convert-AstToUnicodeMath -Node $Node.Denominator))
+        }
+        'Subscript' {
+            $scriptText = Convert-AstToUnicodeMath -Node $Node.Script
+            if ($Node.Script.Kind -eq 'Token' -and $scriptText.Length -eq 1) {
+                return ((Convert-AstToUnicodeMath -Node $Node.Base) + '_' + $scriptText)
+            }
+            # Multi-token or multi-character scripts need the parentheses to
+            # re-parse unambiguously (R_(12), Q_(吸放)).
+            return ((Convert-AstToUnicodeMath -Node $Node.Base) + '_(' + $scriptText + ')')
+        }
+        'Superscript' {
+            # The script group is unwrapped at parse time, so the canonical
+            # form always re-parenthesizes (10^(3), 10^(-3)); a bare 10^-3
+            # would not re-parse and is banned by the writing rules.
+            return ((Convert-AstToUnicodeMath -Node $Node.Base) + '^(' + (Convert-AstToUnicodeMath -Node $Node.Script) + ')')
+        }
+        default { throw "Unsupported FormulaIR UnicodeMath node kind: $($Node.Kind)" }
+    }
+}
+
+function Convert-FormulaTokenToTex {
+    param(
+        [string]$Text,
+        [string]$Role
+    )
+    switch ($Text) {
+        '\/' { return '/' }
+        'Δ' { return '\Delta' }
+        'η' { return '\eta' }
+        'θ' { return '\theta' }
+        'μ' { return '\mu' }
+        '×' { return '\times' }
+        '⋅' { return '\cdot' }
+        '·' { return '\cdot' }
+        '∙' { return '\cdot' }
+        '−' { return '-' }
+        default {
+            if ($Role -eq 'Chinese') { return ('\text{' + $Text + '}') }
+            if ($Role -eq 'Unit') { return ('\mathrm{' + $Text + '}') }
+            return $Text
+        }
+    }
+}
+
+function Convert-AstToCanonicalTex {
+    param($Node)
+    switch ([string]$Node.Kind) {
+        'Token' {
+            return (Convert-FormulaTokenToTex -Text ([string]$Node.Text) -Role (Get-FormulaTokenRole -Token ([string]$Node.Text)))
+        }
+        'Sequence' { return (@($Node.Items | ForEach-Object { Convert-AstToCanonicalTex -Node $_ }) -join '') }
+        'Equality' {
+            return ((Convert-AstToCanonicalTex -Node $Node.Left) + '=' + (Convert-AstToCanonicalTex -Node $Node.Right))
+        }
+        'LeadingEquality' {
+            return ('=' + (Convert-AstToCanonicalTex -Node $Node.Right))
+        }
+        'TrailingEquality' {
+            return ((Convert-AstToCanonicalTex -Node $Node.Left) + '=')
+        }
+        'Group' {
+            return ('(' + (Convert-AstToCanonicalTex -Node $Node.Inner) + ')')
+        }
+        'Fraction' {
+            return ('\frac{' + (Convert-AstToCanonicalTex -Node $Node.Numerator) + '}{' + (Convert-AstToCanonicalTex -Node $Node.Denominator) + '}')
+        }
+        'Subscript' {
+            return ((Convert-AstToCanonicalTex -Node $Node.Base) + '_{' + (Convert-AstToCanonicalTex -Node $Node.Script) + '}')
+        }
+        'Superscript' {
+            return ((Convert-AstToCanonicalTex -Node $Node.Base) + '^{' + (Convert-AstToCanonicalTex -Node $Node.Script) + '}')
+        }
+        default { throw "Unsupported FormulaIR TeX node kind: $($Node.Kind)" }
+    }
+}
+
+function New-RunProperties {
+    param(
+        [System.Xml.XmlDocument]$Document,
+        [string]$Role = 'Variable',
+        [bool]$IsScript = $false
+    )
+    $mathRunProperties = New-Element -Document $Document -Prefix 'm' -Name 'rPr' -Namespace $script:NsM
+    $mathRunProperties.AppendChild((New-Element -Document $Document -Prefix 'm' -Name 'nor' -Namespace $script:NsM)) | Out-Null
+
+    $rPr = New-Element -Document $Document -Prefix 'a' -Name 'rPr' -Namespace $script:NsA
+    $isChinese = $Role -in @('Chinese', 'Text')
+    $rPr.SetAttribute('lang', $(if ($isChinese) { 'zh-CN' } else { 'en-US' }))
+    $rPr.SetAttribute('altLang', $(if ($isChinese) { 'en-US' } else { 'zh-CN' }))
+    $size = $script:FormulaSizeHundredths
+    if ($IsScript) { $size = [Math]::Max(800, [int][Math]::Round($size * 0.72)) }
+    $rPr.SetAttribute('sz', [string]$size)
+    # Candidate fragments must use the same regular-weight baseline as the
+    # apply-time style pass; bold Chinese subscripts inflate OLE tight boxes.
+    $rPr.SetAttribute('b', '0')
+    $rPr.SetAttribute('i', $(if ($Role -eq 'Variable') { '1' } else { '0' }))
+
+    $solidFill = New-Element -Document $Document -Prefix 'a' -Name 'solidFill' -Namespace $script:NsA
+    $srgb = New-Element -Document $Document -Prefix 'a' -Name 'srgbClr' -Namespace $script:NsA
+    $srgb.SetAttribute('val', $script:FormulaColorHex)
+    $solidFill.AppendChild($srgb) | Out-Null
+    $rPr.AppendChild($solidFill) | Out-Null
+
+    $latin = New-Element -Document $Document -Prefix 'a' -Name 'latin' -Namespace $script:NsA
+    $latin.SetAttribute('typeface', 'Cambria Math')
+    $rPr.AppendChild($latin) | Out-Null
+    $ea = New-Element -Document $Document -Prefix 'a' -Name 'ea' -Namespace $script:NsA
+    $ea.SetAttribute('typeface', $script:FormulaEastAsianFontName)
+    $rPr.AppendChild($ea) | Out-Null
+    return @($mathRunProperties, $rPr)
+}
+
+function Add-OmmlRun {
+    param(
+        [System.Xml.XmlDocument]$Document,
+        [System.Xml.XmlElement]$Parent,
+        [string]$Text,
+        [string]$Role = 'Variable',
+        [bool]$IsScript = $false
+    )
+    if ([string]::IsNullOrEmpty($Text)) { return }
+    $run = New-Element -Document $Document -Prefix 'm' -Name 'r' -Namespace $script:NsM
+    $properties = @(New-RunProperties -Document $Document -Role $Role -IsScript $IsScript)
+    $run.AppendChild($properties[0]) | Out-Null
+    $run.AppendChild($properties[1]) | Out-Null
+    Add-TextElement -Document $Document -Parent $run -Prefix 'm' -Name 't' -Namespace $script:NsM -Text $Text | Out-Null
+    $Parent.AppendChild($run) | Out-Null
+}
+
+function Add-OmmlNode {
+    param(
+        [System.Xml.XmlDocument]$Document,
+        [System.Xml.XmlElement]$Parent,
+        $Node,
+        [bool]$IsScript = $false
+    )
+    switch ([string]$Node.Kind) {
+        'Token' {
+            $tokenText = [string]$Node.Text
+            if ($tokenText -eq '\/') { $tokenText = '/' }
+            $tokenRole = Get-FormulaTokenRole -Token $tokenText
+            if ($Node.TokenKind -eq 'Word' -and $tokenText.Length -gt 1 -and $tokenRole -ne 'Unit') {
+                foreach ($part in $tokenText.ToCharArray()) {
+                    Add-OmmlRun -Document $Document -Parent $Parent -Text ([string]$part) -Role 'Variable' -IsScript $IsScript
+                }
+            } else {
+                Add-OmmlRun -Document $Document -Parent $Parent -Text $tokenText -Role $tokenRole -IsScript $IsScript
+            }
+            break
+        }
+        'Sequence' {
+            foreach ($item in @($Node.Items)) { Add-OmmlNode -Document $Document -Parent $Parent -Node $item -IsScript:$IsScript }
+            break
+        }
+        'Equality' {
+            Add-OmmlNode -Document $Document -Parent $Parent -Node $Node.Left -IsScript:$IsScript
+            Add-OmmlRun -Document $Document -Parent $Parent -Text '=' -Role 'Operator' -IsScript:$IsScript
+            Add-OmmlNode -Document $Document -Parent $Parent -Node $Node.Right -IsScript:$IsScript
+            break
+        }
+        'LeadingEquality' {
+            Add-OmmlRun -Document $Document -Parent $Parent -Text '=' -Role 'Operator' -IsScript:$IsScript
+            Add-OmmlNode -Document $Document -Parent $Parent -Node $Node.Right -IsScript:$IsScript
+            break
+        }
+        'TrailingEquality' {
+            Add-OmmlNode -Document $Document -Parent $Parent -Node $Node.Left -IsScript:$IsScript
+            Add-OmmlRun -Document $Document -Parent $Parent -Text '=' -Role 'Operator' -IsScript:$IsScript
+            break
+        }
+        'Group' {
+            Add-OmmlRun -Document $Document -Parent $Parent -Text '(' -Role 'Operator' -IsScript:$IsScript
+            Add-OmmlNode -Document $Document -Parent $Parent -Node $Node.Inner -IsScript:$IsScript
+            Add-OmmlRun -Document $Document -Parent $Parent -Text ')' -Role 'Operator' -IsScript:$IsScript
+            break
+        }
+        'Fraction' {
+            $frac = New-Element -Document $Document -Prefix 'm' -Name 'f' -Namespace $script:NsM
+            $fracPr = New-Element -Document $Document -Prefix 'm' -Name 'fPr' -Namespace $script:NsM
+            $ctrlPr = New-Element -Document $Document -Prefix 'm' -Name 'ctrlPr' -Namespace $script:NsM
+            $ctrlProperties = @(New-RunProperties -Document $Document -Role 'Operator' -IsScript:$IsScript)
+            $ctrlPr.AppendChild($ctrlProperties[1]) | Out-Null
+            $fracPr.AppendChild($ctrlPr) | Out-Null
+            $frac.AppendChild($fracPr) | Out-Null
+            $num = New-Element -Document $Document -Prefix 'm' -Name 'num' -Namespace $script:NsM
+            Add-OmmlNode -Document $Document -Parent $num -Node $Node.Numerator -IsScript:$IsScript
+            $den = New-Element -Document $Document -Prefix 'm' -Name 'den' -Namespace $script:NsM
+            Add-OmmlNode -Document $Document -Parent $den -Node $Node.Denominator -IsScript:$IsScript
+            $frac.AppendChild($num) | Out-Null
+            $frac.AppendChild($den) | Out-Null
+            $Parent.AppendChild($frac) | Out-Null
+            break
+        }
+        'Subscript' {
+            $sub = New-Element -Document $Document -Prefix 'm' -Name 'sSub' -Namespace $script:NsM
+            $base = New-Element -Document $Document -Prefix 'm' -Name 'e' -Namespace $script:NsM
+            $scriptNode = New-Element -Document $Document -Prefix 'm' -Name 'sub' -Namespace $script:NsM
+            Add-OmmlNode -Document $Document -Parent $base -Node $Node.Base -IsScript:$IsScript
+            Add-OmmlNode -Document $Document -Parent $scriptNode -Node $Node.Script -IsScript:$true
+            $sub.AppendChild($base) | Out-Null
+            $sub.AppendChild($scriptNode) | Out-Null
+            $Parent.AppendChild($sub) | Out-Null
+            break
+        }
+        'Superscript' {
+            $sup = New-Element -Document $Document -Prefix 'm' -Name 'sSup' -Namespace $script:NsM
+            $base = New-Element -Document $Document -Prefix 'm' -Name 'e' -Namespace $script:NsM
+            $scriptNode = New-Element -Document $Document -Prefix 'm' -Name 'sup' -Namespace $script:NsM
+            Add-OmmlNode -Document $Document -Parent $base -Node $Node.Base -IsScript:$IsScript
+            Add-OmmlNode -Document $Document -Parent $scriptNode -Node $Node.Script -IsScript:$true
+            $sup.AppendChild($base) | Out-Null
+            $sup.AppendChild($scriptNode) | Out-Null
+            $Parent.AppendChild($sup) | Out-Null
+            break
+        }
+        default { throw "Unsupported Formula AST node kind: $($Node.Kind)" }
+    }
+}
+
+function New-OmmlFragment {
+    param([string]$UnicodeMath)
+    $doc = New-Object System.Xml.XmlDocument
+    $root = New-Element -Document $doc -Prefix 'a14' -Name 'm' -Namespace $script:NsA14
+    $root.SetAttribute('xmlns:a14', $script:NsA14)
+    $root.SetAttribute('xmlns:a', $script:NsA)
+    $root.SetAttribute('xmlns:m', $script:NsM)
+    $doc.AppendChild($root) | Out-Null
+    $oMathPara = New-Element -Document $doc -Prefix 'm' -Name 'oMathPara' -Namespace $script:NsM
+    $oMath = New-Element -Document $doc -Prefix 'm' -Name 'oMath' -Namespace $script:NsM
+    $oMathPara.AppendChild($oMath) | Out-Null
+    $root.AppendChild($oMathPara) | Out-Null
+    Add-OmmlNode -Document $doc -Parent $oMath -Node (Parse-FormulaAst -UnicodeMath $UnicodeMath)
+    return $doc
+}
+
+function Add-MathMlNode {
+    param(
+        [System.Xml.XmlDocument]$Document,
+        [System.Xml.XmlElement]$Parent,
+        $Node
+    )
+    switch ([string]$Node.Kind) {
+        'Token' {
+            $tokenText = [string]$Node.Text
+            if ($tokenText -eq '\/') { $tokenText = '/' }
+            $role = Get-FormulaTokenRole -Token $tokenText
+            if ($Node.TokenKind -eq 'Word' -and $tokenText.Length -gt 1 -and $role -ne 'Unit') {
+                foreach ($part in $tokenText.ToCharArray()) {
+                    Add-MathMlNode -Document $Document -Parent $Parent -Node ([pscustomobject]@{ Kind = 'Token'; Text = [string]$part; TokenKind = 'Word' })
+                }
+                break
+            }
+            $tag = switch ($role) { 'Number' { 'mn'; break } 'Operator' { 'mo'; break } 'Chinese' { 'mtext'; break } default { 'mi' } }
+            $el = Add-TextElement -Document $Document -Parent $Parent -Prefix '' -Name $tag -Namespace $script:NsMathMl -Text $tokenText
+            if ($role -eq 'Unit') { $el.SetAttribute('mathvariant', 'normal') }
+            break
+        }
+        'Sequence' { foreach ($item in @($Node.Items)) { Add-MathMlNode -Document $Document -Parent $Parent -Node $item }; break }
+        'Equality' {
+            Add-MathMlNode -Document $Document -Parent $Parent -Node $Node.Left
+            Add-TextElement -Document $Document -Parent $Parent -Prefix '' -Name 'mo' -Namespace $script:NsMathMl -Text '=' | Out-Null
+            Add-MathMlNode -Document $Document -Parent $Parent -Node $Node.Right
+            break
+        }
+        'LeadingEquality' {
+            Add-TextElement -Document $Document -Parent $Parent -Prefix '' -Name 'mo' -Namespace $script:NsMathMl -Text '=' | Out-Null
+            Add-MathMlNode -Document $Document -Parent $Parent -Node $Node.Right
+            break
+        }
+        'TrailingEquality' {
+            Add-MathMlNode -Document $Document -Parent $Parent -Node $Node.Left
+            Add-TextElement -Document $Document -Parent $Parent -Prefix '' -Name 'mo' -Namespace $script:NsMathMl -Text '=' | Out-Null
+            break
+        }
+        'Group' {
+            Add-TextElement -Document $Document -Parent $Parent -Prefix '' -Name 'mo' -Namespace $script:NsMathMl -Text '(' | Out-Null
+            Add-MathMlNode -Document $Document -Parent $Parent -Node $Node.Inner
+            Add-TextElement -Document $Document -Parent $Parent -Prefix '' -Name 'mo' -Namespace $script:NsMathMl -Text ')' | Out-Null
+            break
+        }
+        'Fraction' {
+            $frac = New-Element -Document $Document -Prefix '' -Name 'mfrac' -Namespace $script:NsMathMl
+            $num = New-Element -Document $Document -Prefix '' -Name 'mrow' -Namespace $script:NsMathMl
+            $den = New-Element -Document $Document -Prefix '' -Name 'mrow' -Namespace $script:NsMathMl
+            Add-MathMlNode -Document $Document -Parent $num -Node $Node.Numerator
+            Add-MathMlNode -Document $Document -Parent $den -Node $Node.Denominator
+            $frac.AppendChild($num) | Out-Null
+            $frac.AppendChild($den) | Out-Null
+            $Parent.AppendChild($frac) | Out-Null
+            break
+        }
+        'Subscript' {
+            $sub = New-Element -Document $Document -Prefix '' -Name 'msub' -Namespace $script:NsMathMl
+            Add-MathMlNode -Document $Document -Parent $sub -Node $Node.Base
+            Add-MathMlNode -Document $Document -Parent $sub -Node $Node.Script
+            $Parent.AppendChild($sub) | Out-Null
+            break
+        }
+        'Superscript' {
+            $sup = New-Element -Document $Document -Prefix '' -Name 'msup' -Namespace $script:NsMathMl
+            Add-MathMlNode -Document $Document -Parent $sup -Node $Node.Base
+            Add-MathMlNode -Document $Document -Parent $sup -Node $Node.Script
+            $Parent.AppendChild($sup) | Out-Null
+            break
+        }
+        default { throw "Unsupported Formula AST node kind: $($Node.Kind)" }
+    }
+}
+
+function New-MathMlFragment {
+    param([string]$UnicodeMath)
+    $doc = New-Object System.Xml.XmlDocument
+    $math = New-Element -Document $doc -Prefix '' -Name 'math' -Namespace $script:NsMathMl
+    $math.SetAttribute('xmlns', $script:NsMathMl)
+    $math.SetAttribute('display', 'block')
+    $doc.AppendChild($math) | Out-Null
+    $mrow = New-Element -Document $doc -Prefix '' -Name 'mrow' -Namespace $script:NsMathMl
+    $math.AppendChild($mrow) | Out-Null
+    Add-MathMlNode -Document $doc -Parent $mrow -Node (Parse-FormulaAst -UnicodeMath $UnicodeMath)
+    return $doc
+}
+
+function Test-FormulaOmmlFragment {
+    param([string]$Path, [string]$UnicodeMath)
+    try {
+        $actual = New-Object System.Xml.XmlDocument
+        $actual.PreserveWhitespace = $false
+        $actual.Load($Path)
+        $expected = New-OmmlFragment -UnicodeMath $UnicodeMath
+        # Rebuild from the current rule rather than trusting CSV metadata or
+        # an editable digest stored alongside the fragment.
+        return [string]::Equals($actual.DocumentElement.OuterXml, $expected.DocumentElement.OuterXml, [StringComparison]::Ordinal)
+    } catch { return $false }
+}

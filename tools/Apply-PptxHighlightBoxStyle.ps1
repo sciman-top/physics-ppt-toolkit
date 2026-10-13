@@ -116,6 +116,9 @@ if ($CornerRadiusAdj -lt 0) { $CornerRadiusAdj = Get-BoxRuleNumber -Name 'corner
 if ($BorderWeightPt -le 0 -or $BorderWeightPt -gt 6) { throw "BorderWeightPt out of range: $BorderWeightPt" }
 if ($CornerRadiusAdj -le 0 -or $CornerRadiusAdj -ge 0.5) { throw "CornerRadiusAdj out of range: $CornerRadiusAdj" }
 
+$PptxPath = [IO.Path]::GetFullPath($PptxPath)
+$sourceExtension = [IO.Path]::GetExtension($PptxPath)
+if ($sourceExtension -notin @('.pptx', '.pptm')) { throw 'Input must be .pptx or .pptm.' }
 $stem = Get-CanonicalDeckStem -FileName $PptxPath
 # Re-running on an already callout-styled file keeps the canonical output name
 # and the same version lineage instead of compounding '.callout.callout';
@@ -124,6 +127,7 @@ $stem = Get-CanonicalDeckStem -FileName $PptxPath
 # _v<N> is a layout-gate violation).
 if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
     $OutputPath = [System.IO.Path]::GetFullPath($OutputPath)
+    if ($OutputPath -ieq $PptxPath -or [IO.Path]::GetExtension($OutputPath) -ine $sourceExtension) { throw 'Output must be a distinct path retaining the source format.' }
     $deliveryRoot = Split-Path -Parent (Split-Path -Parent $OutputPath)
     $deliveryDir = Split-Path -Parent $OutputPath
     $reportDir = Join-Path $deliveryRoot '00_检查报告'
@@ -143,9 +147,9 @@ if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
     foreach ($dir in @($deliveryDir, $reportDir, $backupDir)) {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
-    Copy-Item -LiteralPath $PptxPath -Destination (Join-Path $backupDir "$stem.pptx") -Force
+    Copy-Item -LiteralPath $PptxPath -Destination (Join-Path $backupDir "$stem$sourceExtension") -Force
 
-    $workingPptx = Join-Path $deliveryDir "$stem.callout.pptx"
+    $workingPptx = Join-Path $deliveryDir "$stem.callout$sourceExtension"
     Copy-Item -LiteralPath $PptxPath -Destination $workingPptx -Force
 }
 
@@ -328,7 +332,7 @@ try {
         try { $presentation.Close() } catch { }
         Release-ComObjectSafe $presentation
     }
-    try { $application.Quit() } catch { }
+    try { Stop-PowerPointApplicationIfIdle -Application $application } catch { }
     Release-ComObjectSafe $application
 }
 

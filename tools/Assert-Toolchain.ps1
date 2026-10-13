@@ -244,7 +244,7 @@ function Test-PowerPointCom {
     } finally {
         if ($null -ne $pp) {
             try {
-                if ($existing.Count -eq 0) { $pp.Quit() | Out-Null }
+                if ($existing.Count -eq 0) { Stop-PowerPointApplicationIfIdle -Application $pp }
             } catch {
                 # Release below is still useful even if PowerPoint refuses Quit.
             }

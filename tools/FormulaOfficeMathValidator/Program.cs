@@ -16,18 +16,25 @@ if (args.Length == 0 || args.Contains("--help", StringComparer.OrdinalIgnoreCase
 var pptxPath = args[0];
 var maxErrors = 20;
 string? jsonOutputPath = null;
-for (var i = 1; i < args.Length - 1; i++)
+for (var i = 1; i < args.Length; i++)
 {
-    if (args[i].Equals("--max-errors", StringComparison.OrdinalIgnoreCase) &&
-        int.TryParse(args[i + 1], out var parsed) &&
-        parsed > 0)
+    var option = args[i];
+    if (i + 1 >= args.Length || args[i + 1].StartsWith("--", StringComparison.Ordinal))
+    {
+        Console.Error.WriteLine($"Missing value for {option}.");
+        return 2;
+    }
+    var value = args[++i];
+    if (option.Equals("--max-errors", StringComparison.OrdinalIgnoreCase) &&
+        int.TryParse(value, out var parsed) && parsed > 0)
     {
         maxErrors = parsed;
     }
-    else if (args[i].Equals("--json", StringComparison.OrdinalIgnoreCase))
+    else if (option.Equals("--json", StringComparison.OrdinalIgnoreCase))
     {
-        jsonOutputPath = args[i + 1];
+        jsonOutputPath = value;
     }
+    else { Console.Error.WriteLine($"Invalid option or value: {option} {value}"); return 2; }
 }
 
 void WriteValidatorJson(string json)
@@ -35,7 +42,8 @@ void WriteValidatorJson(string json)
     Console.WriteLine(json);
     if (!string.IsNullOrEmpty(jsonOutputPath))
     {
-        File.WriteAllText(jsonOutputPath, json);
+        try { File.WriteAllText(jsonOutputPath, json); }
+        catch (Exception ex) { throw new IOException($"Could not write validator JSON: {ex.Message}"); }
     }
 }
 
@@ -61,15 +69,13 @@ catch (Exception ex)
         0,
         1,
         new List<ValidationIssue> { new ValidationIssue($"Package could not be opened or validated: {ex.Message}", string.Empty, string.Empty) });
-    Console.WriteLine(JsonSerializer.Serialize(failure, new JsonSerializerOptions { WriteIndented = true }));
-    if (!string.IsNullOrEmpty(jsonOutputPath))
-    {
-        File.WriteAllText(jsonOutputPath, JsonSerializer.Serialize(failure, new JsonSerializerOptions { WriteIndented = true }));
-    }
+    try { WriteValidatorJson(JsonSerializer.Serialize(failure, new JsonSerializerOptions { WriteIndented = true })); }
+    catch (IOException writeError) { Console.Error.WriteLine(writeError.Message); }
     return 1;
 }
 var json = JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true });
-WriteValidatorJson(json);
+try { WriteValidatorJson(json); }
+catch (IOException ex) { Console.Error.WriteLine(ex.Message); return 1; }
 return result.OpenXmlErrorCount == 0 ? 0 : 1;
 
 static ValidationResult ValidatePresentation(string pptxPath, int maxErrors)
@@ -103,7 +109,8 @@ static ValidationResult ValidatePresentation(string pptxPath, int maxErrors)
     {
         var xpath = error.Path?.XPath ?? string.Empty;
         var description = error.Description ?? string.Empty;
-        if (xpath.Contains("a14:m", StringComparison.Ordinal) && description.Contains("leaf element", StringComparison.Ordinal))
+        if (error.Node?.NamespaceUri == Drawing2010Namespace && error.Node.LocalName == "m" &&
+            description.Contains("leaf element", StringComparison.Ordinal))
         {
             continue;
         }
@@ -111,20 +118,45 @@ static ValidationResult ValidatePresentation(string pptxPath, int maxErrors)
     }
 
     var errors = blocking
-        .Take(maxErrors)
         .Select(e => new ValidationIssue(
             e.Description ?? string.Empty,
             e.Path?.XPath ?? string.Empty,
             e.Part?.Uri.ToString() ?? string.Empty))
         .ToList();
 
+    // The SDK leaf model cannot traverse the wrapper's math children. Parse
+    // those children as typed OMML and validate them independently.
+    foreach (var part in document.GetAllParts())
+    {
+        if (part.RootElement is null) continue;
+        var xml = System.Xml.Linq.XDocument.Parse(part.RootElement.OuterXml);
+        foreach (var wrapper in xml.Descendants(System.Xml.Linq.XName.Get("m", Drawing2010Namespace)))
+        {
+            var children = wrapper.Elements().ToList();
+            if (children.Count != 1 || children[0].Name.NamespaceName != MathNamespace ||
+                children[0].Name.LocalName is not ("oMath" or "oMathPara"))
+            {
+                errors.Add(new ValidationIssue("a14:m must contain exactly one OMML math root.", "a14:m", part.Uri.ToString()));
+                continue;
+            }
+            var child = children[0];
+            OpenXmlElement math = child.Name.LocalName == "oMath"
+                ? new DocumentFormat.OpenXml.Math.OfficeMath(child.ToString())
+                : new DocumentFormat.OpenXml.Math.Paragraph(child.ToString());
+            foreach (var error in validator.Validate(math))
+            {
+                errors.Add(new ValidationIssue(error.Description ?? string.Empty, error.Path?.XPath ?? "a14:m", part.Uri.ToString()));
+            }
+        }
+    }
+
     return new ValidationResult(
         Path.GetFullPath(pptxPath),
         slideParts.Count,
         a14MathCount,
         officeMathCount,
-        blocking.Count,
-        errors);
+        errors.Count,
+        errors.Take(maxErrors).ToList());
 }
 
 static List<SlidePart> GetSlidePartsInPresentationOrder(PresentationPart? presentationPart)

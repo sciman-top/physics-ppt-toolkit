@@ -54,6 +54,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'PhysicsPpt.Common.ps1')
+. (Join-Path $PSScriptRoot 'PhysicsPpt.Formula.ps1')
 
 $script:NsA = 'http://schemas.openxmlformats.org/drawingml/2006/main'
 $script:NsP = 'http://schemas.openxmlformats.org/presentationml/2006/main'
@@ -343,6 +344,10 @@ try {
         $fragmentPath = [string]$candidate.OmmlFragment
         if ([string]::IsNullOrWhiteSpace($fragmentPath) -or -not (Test-Path -LiteralPath $fragmentPath)) {
             Add-ReportRow -Rows $reportRows -File $row.File -Slide $slideNo -Shape $shapeName -Issue 'FormulaOmmlFragmentMissing' -Details $fragmentPath
+            continue
+        }
+        if (-not (Test-FormulaOmmlFragment -Path $fragmentPath -UnicodeMath $ruleTarget)) {
+            Add-ReportRow -Rows $reportRows -File $row.File -Slide $slideNo -Shape $shapeName -Issue 'FormulaWhitelistRejected' -Details 'OMML fragment differs from the current whitelist formula.'
             continue
         }
 

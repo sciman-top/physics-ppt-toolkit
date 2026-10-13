@@ -108,16 +108,23 @@ function Test-StepReusable {
     param($Step)
     if ($null -eq $Step) { return $false }
     if ([string]$Step.status -ne 'Passed') { return $false }
+    if ($null -eq $Step.PSObject.Properties['outputHashes']) { return $false }
+    if (@($Step.outputHashes).Count -ne @($Step.outputs).Count) { return $false }
+    $outputIndex = 0
     foreach ($output in @($Step.outputs)) {
-        if ([string]::IsNullOrWhiteSpace([string]$output) -or -not (Test-Path -LiteralPath [string]$output)) { return $false }
+        if ([string]::IsNullOrWhiteSpace([string]$output) -or -not (Test-Path -LiteralPath ([string]$output))) { return $false }
+        if ((Get-FileSha256 -Path $output) -cne [string]$Step.outputHashes[$outputIndex]) { return $false }
+        $outputIndex++
     }
-    return (New-StepSignature -StepName ([string]$Step.name) -InputPaths @([string[]]$Step.inputs) -Flags @([string[]]$step.flags) -eq [string]$Step.signature)
+    return ((New-StepSignature -StepName ([string]$Step.name) -InputPaths @([string[]]$Step.inputs) -Flags @([string[]]$step.flags)) -ceq [string]$Step.signature)
 }
 
 # --- signature inputs: child tool scripts + style config (hashed once) ---
 $signatureToolFiles = @(
     'Export-FormulaCarrierInventory.ps1', 'Export-PptxVisualAudit.ps1', 'Export-FormulaOleCrops.ps1',
-    'Export-FormulaOleMapping.ps1', 'Export-FormulaOmmlCandidates.ps1', 'Apply-FormulaOmmlForOle.ps1'
+    'Export-FormulaOleMapping.ps1', 'Export-FormulaOmmlCandidates.ps1', 'Apply-FormulaOmmlForOle.ps1',
+    'PhysicsPpt.Common.ps1', 'PhysicsPpt.Formula.ps1', 'Invoke-FormulaOleBatch.ps1',
+    'FormulaOfficeMathValidator/Program.cs', 'FormulaOfficeMathValidator/FormulaOfficeMathValidator.csproj'
 )
 $script:SignatureToolHash = $null
 $toolHashMaterial = @()
@@ -197,7 +204,11 @@ function Invoke-BatchStep {
     )
     $existing = $null
     if ($Resume) { $existing = Get-RecordedStep -StepName $StepName }
-    if ($null -ne $existing -and (Test-StepReusable -Step $existing)) {
+    $expectedSignature = New-StepSignature -StepName $StepName -InputPaths $Inputs -Flags $Flags
+    $samePaths = $null -ne $existing -and
+        ((@($existing.inputs) -join "`n") -ceq (@($Inputs) -join "`n")) -and
+        ((@($existing.outputs) -join "`n") -ceq (@($Outputs) -join "`n"))
+    if ($samePaths -and [string]$existing.signature -ceq $expectedSignature -and (Test-StepReusable -Step $existing)) {
         Write-Output ("[resume] step '{0}' reused (signature unchanged, outputs present)." -f $StepName)
         return
     }
@@ -207,6 +218,11 @@ function Invoke-BatchStep {
     }
     Write-Output ("[step] {0}" -f $StepName)
     $null = & $Action
+    foreach ($output in $Outputs) {
+        if ([string]::IsNullOrWhiteSpace($output) -or -not (Test-Path -LiteralPath $output)) {
+            throw "Step '$StepName' did not produce its required output: $output"
+        }
+    }
     $batchSteps.Add([pscustomobject]@{
         name = $StepName
         status = 'Passed'
@@ -214,12 +230,14 @@ function Invoke-BatchStep {
         flags = @($Flags)
         signature = New-StepSignature -StepName $StepName -InputPaths $Inputs -Flags $Flags
         outputs = @($Outputs)
+        outputHashes = @($Outputs | ForEach-Object { Get-FileSha256 -Path $_ })
         at = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     }) | Out-Null
 }
 
 $inputSha256 = Get-FileSha256 -Path $inputFullPath
 $goldSetSha256 = Get-FileSha256 -Path $goldSetPath
+$completedManifestWritten = $false
 try {
     # --- step 1: carrier inventory ---
     $inventoryDir = Join-Path $reportDir 'inventory'
@@ -232,7 +250,7 @@ try {
     $beforeAuditDir = Join-Path $reportDir 'before-audit'
     $resolvedPagesDir = $PagesDir
     if ([string]::IsNullOrWhiteSpace($resolvedPagesDir) -and -not $SkipVisualAudit) {
-        Invoke-BatchStep -StepName 'before-audit' -Inputs @($inputFullPath) -Outputs @((Join-Path $beforeAuditDir 'pptx-visual-audit.csv')) -Action {
+        Invoke-BatchStep -StepName 'before-audit' -Inputs @($inputFullPath) -Outputs @((Join-Path $beforeAuditDir 'pptx-visual-audit.csv'), $beforeAuditDir) -Action {
             & (Join-Path $PSScriptRoot 'Export-PptxVisualAudit.ps1') -InputPath $inputFullPath -OutputDir $beforeAuditDir | Out-Null
         }
         $resolvedPagesDir = Join-Path $beforeAuditDir 'pages'
@@ -245,7 +263,7 @@ try {
     # --- step 3: OLE crops ---
     $cropsDir = Join-Path $reportDir 'crops'
     $cropsCsv = Join-Path $cropsDir 'ole-crops.csv'
-    Invoke-BatchStep -StepName 'crops' -Inputs @($inputFullPath, $inventoryJson, $resolvedPagesDir) -Outputs @($cropsCsv) -Action {
+    Invoke-BatchStep -StepName 'crops' -Inputs @($inputFullPath, $inventoryJson, $resolvedPagesDir) -Outputs @($cropsCsv, $cropsDir) -Action {
         & (Join-Path $PSScriptRoot 'Export-FormulaOleCrops.ps1') -CarrierInventoryJson $inventoryJson -PagesDir $resolvedPagesDir -OutputDir $cropsDir | Out-Null
     }
 
@@ -259,7 +277,7 @@ try {
     # --- step 5: OMML candidates ---
     $fragmentsDir = Join-Path $reportDir 'omml-fragments'
     $candidatesCsv = Join-Path $fragmentsDir 'formula-omml-candidates.csv'
-    Invoke-BatchStep -StepName 'candidates' -Inputs @($reviewCsv, $goldSetPath) -Outputs @($candidatesCsv) -Action {
+    Invoke-BatchStep -StepName 'candidates' -Inputs @($reviewCsv, $goldSetPath) -Outputs @($candidatesCsv, $fragmentsDir) -Action {
         & (Join-Path $PSScriptRoot 'Export-FormulaOmmlCandidates.ps1') -FormulaReviewCsv $reviewCsv -OutputDir $fragmentsDir | Out-Null
     }
 
@@ -267,15 +285,22 @@ try {
     $outputName = [System.IO.Path]::GetFileName($inputFullPath)
     $outputPptx = Join-Path $deliveryDir $outputName
     $applyReport = Join-Path $reportDir 'formula-ole-apply-report.csv'
-    Invoke-BatchStep -StepName 'apply' -Inputs @($inputFullPath, $mappingCsv, $candidatesCsv) -Outputs @($outputPptx, $applyReport) -Action {
+    Invoke-BatchStep -StepName 'apply' -Inputs @($inputFullPath, $mappingCsv, $fragmentsDir) -Outputs @($outputPptx, $applyReport) -Action {
         & (Join-Path $PSScriptRoot 'Apply-FormulaOmmlForOle.ps1') -InputPath $inputFullPath -MappingCsv $mappingCsv -OmmlCandidateCsv $candidatesCsv -OutputPath $outputPptx -ReportPath $applyReport -MaxItems $MaxItems | Out-Null
     }
 
     # --- step 7: Open XML validator ---
     $validatorJson = Join-Path $reportDir 'validator.json'
-    $dotnetPath = Join-Path $env:USERPROFILE '.dotnet\dotnet.exe'
+    $dotnetPath = $null
+    foreach ($candidatePath in @(Get-DotNetCommandCandidates)) {
+        $sdkOutput = Invoke-NativeCommandWithEapGuard -FilePath $candidatePath -Arguments @('--list-sdks')
+        if ($LASTEXITCODE -eq 0 -and @($sdkOutput | Where-Object { [string]$_ -match '^10\.' }).Count -gt 0) {
+            $dotnetPath = $candidatePath
+            break
+        }
+    }
     Invoke-BatchStep -StepName 'validator' -Inputs @($outputPptx) -Outputs @($validatorJson) -Action {
-        if (-not (Test-Path -LiteralPath $dotnetPath)) { throw "dotnet not found for the Open XML validator: $dotnetPath" }
+        if ([string]::IsNullOrWhiteSpace($dotnetPath)) { throw 'No .NET 10 SDK found for the Open XML validator.' }
         $validatorOutput = & $dotnetPath run --project (Join-Path $PSScriptRoot 'FormulaOfficeMathValidator\FormulaOfficeMathValidator.csproj') -c Release -- $outputPptx --max-errors 10 --json $validatorJson
         $validatorOutput | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "FormulaOfficeMathValidator failed with exit code $LASTEXITCODE." }
@@ -284,7 +309,7 @@ try {
     # --- step 8: after visual audit (PowerPoint open proof + pages) ---
     if (-not $SkipVisualAudit) {
         $afterAuditDir = Join-Path $reportDir 'after-audit'
-        Invoke-BatchStep -StepName 'after-audit' -Inputs @($outputPptx) -Outputs @((Join-Path $afterAuditDir 'pptx-visual-audit.csv')) -Action {
+        Invoke-BatchStep -StepName 'after-audit' -Inputs @($outputPptx) -Outputs @((Join-Path $afterAuditDir 'pptx-visual-audit.csv'), $afterAuditDir) -Action {
             & (Join-Path $PSScriptRoot 'Export-PptxVisualAudit.ps1') -InputPath $outputPptx -OutputDir $afterAuditDir | Out-Null
         }
     }
@@ -301,10 +326,10 @@ try {
     $batchStatus = 'Passed'
     $writeBackAllowed = $true
     $batchNote = 'Explicit migration batch on a new copy. Source PPTX untouched; mc:Fallback keeps original OLE objects.'
-    if ($refusedCount -gt 0 -and $replacedCount -eq 0) {
+    if ($replacedCount -eq 0) {
         $batchStatus = 'Failed'
         $writeBackAllowed = $false
-        $batchNote = 'Every mapping row was refused and nothing was replaced; treat this delivery as inert and investigate the apply report.'
+        $batchNote = 'Nothing was replaced; treat this delivery as inert and investigate the mapping/apply reports.'
     } elseif ($refusedCount -gt 0) {
         $batchStatus = 'Degraded'
         $batchNote = 'Some mapping rows were refused; see formula-ole-apply-report.csv for the per-row reasons before accepting this delivery.'
@@ -327,23 +352,18 @@ try {
         note = $batchNote
     }
     Write-Utf8BomText -Text ($manifest | ConvertTo-Json -Depth 10) -Path $manifestPath
+    $completedManifestWritten = $true
     if ($batchStatus -eq 'Passed') {
         Write-Output ("Batch passed: {0}" -f $deliveryFullPath)
     } else {
         Write-Output ("Batch {0}: {1}" -f $batchStatus, $deliveryFullPath)
     }
     Write-Output ("Output: {0} (replaced={1}; refused={2})" -f $outputPptx, $manifest.applySummary.replaced, $manifest.applySummary.refused)
+    if ($batchStatus -eq 'Failed') { throw "Formula migration batch failed: $batchNote" }
 } catch {
     # A failure after the Passed manifest was written (e.g. a reporting crash)
     # must not clobber the completed batch record with a Failed status.
-    $completedManifestOnDisk = $false
-    if (Test-Path -LiteralPath $manifestPath) {
-        try {
-            $existingManifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-            $completedManifestOnDisk = ([string]$existingManifest.status -eq 'Passed')
-        } catch { $completedManifestOnDisk = $false }
-    }
-    if (-not $completedManifestOnDisk) {
+    if (-not $completedManifestWritten) {
         $manifest = [ordered]@{
             schemaVersion = 1
             generatedAt = Get-Date -Format 'yyyy-MM-dd hh:mm:ss'

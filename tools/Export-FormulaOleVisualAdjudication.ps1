@@ -81,6 +81,9 @@ foreach ($row in $rows) {
     if (([string]$row.PageSha256).ToLowerInvariant() -ne ([string]$crop.PageSha256).ToLowerInvariant()) { throw "Page hash mismatch: $id" }
     if (-not (Test-Path -LiteralPath ([string]$row.CropPng) -PathType Leaf)) { throw "Crop image not found: $id" }
     if ((Get-FileSha256Hex -Path ([string]$row.CropPng)) -ne ([string]$row.CropSha256).ToLowerInvariant()) { throw "Crop image has drifted since export: $id" }
+    $pagePath = Join-Path ([string]$cropManifest.pages.dir) ('slide-{0:d3}.png' -f [int]$record.source.slide)
+    if (-not (Test-Path -LiteralPath $pagePath -PathType Leaf) -or
+        (Get-FileSha256Hex -Path $pagePath) -ne ([string]$row.PageSha256).ToLowerInvariant()) { throw "Page image has drifted since export: $id" }
     $status = [string]$row.Status
     $target = [string]$row.TargetCarrier
     if ($status -notin @('CandidateOnly', 'ManualRequired', 'OriginalKept')) { throw "Unsupported visual adjudication status '$status' for $id" }

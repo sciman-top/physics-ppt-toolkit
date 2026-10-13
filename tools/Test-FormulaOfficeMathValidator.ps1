@@ -25,6 +25,33 @@ if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) { throw 'dotnet is 
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('formula-omml-validator-fault-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
 try {
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    foreach ($partPath in @('ppt/slides/slide1.xml', 'ppt/slideMasters/slideMaster1.xml', 'ppt/slideLayouts/slideLayout1.xml')) {
+    foreach ($invalidMath in @($false, $true)) {
+        $mathPptx = Join-Path $testRoot ("$([IO.Path]::GetFileNameWithoutExtension($partPath))-$invalidMath.pptx")
+        Copy-Item -LiteralPath $FixturePptx -Destination $mathPptx
+        $archive = [IO.Compression.ZipFile]::Open($mathPptx, [IO.Compression.ZipArchiveMode]::Update)
+        try {
+            $entry = $archive.GetEntry($partPath)
+            $reader = New-Object IO.StreamReader($entry.Open())
+            try { [xml]$slide = $reader.ReadToEnd() } finally { $reader.Dispose() }
+            $ns = New-Object Xml.XmlNamespaceManager($slide.NameTable)
+            $ns.AddNamespace('a', 'http://schemas.openxmlformats.org/drawingml/2006/main')
+            $paragraph = $slide.SelectSingleNode('//a:p', $ns)
+            $paragraph.RemoveAll()
+            $mathContent = if ($invalidMath) { '<m:bogus />' } else { '<m:r><m:t>x</m:t></m:r>' }
+            $paragraph.InnerXml = '<a14:m xmlns:a14="http://schemas.microsoft.com/office/drawing/2010/main" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:oMathPara><m:oMath>' + $mathContent + '</m:oMath></m:oMathPara></a14:m>'
+            $entry.Delete()
+            $writer = New-Object IO.StreamWriter($archive.CreateEntry($partPath).Open(), (New-Object Text.UTF8Encoding($false)))
+            try { $writer.Write($slide.OuterXml) } finally { $writer.Dispose() }
+        } finally { $archive.Dispose() }
+        & dotnet run --project $project -- $mathPptx --json (Join-Path $testRoot 'math-result.json') | Out-Null
+        $mathExit = $LASTEXITCODE
+        if ($invalidMath -and $mathExit -eq 0) { throw 'Invalid OMML inside a14:m escaped validation.' }
+        if (-not $invalidMath -and $mathExit -ne 0) { throw 'Valid OMML inside a14:m was rejected.' }
+    }
+    }
     $corruptPptx = Join-Path $testRoot 'malformed-slide.pptx'
     $resultJson = Join-Path $testRoot 'validator-result.json'
     Copy-Item -LiteralPath $FixturePptx -Destination $corruptPptx -Force

@@ -6,6 +6,7 @@ Option Explicit
 ' Requires: PhysicsPptCommon module (shared constants and utilities).
 
 Public Sub NormalizeCurrentPresentation()
+    On Error GoTo Failed
     GuardActivePresentation
 
     Dim pres As Presentation
@@ -16,7 +17,7 @@ Public Sub NormalizeCurrentPresentation()
     Dim report As Collection
     Dim reportPath As String
 
-    Set pres = ActivePresentation
+    Set pres = NewWorkingPresentationCopy(ActivePresentation)
     Set report = New Collection
 
     For Each sld In pres.Slides
@@ -63,13 +64,17 @@ ShapeFailed:
             Resume NextShape
 
 NextShape:
-            On Error GoTo 0
+            On Error GoTo Failed
         Next shp
     Next sld
 
     reportPath = GetReportPath(pres, "physics-ppt-vba-normalize-report.csv")
     SaveReport report, reportPath
+    pres.Save
     MsgBox "规范化完成。报告已保存：" & vbCrLf & reportPath, vbInformation
+    Exit Sub
+Failed:
+    MsgBox "规范化未完成，原始课件保留。错误：" & Err.Description, vbExclamation
 End Sub
 
 Private Function IsTitleShape(ByVal shp As Shape) As Boolean

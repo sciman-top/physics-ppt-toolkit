@@ -5,6 +5,7 @@ Option Explicit
 ' Requires: PhysicsPptCommon module (shared constants and utilities).
 
 Public Sub ReportCurrentPresentationStyle()
+    On Error GoTo Failed
     GuardActivePresentation
 
     Dim pres As Presentation
@@ -13,6 +14,7 @@ Public Sub ReportCurrentPresentationStyle()
     Dim shpText As String
     Dim report As Collection
     Dim reportPath As String
+    Dim textSize As Single
 
     Set pres = ActivePresentation
     Set report = New Collection
@@ -25,18 +27,21 @@ Public Sub ReportCurrentPresentationStyle()
                 If IsFormulaCandidateText(shpText) Then
                     report.Add CsvLine(pres.Name, CStr(sld.SlideIndex), shp.Name, "FormulaCandidate", shpText)
                 End If
-                If GetTextSize(shp) < SIZE_MINIMUM Then
-                    report.Add CsvLine(pres.Name, CStr(sld.SlideIndex), shp.Name, "SmallText", CStr(GetTextSize(shp)) & " pt")
+                If TryGetTextSize(shp, textSize) Then
+                    If textSize < SIZE_MINIMUM Then report.Add CsvLine(pres.Name, CStr(sld.SlideIndex), shp.Name, "SmallText", CStr(textSize) & " pt")
                 End If
             End If
             If shp.Type = MSO_MEDIA Then
                 report.Add CsvLine(pres.Name, CStr(sld.SlideIndex), shp.Name, "MediaObject", "This slide may need black video background.")
             End If
-            On Error GoTo 0
+            On Error GoTo Failed
         Next shp
     Next sld
 
     reportPath = GetReportPath(pres, "physics-ppt-vba-report-only.csv")
     SaveReport report, reportPath
     MsgBox "检查报告已保存：" & vbCrLf & reportPath, vbInformation
+    Exit Sub
+Failed:
+    MsgBox "检查报告未完成。错误：" & Err.Description, vbExclamation
 End Sub

@@ -76,6 +76,9 @@ if (-not (Test-Path -LiteralPath $PptxPath)) {
     throw "Input PPTX not found: $PptxPath"
 }
 
+$PptxPath = [IO.Path]::GetFullPath($PptxPath)
+$sourceExtension = [IO.Path]::GetExtension($PptxPath)
+if ($sourceExtension -notin @('.pptx', '.pptm')) { throw 'Input must be .pptx or .pptm.' }
 $stem = Get-CanonicalDeckStem -FileName $PptxPath
 # Re-running on an already branded file keeps the canonical output name and
 # the same version lineage instead of compounding '.brand.brand'; compound
@@ -84,6 +87,7 @@ $stem = Get-CanonicalDeckStem -FileName $PptxPath
 # a layout-gate violation).
 if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
     $OutputPath = [System.IO.Path]::GetFullPath($OutputPath)
+    if ($OutputPath -ieq $PptxPath -or [IO.Path]::GetExtension($OutputPath) -ine $sourceExtension) { throw 'Output must be a distinct path retaining the source format.' }
     $deliveryRoot = Split-Path -Parent (Split-Path -Parent $OutputPath)
     $deliveryDir = Split-Path -Parent $OutputPath
     $pageImageDir = Join-Path $deliveryDir '页面图片'
@@ -105,9 +109,9 @@ if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
     foreach ($dir in @($deliveryDir, $pageImageDir, $reportDir, $backupDir)) {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
-    Copy-Item -LiteralPath $PptxPath -Destination (Join-Path $backupDir "$stem.pptx") -Force
+    Copy-Item -LiteralPath $PptxPath -Destination (Join-Path $backupDir "$stem$sourceExtension") -Force
 
-    $workingPptx = Join-Path $deliveryDir "$stem.brand.pptx"
+    $workingPptx = Join-Path $deliveryDir "$stem.brand$sourceExtension"
     Copy-Item -LiteralPath $PptxPath -Destination $workingPptx -Force
 }
 
@@ -779,7 +783,7 @@ try {
         Release-ComObjectSafe $presentation
     }
     if ($null -ne $application) {
-        try { $application.Quit() } catch { }
+        try { Stop-PowerPointApplicationIfIdle -Application $application } catch { }
         Release-ComObjectSafe $application
     }
 }

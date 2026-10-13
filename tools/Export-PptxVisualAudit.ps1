@@ -79,6 +79,7 @@ function Add-AuditRow {
     $Rows.Add([pscustomobject]@{
         Timestamp = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
         File = $File
+        FilePath = $InputPath
         Slide = $Slide
         Shape = $Shape
         Issue = $Issue
@@ -504,7 +505,7 @@ try {
         Release-ComObjectSafe -ComObject $pres
     }
     if ($null -ne $pp) {
-        try { $pp.Quit() | Out-Null } catch { }
+        try { Stop-PowerPointApplicationIfIdle -Application $pp | Out-Null } catch { }
         Release-ComObjectSafe -ComObject $pp
     }
     [System.GC]::Collect()

@@ -427,16 +427,30 @@ function New-PowerPointApplication {
     param([switch]$Visible)
 
     $application = New-Object -ComObject PowerPoint.Application
-    try {
+    $hasOpenDocuments = $true
+    try { $hasOpenDocuments = ($application.Presentations.Count -gt 0 -or $application.ProtectedViewWindows.Count -gt 0) } catch { }
+    if (-not $hasOpenDocuments) { try {
         $application.Visible = $(if ($Visible) { -1 } else { 0 })
     } catch {
         # A COM host may not expose Visible until its first call; keep going and
         # let the caller report any later automation failure.
-    }
-    if (-not $Visible) {
+    } }
+    if (-not $Visible -and -not $hasOpenDocuments) {
         try { $application.DisplayAlerts = 1 } catch { }
     }
     return $application
+}
+
+function Stop-PowerPointApplicationIfIdle {
+    param($Application)
+    if ($null -eq $Application) { return }
+    # COM activation can return the user's running instance. Unknown counts
+    # also fail closed; never close presentations owned by another caller.
+    try {
+        if ($Application.Presentations.Count -eq 0 -and $Application.ProtectedViewWindows.Count -eq 0) {
+            $Application.Quit() | Out-Null
+        }
+    } catch { }
 }
 
 function Restart-PowerPointApplicationInternal {
@@ -449,7 +463,10 @@ function Restart-PowerPointApplicationInternal {
     param($Current, [int]$DelayMs = 2000)
 
     if ($null -ne $Current) {
-        try { $Current.Quit() | Out-Null } catch { }
+        if ($Current.Presentations.Count -gt 0 -or $Current.ProtectedViewWindows.Count -gt 0) {
+            throw 'Cannot restart PowerPoint while presentations remain open. Close only the automation-owned presentation before retrying.'
+        }
+        Stop-PowerPointApplicationIfIdle -Application $Current
         Release-ComObjectSafe -ComObject $Current
     }
 
