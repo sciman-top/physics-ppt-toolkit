@@ -15,6 +15,13 @@ $toolRoot = $PSScriptRoot
 $testRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('physics-ppt-policy-' + [Guid]::NewGuid().ToString('N'))
 try {
     New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
+    $workflowAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $toolRoot 'Invoke-PhysicsPptWorkflow.ps1'), [ref]$null, [ref]$null)
+    $propertyFunction = $workflowAst.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-ObjectPropertyValue' }, $true) | Select-Object -First 1
+    Invoke-Expression $propertyFunction.Extent.Text
+    foreach ($propertyObject in @(@{ effectiveMode = 'ReportOnly' }, [ordered]@{ effectiveMode = 'ReportOnly' }, [pscustomobject]@{ effectiveMode = 'ReportOnly' })) {
+        if ((Get-ObjectPropertyValue $propertyObject 'effectiveMode' 'Unknown') -ne 'ReportOnly') { throw 'Workflow metadata lost a dictionary property before JSON serialization.' }
+        if ((Get-ObjectPropertyValue $propertyObject 'absent' 'fallback') -ne 'fallback') { throw 'Workflow metadata did not honor the missing-property default.' }
+    }
     $beforePath = Join-Path $testRoot 'before.json'
     $afterPath = Join-Path $testRoot 'after.json'
     $blockedPath = Join-Path $testRoot 'blocked.json'
@@ -81,6 +88,38 @@ try {
     $textChangedComparison = $textChangedResult | ConvertFrom-Json
     if ($textChangedComparison.passed -or $textChangedComparison.blockerCount -lt 1) { throw 'Invariant comparison did not block a text content change.' }
 
+    # Case changes can change physical quantities; missing slide rows must not
+    # disappear behind an unchanged declared slideCount.
+    foreach ($mutation in @('TextCase', 'MissingSlide', 'ExternalTarget')) {
+        $probeBefore = $before | ConvertFrom-Json
+        $probeAfter = $before | ConvertFrom-Json
+        switch ($mutation) {
+            'TextCase' { $probeAfter.slides[0].shapes[0].text = '速度 V=s/t' }
+            'MissingSlide' { $probeAfter.slides = @() }
+            'ExternalTarget' {
+                $probeBefore.package.relationships[0].targetMode = 'External'
+                $probeBefore.package.relationships[0].target = 'https://first.example/image1.png'
+                $probeAfter.package.relationships[0].targetMode = 'External'
+                $probeAfter.package.relationships[0].target = 'https://second.example/image1.png'
+            }
+        }
+        $probeBefore | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $formulaBeforePath -Encoding UTF8
+        $probeAfter | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $blockedPath -Encoding UTF8
+        $probeResult = & (Join-Path $toolRoot 'Compare-PptxInvariantSnapshot.ps1') -BeforePath $formulaBeforePath -AfterPath $blockedPath | ConvertFrom-Json
+        if ($probeResult.passed) { throw "Invariant comparison accepted $mutation." }
+    }
+    $mediaRenameBefore = $before | ConvertFrom-Json
+    $mediaRenameBefore.package.relationships[0].part = 'ppt/slides/_rels/slide1.xml.rels'
+    $mediaRenameBefore.package.relationships[0].type = 'image'
+    $mediaRenameBefore.package.relationships[0].target = '../media/image1.png'
+    $mediaRenameAfter = $mediaRenameBefore | ConvertTo-Json -Depth 12 | ConvertFrom-Json
+    $mediaRenameAfter.package.media[0].part = 'ppt/media/image2.png'
+    $mediaRenameAfter.package.relationships[0].target = '../media/image2.png'
+    $mediaRenameBefore | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $formulaBeforePath -Encoding UTF8
+    $mediaRenameAfter | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $blockedPath -Encoding UTF8
+    $mediaRenameResult = & (Join-Path $toolRoot 'Compare-PptxInvariantSnapshot.ps1') -BeforePath $formulaBeforePath -AfterPath $blockedPath | ConvertFrom-Json
+    if (-not $mediaRenameResult.passed) { throw 'Unchanged media content with renamed package parts was blocked.' }
+
     # Formula conversion has an explicit, narrow allowance: only a type-7 OLE
     # with empty COM text may become a generated FormulaOmml type-1 shape. The
     # allowance must not hide geometry changes or become a default bypass.
@@ -115,7 +154,10 @@ try {
     $normalizedImage = Join-Path $testRoot 'normalized-slide-1.png'
     [System.IO.File]::WriteAllBytes($sourceImage, [byte[]](1, 2, 3))
     [System.IO.File]::Copy($sourceImage, $normalizedImage)
-    [System.IO.File]::WriteAllText($manifestPath, ([ordered]@{ files = @([ordered]@{ input = $input }) } | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding -ArgumentList $false))
+    $deliveredArtifact = Join-Path $testRoot 'delivered.pptx'
+    [IO.File]::WriteAllBytes($deliveredArtifact, [byte[]](1, 2, 3))
+    $deliveredHash = (Get-FileHash -LiteralPath $deliveredArtifact -Algorithm SHA256).Hash.ToLowerInvariant()
+    [System.IO.File]::WriteAllText($manifestPath, ([ordered]@{ files = @([ordered]@{ input = $input; normalizedPptx = $deliveredArtifact; normalizedPptxSha256 = $deliveredHash }) } | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding -ArgumentList $false))
     $manifestHash = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
     $imageHash = (Get-FileHash -LiteralPath $sourceImage -Algorithm SHA256).Hash.ToLowerInvariant()
     $packet = [ordered]@{
@@ -146,6 +188,31 @@ try {
     & (Join-Path $toolRoot 'Import-PptxAiReviewResult.ps1') -ManifestPath $manifestPath -ResultPath $resultPath -PacketPath $packetPath | Out-Null
     $repeatGate = & (Join-Path $toolRoot 'Import-PptxAiReviewResult.ps1') -ManifestPath $manifestPath -ResultPath $resultPath -PacketPath $packetPath -ValidateOnly | ConvertFrom-Json
     if ($repeatGate.status -ne 'Passed' -or $repeatGate.deliveryBlocked) { throw 'AI review gate did not accept a repeated import after the manifest gained delivery metadata.' }
+
+    $savedManifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8
+    foreach ($priorStatus in @('BlockedDeliveryArtifacts', 'Pending')) {
+        $priorManifest = $savedManifest | ConvertFrom-Json
+        $priorManifest | Add-Member -NotePropertyName deliveryFailures -NotePropertyValue @('PDF page count mismatch') -Force
+        $priorManifest.deliveryStatus = $priorStatus
+        $priorManifest.deliveryBlocked = ($priorStatus -eq 'BlockedDeliveryArtifacts')
+        $priorManifest | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+        & (Join-Path $toolRoot 'Import-PptxAiReviewResult.ps1') -ManifestPath $manifestPath -ResultPath $resultPath -PacketPath $packetPath | Out-Null
+        $imported = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if (-not $imported.deliveryBlocked -or $imported.deliveryStatus -ne 'BlockedDeliveryArtifacts') { throw 'AI Passed erased a required delivery artifact failure.' }
+    }
+    [IO.File]::WriteAllText($manifestPath, $savedManifest, (New-Object Text.UTF8Encoding($false)))
+    [IO.File]::WriteAllBytes($deliveredArtifact, [byte[]](4, 5, 6))
+    $staleRejected = $false
+    try { & (Join-Path $toolRoot 'Import-PptxAiReviewResult.ps1') -ManifestPath $manifestPath -ResultPath $resultPath -PacketPath $packetPath -ValidateOnly | Out-Null } catch { $staleRejected = $_.Exception.Message -like '*stale or replaced normalizedPptx*' }
+    if (-not $staleRejected) { throw 'AI review accepted a replaced delivery presentation with unchanged page images.' }
+    [IO.File]::WriteAllBytes($deliveredArtifact, [byte[]](1, 2, 3))
+
+    $priorManifest = $savedManifest | ConvertFrom-Json
+    $priorManifest | Add-Member -NotePropertyName deliveryReviews -NotePropertyValue @('Visual confirmation requires review') -Force
+    $priorManifest | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+    & (Join-Path $toolRoot 'Import-PptxAiReviewResult.ps1') -ManifestPath $manifestPath -ResultPath $resultPath -PacketPath $packetPath | Out-Null
+    if ((Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json).deliveryStatus -ne 'Pending') { throw 'AI Passed erased an outstanding visual review.' }
+    [IO.File]::WriteAllText($manifestPath, $savedManifest, (New-Object Text.UTF8Encoding($false)))
 
     # Windows paths are case-insensitive identities; equivalent casing must not
     # invalidate an otherwise hash-bound prepared packet.
@@ -188,6 +255,33 @@ try {
     $fixtureImage = Join-Path $testRoot 'slide-001.png'
     $bitmap = New-Object System.Drawing.Bitmap 160, 90
     try { $bitmap.Save($fixtureImage, [System.Drawing.Imaging.ImageFormat]::Png) } finally { $bitmap.Dispose() }
+    $packetManifest = Join-Path $testRoot 'packet-manifest.json'
+    $standalonePacket = Join-Path $testRoot 'standalone-packet.json'
+    $sourcePageDir = Join-Path $testRoot 'source-pages'
+    $normalizedPageDir = Join-Path $testRoot 'normalized-pages'
+    New-Item -ItemType Directory -Path $sourcePageDir, $normalizedPageDir | Out-Null
+    Copy-Item -LiteralPath $fixtureImage -Destination (Join-Path $sourcePageDir 'page-1.png')
+    Copy-Item -LiteralPath $fixtureImage -Destination (Join-Path $normalizedPageDir 'page-1.png')
+    @{ files = @(@{ input = $input; sourcePageImages = $sourcePageDir; pageImages = $normalizedPageDir; validation = @{ expectedSlides = 1 } }) } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $packetManifest -Encoding UTF8
+    $testHostPath = (Get-Process -Id $PID).Path
+    & $testHostPath -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $toolRoot 'Export-PptxAiReviewPacket.ps1') -ManifestPath $packetManifest -OutputPath $standalonePacket | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Standalone AI packet export failed in a clean PowerShell host.' }
+    $standalone = Get-Content -LiteralPath $standalonePacket -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($standalone.status -ne 'Ready' -or $standalone.files[0].pages.Count -ne 1) { throw 'Standalone AI packet did not prepare the complete page pair.' }
+    foreach ($collision in @('Packet', 'Snapshot', 'Bold', 'Whitelist', 'Ole')) {
+        $rejectedCollision = $false
+        try {
+            switch ($collision) {
+                'Packet' { & (Join-Path $toolRoot 'Export-PptxAiReviewPacket.ps1') -ManifestPath $packetManifest -OutputPath $packetManifest | Out-Null }
+                'Snapshot' { & (Join-Path $toolRoot 'Export-PptxInvariantSnapshot.ps1') -InputPath $deliveredArtifact -OutputPath $deliveredArtifact | Out-Null }
+                'Bold' { & (Join-Path $toolRoot 'Set-PptxTextBold.ps1') -InputPath $deliveredArtifact -OutputPath (Join-Path $testRoot 'bold.pptx') -ReportPath $deliveredArtifact | Out-Null }
+                'Whitelist' { & (Join-Path $toolRoot 'Apply-FormulaOmmlWhitelist.ps1') -InputPath $deliveredArtifact -OutputPath (Join-Path $testRoot 'omml.pptx') -FormulaReviewCsv $resultPath -OmmlCandidateCsv $resultPath -ReportPath $deliveredArtifact | Out-Null }
+                'Ole' { & (Join-Path $toolRoot 'Apply-FormulaOmmlForOle.ps1') -InputPath $deliveredArtifact -OutputPath (Join-Path $testRoot 'ole.pptx') -MappingCsv $resultPath -OmmlCandidateCsv $resultPath -ReportPath $deliveredArtifact | Out-Null }
+            }
+        } catch { $rejectedCollision = $_.Exception.Message -like '*must differ*' }
+        if (-not $rejectedCollision) { throw "Source-path collision was not rejected: $collision" }
+    }
+    if ((Get-FileHash -LiteralPath $deliveredArtifact).Hash.ToLowerInvariant() -ne $deliveredHash) { throw 'Source-path collision probes damaged the input.' }
     $auditColumns = @('Timestamp', 'File', 'Slide', 'Shape', 'Issue', 'Severity', 'Details')
     $metricColumns = @('File', 'Slide', 'ImagePath', 'Width', 'Height', 'WhitePercent', 'NonWhitePercent', 'DarkPercent', 'IsVisuallyBlank', 'ContentTouchesEdge', 'ContentBounds', 'IssueCount', 'ExportStatus')
     $baselineAudit = [pscustomobject]@{ Timestamp = '2026-01-01 00:00:00'; File = 'source.pptx'; Slide = 1; Shape = 'TextBox 2'; Issue = 'ShapeOutOfSlideBounds'; Severity = 'Error'; Details = 'fixture baseline overflow' }
@@ -245,8 +339,76 @@ try {
     & (Join-Path $toolRoot 'Export-PptxVisualConfirmation.ps1') -VisualAuditDir $zeroImageDir | Out-Null
     $zeroImageConfirmation = Get-Content -LiteralPath (Join-Path $zeroImageDir 'pptx-visual-confirmation-manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     if ($zeroImageConfirmation.confirmationStatus -ne 'Failed' -or $zeroImageConfirmation.automationGateStatus -ne 'Failed') { throw 'Visual confirmation accepted a zero-byte page image.' }
+    # A dependency-only edit must invalidate normalization reuse, even with
+    # identical source/config/main script and invocation parameters.
+    $normalizeAstForSignature = [Management.Automation.Language.Parser]::ParseFile((Join-Path $toolRoot 'Normalize-PhysicsPpt.ps1'), [ref]$null, [ref]$null)
+    $signatureFunction = $normalizeAstForSignature.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-NormalizeSignature' }, $true) | Select-Object -First 1
+    $signatureProbe = Join-Path $testRoot 'signature-probe.ps1'
+    $probeCommon = Join-Path $testRoot 'PhysicsPpt.Common.ps1'
+    $probeGeometry = Join-Path $testRoot 'PhysicsPpt.Geometry.ps1'
+    Copy-Item -LiteralPath (Join-Path $toolRoot 'PhysicsPpt.Common.ps1') -Destination $probeCommon
+    Copy-Item -LiteralPath (Join-Path $toolRoot 'PhysicsPpt.Geometry.ps1') -Destination $probeGeometry
+    $signatureProbeCode = @'
+. (Join-Path $PSScriptRoot 'PhysicsPpt.Common.ps1')
+$script:NormalizeSignatureConstantHashes = $null
+$script:NormalizeScriptPath = $PSCommandPath
+$ConfigPath = Join-Path $PSScriptRoot 'packet-manifest.json'
+$NoPdf = $false; $ReportOnly = $false; $DisableAdvanceOnClick = $false; $FilePattern = '*.ppt*'; $ImageOutputDir = ''
+'@ + "`r`n" + $signatureFunction.Extent.Text + "`r`n" + 'Get-NormalizeSignature -File (Get-Item -LiteralPath (Join-Path $PSScriptRoot ''delivered.pptx'')) -SafeName ''probe'' | ConvertTo-Json -Depth 8'
+    [IO.File]::WriteAllText($signatureProbe, $signatureProbeCode, (New-Object Text.UTF8Encoding($true)))
+    $initialSignature = & $testHostPath -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $signatureProbe | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0) { throw 'Initial normalization signature probe failed.' }
+    foreach ($dependency in @($probeCommon, $probeGeometry)) {
+        Add-Content -LiteralPath $dependency -Value '# dependency revision probe' -Encoding UTF8
+        $changedSignature = & $testHostPath -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $signatureProbe | ConvertFrom-Json
+        if ($LASTEXITCODE -ne 0 -or $changedSignature.Signature -eq $initialSignature.Signature) { throw 'A module-only edit reused the previous normalization signature.' }
+        $initialSignature = $changedSignature
+    }
+
+    # Run the actual shape-enumeration/recovery statements with an enumerable
+    # whose first three COM yields are dead, while indexed access still works.
+    . (Join-Path $toolRoot 'PhysicsPpt.Common.ps1')
+    . (Join-Path $toolRoot 'PhysicsPpt.ReviewArtifacts.ps1')
+    if (-not (Test-IsFinalFailureIssue 'ShapeEnumerationCorrupted')) { throw 'An unrecovered enumeration gap is not a final delivery failure.' }
+    $normalizeAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $toolRoot 'Normalize-PhysicsPpt.ps1'), [ref]$null, [ref]$null)
+    $startNode = $normalizeAst.FindAll({ param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$processedShapeIds' }, $true) | Select-Object -First 1
+    $recoveryNode = $normalizeAst.FindAll({ param($n) $n -is [Management.Automation.Language.IfStatementAst] -and $n.Clauses[0].Item1.Extent.Text -eq '$enumerationBroken' }, $true) | Select-Object -First 1
+    if ($null -eq $startNode -or $null -eq $recoveryNode) { throw 'Shape recovery statements could not be located.' }
+    $normalizeText = Get-Content -LiteralPath (Join-Path $toolRoot 'Normalize-PhysicsPpt.ps1') -Raw -Encoding UTF8
+    $recoveryCode = $normalizeText.Substring($startNode.Extent.StartOffset, $recoveryNode.Extent.EndOffset - $startNode.Extent.StartOffset)
+    if (-not ('ToolkitBrokenShapeEnumerable' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Collections;
+public class ToolkitBrokenShapeEnumerable : IEnumerable {
+    public object[] Items;
+    public bool CountFails;
+    public int Count { get { if (CountFails) throw new Exception("Count unavailable"); return Items.Length; } }
+    public object Item(int index) { return Items[index - 1]; }
+    public IEnumerator GetEnumerator() { return new object[] { null, null, null }.GetEnumerator(); }
+}
+'@
+    }
+    & {
+        param($Code)
+        function Invoke-NormalizeSlideShape { param($Shape, $SlideNumber, $FileName, $ReportOnly, $PictureFillShapeIds, $PreserveSlideStyle, $IsVideo, $IsSectionTitle, $SlideWidth) $script:RecoveredShapeIds.Add([int]$Shape.Id) }
+        function Add-ReportRow { param($File, $SlideNumber, $ShapeName, $Issue, $Details, $RiskLevel, $Result) $script:RecoveryIssues.Add($Issue) }
+        foreach ($countFails in @($false, $true)) {
+            $script:RecoveredShapeIds = New-Object 'Collections.Generic.List[int]'
+            $script:RecoveryIssues = New-Object 'Collections.Generic.List[string]'
+            $collection = New-Object ToolkitBrokenShapeEnumerable
+            $collection.Items = @([pscustomobject]@{ Id = 1 }, [pscustomobject]@{ Id = 2 }, [pscustomobject]@{ Id = 3 })
+            $collection.CountFails = $countFails
+            $slide = [pscustomobject]@{ Shapes = $collection }
+            $file = [pscustomobject]@{ Name = 'probe.pptx' }
+            $i = 1; $ReportOnly = [switch]$true; $pictureFillShapeIds = @{}; $preserveSlideStyle = $false; $isVideo = $false; $isSectionTitle = $false; $slideWidth = 960
+            Invoke-Expression $Code
+            if (-not $countFails -and ($script:RecoveredShapeIds.Count -ne 3 -or $script:RecoveryIssues -notcontains 'ShapeEnumerationRecovered')) { throw 'Dead first COM yields prevented indexed shape recovery.' }
+            if ($countFails -and $script:RecoveryIssues -notcontains 'ShapeEnumerationCorrupted') { throw 'An unreadable shape count was falsely reported recovered.' }
+        }
+    } $recoveryCode
+
+    Write-Host 'Physics PPT policy fixture tests passed.'
 } finally {
     if (Test-Path -LiteralPath $testRoot) { Remove-Item -LiteralPath $testRoot -Recurse -Force }
 }
-
-Write-Host 'Physics PPT policy fixture tests passed.'

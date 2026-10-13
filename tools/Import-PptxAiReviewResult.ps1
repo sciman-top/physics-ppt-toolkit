@@ -102,6 +102,20 @@ if ($packetStatus -eq 'ReviewUnavailable' -and $resultStatus -ne 'ReviewUnavaila
 
 $packetFiles = @((Get-PropertyValue $packet 'files' @()))
 $resultFiles = @((Get-PropertyValue $result 'files' @()))
+# Page images alone do not establish that the presentation/PDF being delivered
+# still matches the reviewed manifest. Older manifests omit these hashes.
+foreach ($manifestFile in @((Get-PropertyValue $manifest 'files' @()))) {
+    foreach ($artifact in @('input', 'normalizedPptx', 'pdf')) {
+        $hashName = if ($artifact -eq 'input') { 'inputSha256' } else { $artifact + 'Sha256' }
+        $expectedArtifactHash = [string](Get-PropertyValue $manifestFile $hashName '')
+        if ([string]::IsNullOrWhiteSpace($expectedArtifactHash)) { continue }
+        $artifactPath = [string](Get-PropertyValue $manifestFile $artifact '')
+        if ([string]::IsNullOrWhiteSpace($artifactPath) -or -not (Test-Path -LiteralPath $artifactPath -PathType Leaf) -or
+            (Get-FileSha256Hex -Path $artifactPath) -ne $expectedArtifactHash) {
+            throw "AI review manifest has a stale or replaced $artifact artifact: $artifactPath"
+        }
+    }
+}
 if ($packetStatus -eq 'Ready' -and $packetFiles.Count -eq 0) { throw 'A Ready AI review packet must contain at least one prepared file.' }
 if ($packetFiles.Count -ne $resultFiles.Count) { throw "AI review file count mismatch: expected $($packetFiles.Count), received $($resultFiles.Count)." }
 
@@ -197,8 +211,11 @@ if (-not $ValidateOnly) {
     $manifest | Add-Member -NotePropertyName aiVisualReview -NotePropertyValue $gate -Force
     $invariantGate = Get-PropertyValue $manifest 'invariantGate' $null
     $invariantBlocked = ([string](Get-PropertyValue $invariantGate 'status' '') -eq 'Blocked')
-    $deliveryBlocked = [bool]($invariantBlocked -or $gate.deliveryBlocked)
-    $deliveryStatus = if ($invariantBlocked) { 'BlockedInvariantGate' } elseif ($gate.deliveryBlocked) { 'BlockedAiVisualReview' } elseif ($resultStatus -eq 'Passed') { 'Ready' } else { 'Pending' }
+    $artifactFailures = @((Get-PropertyValue $manifest 'deliveryFailures' @()))
+    $artifactReviews = @((Get-PropertyValue $manifest 'deliveryReviews' @()))
+    $artifactBlocked = ($artifactFailures.Count -gt 0 -or [string](Get-PropertyValue $manifest 'deliveryStatus' '') -eq 'BlockedDeliveryArtifacts')
+    $deliveryBlocked = [bool]($invariantBlocked -or $gate.deliveryBlocked -or $artifactBlocked)
+    $deliveryStatus = if ($invariantBlocked) { 'BlockedInvariantGate' } elseif ($gate.deliveryBlocked) { 'BlockedAiVisualReview' } elseif ($artifactBlocked) { 'BlockedDeliveryArtifacts' } elseif ($resultStatus -eq 'Passed' -and $artifactReviews.Count -eq 0) { 'Ready' } else { 'Pending' }
     $manifest | Add-Member -NotePropertyName deliveryBlocked -NotePropertyValue $deliveryBlocked -Force
     $manifest | Add-Member -NotePropertyName deliveryStatus -NotePropertyValue $deliveryStatus -Force
     $manifest | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath $manifestFullPath -Encoding UTF8

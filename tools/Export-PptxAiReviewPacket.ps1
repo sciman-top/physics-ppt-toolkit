@@ -11,6 +11,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+. (Join-Path $PSScriptRoot 'PhysicsPpt.Common.ps1')
+
 function Get-PageNumber {
     param([System.IO.FileInfo]$File)
     if ($File.BaseName -match '^(?:page|slide)[-_]?(\d+)$') { return [int]$Matches[1] }
@@ -60,6 +62,9 @@ function Get-ManifestExpectedSlideCount {
 
 $manifestFullPath = [System.IO.Path]::GetFullPath($ManifestPath)
 $outputFullPath = [System.IO.Path]::GetFullPath($OutputPath)
+if ([string]::Equals($manifestFullPath, $outputFullPath, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'OutputPath must differ from ManifestPath; the prepared manifest must be preserved.'
+}
 $manifest = Get-Content -LiteralPath $manifestFullPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $manifestSha256 = Get-FileSha256Hex -Path $manifestFullPath
 $filePackets = New-Object System.Collections.Generic.List[object]

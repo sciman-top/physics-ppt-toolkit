@@ -438,6 +438,9 @@ if ([string]::IsNullOrWhiteSpace($ReportPath)) {
     $ReportPath = Join-Path (Split-Path -Parent $OutputPath) 'formula-ole-apply-report.csv'
 }
 $ReportPath = [System.IO.Path]::GetFullPath($ReportPath)
+if ($ReportPath -in @($InputPath, $OutputPath, $MappingCsv, $OmmlCandidateCsv)) {
+    throw 'ReportPath must differ from presentation and candidate input/output paths.'
+}
 
 foreach ($path in @($InputPath, $MappingCsv, $OmmlCandidateCsv)) {
     if (-not (Test-Path -LiteralPath $path)) { throw "Required input not found: $path" }

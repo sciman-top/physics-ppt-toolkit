@@ -273,6 +273,9 @@ function Get-SlideSnapshot {
 
 $inputFullPath = [System.IO.Path]::GetFullPath($InputPath)
 $outputFullPath = [System.IO.Path]::GetFullPath($OutputPath)
+if ([string]::Equals($inputFullPath, $outputFullPath, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'OutputPath must differ from InputPath; a snapshot cannot overwrite its source presentation.'
+}
 $powerPoint = $null
 $presentation = $null
 try {

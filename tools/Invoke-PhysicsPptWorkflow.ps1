@@ -231,6 +231,10 @@ function Get-ObjectPropertyValue {
     )
 
     if ($null -eq $Object) { return $DefaultValue }
+    if ($Object -is [System.Collections.IDictionary]) {
+        if ($Object.Contains($PropertyName)) { return $Object[$PropertyName] }
+        return $DefaultValue
+    }
     $property = $Object.PSObject.Properties[$PropertyName]
     if ($null -eq $property) { return $DefaultValue }
     return $property.Value

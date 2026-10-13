@@ -42,6 +42,9 @@ if ([string]::IsNullOrWhiteSpace($ReportPath)) {
     $ReportPath = Join-Path (Split-Path -Parent $OutputPath) 'text-bold-report.csv'
 }
 $ReportPath = [System.IO.Path]::GetFullPath($ReportPath)
+if ($ReportPath -in @($InputPath, $OutputPath)) {
+    throw 'ReportPath must differ from presentation input/output paths.'
+}
 $reportDir = Split-Path -Parent $ReportPath
 if (-not (Test-Path -LiteralPath $reportDir)) { New-Item -ItemType Directory -Path $reportDir -Force | Out-Null }
 

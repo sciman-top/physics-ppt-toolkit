@@ -14,6 +14,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+. (Join-Path $PSScriptRoot 'PhysicsPpt.Common.ps1')
+
 # PowerPoint exposes geometry as Single.  A no-geometry-change SaveAs can
 # round-trip a value by a few ten-thousandths of a point, which is below any
 # meaningful layout movement but used to become a false invariant blocker.
@@ -26,7 +28,7 @@ function Add-Difference { param($Rows, [string]$Path, [string]$Before, [string]$
     $Rows.Add([pscustomobject]@{ path = $Path; before = $Before; after = $After; kind = $Kind }) | Out-Null
 }
 function Compare-Value { param($Rows, [string]$Path, $Before, $After, [string]$Kind = 'Invariant')
-    if ("$Before" -ne "$After") { Add-Difference $Rows $Path "$Before" "$After" $Kind }
+    if (-not [string]::Equals("$Before", "$After", [StringComparison]::Ordinal)) { Add-Difference $Rows $Path "$Before" "$After" $Kind }
 }
 function Compare-GeometryValue { param($Rows, [string]$Path, $Before, $After, [string]$Kind = 'Invariant')
     if ($null -eq $Before -or $null -eq $After) {
@@ -53,8 +55,8 @@ function Get-SnapshotList { param($Row, [string]$Name)
     # List-valued sibling of Get-SnapshotProperty: an absent field yields an
     # empty list, not a one-element $null array.
     $value = Get-SnapshotProperty $Row $Name
-    if ($null -eq $value) { return @() }
-    return @($value)
+    if ($null -eq $value) { return ,@() }
+    return ,@($value)
 }
 
 function Test-ReviewedFormulaConversion {
@@ -82,6 +84,13 @@ Compare-GeometryValue $rows 'slideWidth' (Get-SnapshotProperty $before 'slideWid
 Compare-GeometryValue $rows 'slideHeight' (Get-SnapshotProperty $before 'slideHeight') (Get-SnapshotProperty $after 'slideHeight') 'Blocker'
 
 $beforeSlides = Get-SnapshotList $before 'slides'; $afterSlides = Get-SnapshotList $after 'slides'
+Compare-Value $rows 'slides.length' $beforeSlides.Count $afterSlides.Count 'Blocker'
+foreach ($snapshot in @($before, $after)) {
+    $snapshotSlides = Get-SnapshotList $snapshot 'slides'
+    if ($snapshotSlides.Count -ne (Get-SnapshotProperty $snapshot 'slideCount')) {
+        Add-Difference $rows 'slides.declaredCount' (Get-SnapshotProperty $snapshot 'slideCount') $snapshotSlides.Count 'Blocker'
+    }
+}
 $slideCount = [Math]::Min($beforeSlides.Count, $afterSlides.Count)
 for ($i = 0; $i -lt $slideCount; $i++) {
     $bs = $beforeSlides[$i]; $as = $afterSlides[$i]; $prefix = "slides[$i]"
@@ -131,7 +140,7 @@ for ($i = 0; $i -lt $slideCount; $i++) {
         $isReviewedFormulaConversion = Test-ReviewedFormulaConversion -BeforeShape $b -AfterShape $a
         foreach ($property in @('name','type','zOrder','autoSize','wordWrap','text')) {
             if ($isReviewedFormulaConversion -and $property -in @('name', 'type', 'autoSize', 'wordWrap', 'text')) {
-                if ("$($b.$property)" -ne "$($a.$property)") {
+                if ("$($b.$property)" -cne "$($a.$property)") {
                     Add-Difference $rows "$prefix.shapes[$id].$property" "$($b.$property)" "$($a.$property)" 'AllowedChange'
                 }
             } else {
@@ -162,7 +171,7 @@ for ($i = 0; $i -lt $slideCount; $i++) {
         $beforeFormats = Get-SnapshotProperty $b 'runFormats'
         $afterFormats = Get-SnapshotProperty $a 'runFormats'
         if ($null -ne $beforeFormats -or $null -ne $afterFormats) {
-            if ("$beforeFormats" -ne "$afterFormats") {
+            if ("$beforeFormats" -cne "$afterFormats") {
                 if ($isReviewedFormulaConversion) {
                     Add-Difference $rows "$prefix.shapes[$id].runFormats" "$beforeFormats" "$afterFormats" 'AllowedChange'
                 } else {
@@ -194,16 +203,18 @@ function Get-CanonicalMediaText { param($MediaEntries)
     } | Sort-Object) -join "`n")
 }
 function Get-CanonicalRelationshipText { param($RelationshipEntries, $MediaEntries)
-    $mediaHashByLeaf = @{}
+    $mediaHashByPart = @{}
     foreach ($media in @($MediaEntries)) {
-        $leaf = [System.IO.Path]::GetFileName([string]$media.part)
-        $mediaHashByLeaf[$leaf] = [string]$media.sha256
+        $mediaHashByPart[[string]$media.part] = [string]$media.sha256
     }
     (@($RelationshipEntries | ForEach-Object {
         $target = [string]$_.target
-        $targetLeaf = [System.IO.Path]::GetFileName($target)
-        if (-not [string]::IsNullOrEmpty($targetLeaf) -and $mediaHashByLeaf.ContainsKey($targetLeaf)) {
-            $target = 'media:' + $mediaHashByLeaf[$targetLeaf]
+        # Resolve only internal targets relative to the owning part. External
+        # URLs must stay literal even when their leaf matches packaged media.
+        $sourcePart = ([string]$_.part -replace '/_rels/', '/' -replace '\.rels$', '')
+        $targetPart = Resolve-PackageTarget -SourcePart $sourcePart -Target $target
+        if ([string]$_.targetMode -ne 'External' -and $mediaHashByPart.ContainsKey($targetPart)) {
+            $target = 'media:' + $mediaHashByPart[$targetPart]
         }
         '{0}|{1}|{2}|{3}' -f $_.part, $_.type, $target, $_.targetMode
     } | Sort-Object) -join "`n")

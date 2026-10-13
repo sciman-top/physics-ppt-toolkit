@@ -366,6 +366,8 @@ function Get-NormalizeSignature {
         $script:NormalizeSignatureConstantHashes = @{
             config = $configHashOnce
             script = $(Get-FileSha256Hex -Path $script:NormalizeScriptPath)
+            common = $(Get-FileSha256Hex -Path (Join-Path $PSScriptRoot 'PhysicsPpt.Common.ps1'))
+            geometry = $(Get-FileSha256Hex -Path (Join-Path $PSScriptRoot 'PhysicsPpt.Geometry.ps1'))
         }
     }
     $sourceHash = Get-FileSha256Hex -Path $File.FullName
@@ -373,6 +375,8 @@ function Get-NormalizeSignature {
         sourceSha256 = $sourceHash
         configSha256 = $script:NormalizeSignatureConstantHashes.config
         scriptSha256 = $script:NormalizeSignatureConstantHashes.script
+        commonSha256 = $script:NormalizeSignatureConstantHashes.common
+        geometrySha256 = $script:NormalizeSignatureConstantHashes.geometry
         safeName = $SafeName
         noPdf = [bool]$NoPdf
         reportOnly = [bool]$ReportOnly
@@ -2466,6 +2470,7 @@ function Normalize-Presentation {
             $processedShapeIds = [System.Collections.Generic.HashSet[int]]::new()
             $consecutiveShapeFailures = 0
             $enumerationBrokenAfter = 0
+            $enumerationBroken = $false
             foreach ($shape in $slide.Shapes) {
                 try {
                     $shapeId = [int]$shape.Id
@@ -2476,17 +2481,25 @@ function Normalize-Presentation {
                     $consecutiveShapeFailures++
                     if ($consecutiveShapeFailures -ge 3) {
                         $enumerationBrokenAfter = $processedShapeIds.Count
+                        $enumerationBroken = $true
                         break
                     }
                     Add-ReportRow -File $File.Name -SlideNumber $i -ShapeName (Get-ShapeName $shape) -Issue (Get-ComFailureCategory $_) -Details (Format-ComFailureDetails $_)
                 }
             }
-            if ($enumerationBrokenAfter -gt 0) {
+            if ($enumerationBroken) {
                 $recoveredCount = 0
                 $unrecoverableNames = [System.Collections.Generic.List[string]]::new()
                 try {
-                    $slideShapeCount = [int](Invoke-WithComRetry { $slide.Shapes.Count } -MaxRetries 2)
-                } catch { $slideShapeCount = 0 }
+                    $slideShapeCount = [int](Invoke-WithComRetry {
+                        $count = $slide.Shapes.Count
+                        if ($null -eq $count) { throw 'Shapes.Count unavailable' }
+                        return $count
+                    } -MaxRetries 2)
+                } catch {
+                    $slideShapeCount = 0
+                    $unrecoverableNames.Add('Shapes.Count unavailable')
+                }
                 for ($shapeIndex = 1; $shapeIndex -le $slideShapeCount; $shapeIndex++) {
                     $shape = $null
                     try { $shape = Invoke-WithComRetry { $slide.Shapes.Item($shapeIndex) } -MaxRetries 2 } catch { $shape = $null }
@@ -2532,7 +2545,7 @@ function Normalize-Presentation {
             $fileFailureIssues = @(
                 for ($rowIndex = $fileRowStartIndex; $rowIndex -lt $script:ReportRows.Count; $rowIndex++) {
                     $sliceRow = $script:ReportRows[$rowIndex]
-                    if ($sliceRow.FilePath -eq $File.FullName -and $sliceRow.Issue -in @('PdfExportFailed', 'ImagesExportFailed', 'ImageExportCountMismatch', 'SlidePngExportFailed')) { $sliceRow }
+                    if ($sliceRow.FilePath -eq $File.FullName -and $sliceRow.Issue -in @('PdfExportFailed', 'ImagesExportFailed', 'ImageExportCountMismatch', 'SlidePngExportFailed', 'ShapeEnumerationCorrupted')) { $sliceRow }
                 }
             )
             $cacheImageDir = if ([string]::IsNullOrWhiteSpace($ImageOutputDir)) { '' } else { Join-Path $ImageOutputDir $safeName }

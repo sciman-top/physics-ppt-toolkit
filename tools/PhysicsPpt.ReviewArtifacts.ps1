@@ -694,6 +694,7 @@ function Test-IsFinalFailureIssue {
         'FileInUseOrSharingViolation',
         'FileNotFoundOrUnavailable',
         'ChildProcessFailed',
+        'ShapeEnumerationCorrupted',
         'UnhandledFailure'
     )
     if ($Issue -in $finalFailureIssues) { return $true }

@@ -256,6 +256,9 @@ if ([string]::IsNullOrWhiteSpace($ReportPath)) {
     $ReportPath = Join-Path (Split-Path -Parent $OutputPath) 'formula-omml-apply-report.csv'
 }
 $ReportPath = [System.IO.Path]::GetFullPath($ReportPath)
+if ($ReportPath -in @($InputPath, $OutputPath, $FormulaReviewCsv, $OmmlCandidateCsv)) {
+    throw 'ReportPath must differ from presentation and candidate input/output paths.'
+}
 
 if (-not (Test-Path -LiteralPath $InputPath)) { throw "InputPath not found: $InputPath" }
 if (-not (Test-Path -LiteralPath $FormulaReviewCsv)) { throw "FormulaReviewCsv not found: $FormulaReviewCsv" }
