@@ -236,6 +236,40 @@ try {
     $gate = & (Join-Path $toolRoot 'Import-PptxAiReviewResult.ps1') -ManifestPath $manifestPath -ResultPath $resultPath -PacketPath $packetPath -ValidateOnly | ConvertFrom-Json
     if ($gate.status -ne 'Passed' -or $gate.deliveryBlocked) { throw 'AI review gate did not accept a fully paired passed result.' }
 
+    foreach ($bindingField in @('packetPath', 'packetSha256', 'sourceSha256', 'normalizedSha256')) {
+        $bindingProbe = $passedResult | ConvertTo-Json -Depth 12 | ConvertFrom-Json
+        if ($bindingField -in @('packetPath', 'packetSha256')) {
+            $bindingProbe.PSObject.Properties.Remove($bindingField)
+        } else {
+            $bindingProbe.files[0].pages[0].PSObject.Properties.Remove($bindingField)
+        }
+        [System.IO.File]::WriteAllText($resultPath, ($bindingProbe | ConvertTo-Json -Depth 12), (New-Object System.Text.UTF8Encoding -ArgumentList $false))
+        $rejectedBindingField = $false
+        try {
+            & (Join-Path $toolRoot 'Import-PptxAiReviewResult.ps1') -ManifestPath $manifestPath -ResultPath $resultPath -PacketPath $packetPath -ValidateOnly | Out-Null
+        } catch {
+            $rejectedBindingField = $_.Exception.Message -like "*missing required string '$bindingField'*"
+        }
+        if (-not $rejectedBindingField) { throw "AI review importer did not specifically reject missing binding field '$bindingField'." }
+    }
+    foreach ($arrayField in @('files', 'pages', 'issues')) {
+        $arrayProbe = $passedResult | ConvertTo-Json -Depth 12 | ConvertFrom-Json
+        switch ($arrayField) {
+            'files' { $arrayProbe.PSObject.Properties.Remove('files') }
+            'pages' { $arrayProbe.files[0].PSObject.Properties.Remove('pages') }
+            'issues' { $arrayProbe.files[0].pages[0].PSObject.Properties.Remove('issues') }
+        }
+        [System.IO.File]::WriteAllText($resultPath, ($arrayProbe | ConvertTo-Json -Depth 12), (New-Object System.Text.UTF8Encoding -ArgumentList $false))
+        $rejectedArrayField = $false
+        try {
+            & (Join-Path $toolRoot 'Import-PptxAiReviewResult.ps1') -ManifestPath $manifestPath -ResultPath $resultPath -PacketPath $packetPath -ValidateOnly | Out-Null
+        } catch {
+            $rejectedArrayField = $_.Exception.Message -like "*missing required array '$arrayField'*"
+        }
+        if (-not $rejectedArrayField) { throw "AI review importer did not specifically reject missing array '$arrayField'." }
+    }
+    [System.IO.File]::WriteAllText($resultPath, ($passedResult | ConvertTo-Json -Depth 12), (New-Object System.Text.UTF8Encoding -ArgumentList $false))
+
     # Applying a result adds the delivery gate to the manifest, so the packet
     # remains bound to the exact prepared manifest through the recorded hash.
     & (Join-Path $toolRoot 'Import-PptxAiReviewResult.ps1') -ManifestPath $manifestPath -ResultPath $resultPath -PacketPath $packetPath | Out-Null

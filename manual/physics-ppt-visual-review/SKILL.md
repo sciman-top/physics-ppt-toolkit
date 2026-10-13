@@ -35,4 +35,6 @@ Do not judge or rewrite teaching content. Do not require layout modernization. E
 
 Write one result per page plus a file-level aggregate. Conform to [references/review-result.schema.json](references/review-result.schema.json). A file is `Blocked` if any page is blocked and `Review` if none is blocked but any page needs review.
 
+For an importable result, copy each page's `sourceSha256` and `normalizedSha256` from its matching packet entry. The result must also include `packetPath` (the exact absolute path used by the importer) and `packetSha256` (the lowercase SHA-256 of the packet file). A packet cannot contain its own final hash, so the caller must provide these two values with the review request. If they are missing, ask for them instead of guessing.
+
 Record the model name, review protocol version, image paths, and concise visual evidence. Do not include speculative fixes.

@@ -1,0 +1,26 @@
+name: Windows self-check
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  toolkit-self-check:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Run toolkit minimum gate
+        shell: pwsh
+        run: pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools/Test-ToolkitFiles.ps1

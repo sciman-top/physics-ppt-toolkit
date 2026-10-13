@@ -48,6 +48,15 @@ function Assert-RequiredString {
     return $value
 }
 
+function Assert-RequiredArray {
+    param($Object, [string]$Name, [string]$Context)
+    $property = if ($null -eq $Object) { $null } else { $Object.PSObject.Properties[$Name] }
+    if ($null -eq $property -or $property.Value -isnot [System.Array]) {
+        throw "$Context is missing required array '$Name'."
+    }
+    return ,$property.Value
+}
+
 function Get-ExpectedAggregateStatus {
     param([object[]]$Files)
     $statuses = @($Files | ForEach-Object { [string](Get-PropertyValue $_ 'status' '') })
@@ -101,7 +110,7 @@ if ($packetStatus -eq 'Ready' -and $resultStatus -eq 'ReviewUnavailable') { thro
 if ($packetStatus -eq 'ReviewUnavailable' -and $resultStatus -ne 'ReviewUnavailable') { throw 'AI review result must remain ReviewUnavailable when the prepared packet is unavailable.' }
 
 $packetFiles = @((Get-PropertyValue $packet 'files' @()))
-$resultFiles = @((Get-PropertyValue $result 'files' @()))
+$resultFiles = Assert-RequiredArray $result 'files' 'AI review result'
 # Page images alone do not establish that the presentation/PDF being delivered
 # still matches the reviewed manifest. Older manifests omit these hashes.
 foreach ($manifestFile in @((Get-PropertyValue $manifest 'files' @()))) {
@@ -134,7 +143,7 @@ foreach ($file in $resultFiles) {
     $fileStatus = Assert-RequiredString $file 'status' "AI review file '$input'"
     if ($fileStatus -notin $allowedStatuses) { throw "Unsupported AI review file status: $fileStatus" }
     $expectedPages = @((Get-PropertyValue $packetByInput[$input] 'pages' @()))
-    $actualPages = @((Get-PropertyValue $file 'pages' @()))
+    $actualPages = Assert-RequiredArray $file 'pages' "AI review file '$input'"
     $packetFileStatus = [string](Get-PropertyValue $packetByInput[$input] 'status' '')
     if ($fileStatus -eq 'ReviewUnavailable') {
         if ($actualPages.Count -ne 0) { throw "ReviewUnavailable file '$input' must not claim partial page coverage." }
@@ -179,7 +188,8 @@ foreach ($file in $resultFiles) {
         if ($pageStatus -notin $allowedPageStatuses) { throw "Unsupported AI review page status: $pageStatus" }
         Assert-RequiredString $page 'evidence' "AI review page $slide in '$input'" | Out-Null
         $pageStatuses.Add($pageStatus) | Out-Null
-        foreach ($issue in @((Get-PropertyValue $page 'issues' @()))) {
+        $issues = Assert-RequiredArray $page 'issues' "AI review page $slide in '$input'"
+        foreach ($issue in $issues) {
             if ([string](Get-PropertyValue $issue 'type' '') -notin $allowedIssueTypes) { throw "AI review page $slide in '$input' has an unsupported issue type." }
             if ([string](Get-PropertyValue $issue 'severity' '') -notin $allowedSeverities) { throw "AI review page $slide in '$input' has an unsupported severity." }
             Assert-RequiredString $issue 'evidence' "AI review issue on slide $slide in '$input'" | Out-Null

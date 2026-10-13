@@ -28,6 +28,7 @@ if (-not ($PSVersionTable.PSEdition -eq 'Core' -and $PSVersionTable.PSVersion.Ma
 $required = @(
     'AGENTS.md',
     '.gitattributes',
+    '.github\workflows\windows-self-check.yml',
     'README.md',
     'docs\初中物理PPT统一排版规范.md',
     'docs\使用方法.md',
@@ -503,6 +504,25 @@ if ($visualSkill -match 'TODO|PLACEHOLDER') { throw 'physics-ppt-visual-review c
 $visualReviewSchemaPath = Join-Path $root 'manual\physics-ppt-visual-review\references\review-result.schema.json'
 $visualReviewSchema = Get-Content -LiteralPath $visualReviewSchemaPath -Raw -Encoding UTF8 | ConvertFrom-Json
 if ($visualReviewSchema.title -ne 'Physics PPT visual review result') { throw 'Visual review result schema is invalid.' }
+$visualReviewPageSchema = $visualReviewSchema.properties.files.items.properties.pages.items
+foreach ($bindingContract in @(
+    @{ Schema = $visualReviewSchema; Field = 'packetPath'; Format = 'string' },
+    @{ Schema = $visualReviewSchema; Field = 'packetSha256'; Format = 'sha256' },
+    @{ Schema = $visualReviewPageSchema; Field = 'sourceSha256'; Format = 'sha256' },
+    @{ Schema = $visualReviewPageSchema; Field = 'normalizedSha256'; Format = 'sha256' }
+)) {
+    if ($bindingContract.Field -notin @($bindingContract.Schema.required)) {
+        throw "Visual review result schema must require the importer binding field '$($bindingContract.Field)'."
+    }
+    $bindingProperty = $bindingContract.Schema.properties.PSObject.Properties[$bindingContract.Field]
+    if ($null -eq $bindingProperty) { throw "Visual review result schema is missing importer binding field '$($bindingContract.Field)'." }
+    if ($bindingContract.Format -eq 'string' -and $bindingProperty.Value.type -ne 'string') {
+        throw "Visual review result schema binding field '$($bindingContract.Field)' must be a string."
+    }
+    if ($bindingContract.Format -eq 'sha256' -and ($bindingProperty.Value.type -ne 'string' -or $bindingProperty.Value.pattern -ne '^[a-f0-9]{64}$')) {
+        throw "Visual review result schema binding field '$($bindingContract.Field)' must be a lowercase SHA-256 string."
+    }
+}
 
 # --- 3. PowerShell syntax check ---
 $psFiles = @(

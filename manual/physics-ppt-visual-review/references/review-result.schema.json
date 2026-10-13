@@ -3,13 +3,15 @@
   "$id": "physics-ppt-visual-review-result.schema.json",
   "title": "Physics PPT visual review result",
   "type": "object",
-  "required": ["protocolVersion", "reviewVersion", "model", "reviewedAt", "status", "files"],
+  "required": ["protocolVersion", "reviewVersion", "model", "reviewedAt", "status", "packetPath", "packetSha256", "files"],
   "properties": {
     "protocolVersion": { "const": 1 },
     "reviewVersion": { "type": "string", "minLength": 1 },
     "model": { "type": "string", "minLength": 1 },
     "reviewedAt": { "type": "string", "minLength": 1 },
     "status": { "enum": ["Passed", "Review", "Blocked", "ReviewUnavailable"] },
+    "packetPath": { "type": "string", "minLength": 1 },
+    "packetSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "files": {
       "type": "array",
       "items": {
@@ -22,11 +24,13 @@
             "type": "array",
             "items": {
               "type": "object",
-              "required": ["slide", "sourceImage", "normalizedImage", "status", "evidence", "issues"],
+              "required": ["slide", "sourceImage", "normalizedImage", "sourceSha256", "normalizedSha256", "status", "evidence", "issues"],
               "properties": {
                 "slide": { "type": "integer", "minimum": 1 },
                 "sourceImage": { "type": "string" },
                 "normalizedImage": { "type": "string" },
+                "sourceSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+                "normalizedSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
                 "status": { "enum": ["Passed", "Review", "Blocked"] },
                 "evidence": { "type": "string", "minLength": 1 },
                 "issues": {
