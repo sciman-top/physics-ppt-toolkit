@@ -1027,7 +1027,7 @@ if ([Math]::Abs([double]$maxAxisDrift - 1.0) -gt 0.000001) { throw "Geometry dri
 # (15.5 slide18 shipped Arial and read as "l"); body text and URL-like text
 # stay on the latin UI family. The decider is IEX'd into THIS scope, so the
 # $script:Style swap below is its execution environment and is restored after.
-foreach ($familyFnName in @('Test-IsFormulaCandidateText', 'Get-NormalizeLatinFontFamily')) {
+foreach ($familyFnName in @('Test-IsFormulaCandidateText', 'Test-IsFormulaFragmentText', 'Get-NormalizeLatinFontFamily', 'Get-FittedOverflowFontSize')) {
     $familyFnAst = $normalizeReorderAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $familyFnName }, $true) | Select-Object -First 1
     if ($null -eq $familyFnAst) { throw "Normalize font-family function not found for the behavioral probe: $familyFnName" }
     Invoke-Expression $familyFnAst.Extent.Text
@@ -1037,8 +1037,17 @@ $script:Style = [pscustomobject]@{ FontMath = 'Cambria Math'; FontLatin = 'Arial
 try {
     if ((Get-NormalizeLatinFontFamily -Text 'I = I1 = I2') -ne 'Cambria Math') { throw 'Formula family probe: I = I1 = I2 must resolve to the math font.' }
     if ((Get-NormalizeLatinFontFamily -Text 'IA =IB =IC？') -ne 'Cambria Math') { throw 'Formula family probe: subscripted quantity symbols must resolve to the math font.' }
+    if ((Get-NormalizeLatinFontFamily -Text '电源电压 U ___ U灯') -ne 'Cambria Math') { throw 'Formula family probe: a fill-in-blank fragment with CJK subscripts must resolve to the math font.' }
+    if ((Get-NormalizeLatinFontFamily -Text '∴  UCE ___UAD') -ne 'Cambria Math') { throw 'Formula family probe: a fill-in-blank fragment with uppercase subscripts must resolve to the math font.' }
+    if ((Get-NormalizeLatinFontFamily -Text 'kV ___ mV') -ne 'Arial') { throw 'Formula family probe: unit conversion blanks must stay on the latin UI font.' }
+    if ((Get-NormalizeLatinFontFamily -Text '答：______') -ne 'Arial') { throw 'Formula family probe: a CJK-only answer blank must stay on the latin UI font.' }
     if ((Get-NormalizeLatinFontFamily -Text '一、教学目标') -ne 'Arial') { throw 'Formula family probe: body text must stay on the latin UI font.' }
     if ((Get-NormalizeLatinFontFamily -Text 'https://example.com/I=1') -ne 'Arial') { throw 'Formula family probe: URL-like text must stay on the latin UI font.' }
+    $fittedProbe = Get-FittedOverflowFontSize -CurrentSize 28 -TargetWidth 586 -TargetHeight 99.2 -ShapeWidth 570.2 -ShapeHeight 105 -MinimumSize 24
+    if ([double]$fittedProbe -ne 26.5) { throw "Fit-size probe: expected the 16.1 slide12 class overflow to fit at 26.5 pt, got $fittedProbe." }
+    if ($null -ne (Get-FittedOverflowFontSize -CurrentSize 20 -TargetWidth 586 -TargetHeight 99.2 -ShapeWidth 570.2 -ShapeHeight 105 -MinimumSize 24)) { throw 'Fit-size probe: a below-minimum fitted size must be rejected.' }
+    if ($null -ne (Get-FittedOverflowFontSize -CurrentSize 28 -TargetWidth 100 -TargetHeight 99.2 -ShapeWidth 570.2 -ShapeHeight 105 -MinimumSize 24)) { throw 'Fit-size probe: a non-overflowing target must not be fitted.' }
+    if ($null -ne (Get-FittedOverflowFontSize -CurrentSize 0 -TargetWidth 586 -TargetHeight 99.2 -ShapeWidth 570.2 -ShapeHeight 105 -MinimumSize 24)) { throw 'Fit-size probe: an unavailable author size must be rejected.' }
 } finally {
     Set-Variable -Name Style -Scope Script -Value $probeStyleBackup -ErrorAction SilentlyContinue
 }

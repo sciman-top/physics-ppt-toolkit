@@ -658,12 +658,40 @@ function Test-IsFormulaCandidateText {
     return $false
 }
 
-function Get-NormalizeLatinFontFamily {
-    # Formula-like text follows the math family: serif italic letterforms keep
-    # quantity letters (I, U, R) readable as symbols instead of lowercase l.
-    # Body text follows the latin UI family.
+function Test-IsFormulaFragmentText {
+    # Fill-in-the-blank formula fragments split across sibling shapes: the
+    # author leaves '=' in its own shape (answer reveal), so letter segments
+    # like "电源电压 U ___ U灯" or "∴ UCE ___UAD" never satisfy
+    # Test-IsFormulaCandidateText on their own. A literal underscore blank is
+    # mandatory, every latin run must be quantity-symbol shaped, and either a
+    # CJK subscript or a multi-letter uppercase subscript must be present, so
+    # unit conversion blanks (kV ___ mV) and value labels stay on the latin
+    # UI family.
     param([string]$Text)
-    if (Test-IsFormulaCandidateText -Text $Text) { return $script:Style.FontMath }
+    $t = ($Text -replace '\s+', '')
+    if ([string]::IsNullOrWhiteSpace($t)) { return $false }
+    if ($t -match '(?i)(https?://|www\.|[A-Za-z]:[\\/])') { return $false }
+    if ($t.Length -gt 40) { return $false }
+    if ($t -notmatch '__') { return $false }
+    $stripped = $t -replace '_+', '' -replace '[＝，,、。．（）()\[\]【】∵∴：:；;''"]', ''
+    if ([string]::IsNullOrWhiteSpace($stripped)) { return $false }
+    if ($stripped -notmatch '[A-Za-z]') { return $false }
+    if ($stripped -notmatch '^([A-Za-z][A-Za-z0-9]{0,3}|[\u4e00-\u9fa5])+$') { return $false }
+    # Unit conversion blanks (kV ___ mV, V ___ A) carry no CJK and no run of
+    # three consecutive uppercase letters; a quantity fragment always has a
+    # CJK subscript or a letter+multi-uppercase-subscript run whose stripped
+    # concatenation yields [A-Z]{3} (UCE/UAD). -cmatch: -match is
+    # case-insensitive and would read kV as two uppercase letters.
+    return (($stripped -match '[\u4e00-\u9fa5]') -or ($stripped -cmatch '[A-Z]{3}'))
+}
+
+function Get-NormalizeLatinFontFamily {
+    # Formula-like text and fill-in-the-blank formula fragments follow the
+    # math family: serif italic letterforms keep quantity letters (I, U, R)
+    # readable as symbols instead of lowercase l. Body text follows the latin
+    # UI family.
+    param([string]$Text)
+    if ((Test-IsFormulaCandidateText -Text $Text) -or (Test-IsFormulaFragmentText -Text $Text)) { return $script:Style.FontMath }
     return $script:Style.FontLatin
 }
 
@@ -924,6 +952,30 @@ function Test-TextRangeFitsShape {
         Width = $bounds.Width
         Height = $bounds.Height
     }
+}
+
+function Get-FittedOverflowFontSize {
+    # Half-point stepped shrink that would bring measured target bounds inside
+    # the protected shape (+ tolerance). Pure decision so the gate can probe
+    # it; $null means no safe fitted size exists and the caller must roll the
+    # font normalization back.
+    param(
+        [double]$CurrentSize,
+        [double]$TargetWidth,
+        [double]$TargetHeight,
+        [double]$ShapeWidth,
+        [double]$ShapeHeight,
+        [double]$MinimumSize,
+        [double]$TolerancePt = 6.0
+    )
+    if ($CurrentSize -le 0 -or $TargetWidth -le 0 -or $TargetHeight -le 0) { return $null }
+    $wRatio = ($ShapeWidth + $TolerancePt) / $TargetWidth
+    $hRatio = ($ShapeHeight + $TolerancePt) / $TargetHeight
+    $scale = [Math]::Min($wRatio, $hRatio) * 0.98
+    if ($scale -ge 1.0) { return $null }
+    $fitted = [Math]::Floor(($CurrentSize * $scale) * 2.0) / 2.0
+    if ($fitted -lt $MinimumSize -or $fitted -ge $CurrentSize) { return $null }
+    return $fitted
 }
 
 function Get-TextRangeLineLayout {
@@ -1472,16 +1524,63 @@ function Set-AutoSizeTextFontSafely {
         if ($contentFitRisk) {
             $beforeBoundsText = if ($beforeFit.Available) { "{0:N1}x{1:N1}" -f $beforeFit.Width, $beforeFit.Height } else { 'unavailable' }
             $targetBoundsText = if ($targetFit.Available) { "{0:N1}x{1:N1}" -f $targetFit.Width, $targetFit.Height } else { 'unavailable' }
-            & $setFontFamily '' '' -Rollback
-            $Shape.Left = [single]$left
-            $Shape.Top = [single]$top
-            $Shape.Width = [single]$width
-            $Shape.Height = [single]$height
+            # A marginal overflow can be settled by a half-point stepped size
+            # fit instead of losing the family normalization entirely: the
+            # fitted size must keep the line layout unchanged, actually fit,
+            # and never drop below the configured minimum; anything else rolls
+            # the family, size, and geometry back exactly as before.
+            $authorSize = Get-TextRangeFontSize $textRange
+            $fittedSize = $null
+            if ($null -ne $authorSize -and $targetFit.Available) {
+                $fittedSize = Get-FittedOverflowFontSize -CurrentSize $authorSize -TargetWidth $targetFit.Width -TargetHeight $targetFit.Height `
+                    -ShapeWidth $width -ShapeHeight $height -MinimumSize $script:Style.SizeMinimum
+            }
+            $fittedKept = $false
+            if ($null -ne $fittedSize) {
+                $textRange.Font.Size = $fittedSize
+                $fittedLayout = Get-TextRangeLineLayout -TextRange $textRange
+                $fittedFit = Test-TextRangeFitsShape -TextRange $textRange -ShapeWidth $width -ShapeHeight $height
+                if ($fittedFit.Fits -and (Test-TextRangeLayoutUnchanged -Before $beforeLayout -After $fittedLayout)) {
+                    $fittedKept = $true
+                }
+            }
+            if (-not $fittedKept) {
+                if ($null -ne $fittedSize) {
+                    try { $textRange.Font.Size = $authorSize } catch { }
+                }
+                & $setFontFamily '' '' -Rollback
+                $Shape.Left = [single]$left
+                $Shape.Top = [single]$top
+                $Shape.Width = [single]$width
+                $Shape.Height = [single]$height
+                Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
+                    -Issue 'TextStyleSkippedContentFitRisk' `
+                    -Details ("Target font {0}/{1} produced text bounds {2} against protected shape {3:N1}x{4:N1}; original bounds were {5}. Font and geometry were rolled back." -f $latinTarget, $script:Style.FontChinese, $targetBoundsText, $width, $height, $beforeBoundsText) `
+                    -RuleId 'SAFETY.GEOMETRY.AUTOSIZE' -Property 'FontName/NameFarEast' -Before $beforeSummary -After $beforeSummary `
+                    -RiskLevel 'R0' -Result 'Skipped'
+                return
+            }
+            $fittedDrift = Get-AutoSizeGeometryDrift -Shape $Shape -Left $left -Top $top -Width $width -Height $height
+            $fittedRestored = ($fittedDrift -gt 0.05)
+            if ($fittedRestored) {
+                $Shape.Left = [single]$left
+                $Shape.Top = [single]$top
+                $Shape.Width = [single]$width
+                $Shape.Height = [single]$height
+            }
             Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
-                -Issue 'TextStyleSkippedContentFitRisk' `
-                -Details ("Target font {0}/{1} produced text bounds {2} against protected shape {3:N1}x{4:N1}; original bounds were {5}. Font and geometry were rolled back." -f $latinTarget, $script:Style.FontChinese, $targetBoundsText, $width, $height, $beforeBoundsText) `
-                -RuleId 'SAFETY.GEOMETRY.AUTOSIZE' -Property 'FontName/NameFarEast' -Before $beforeSummary -After $beforeSummary `
-                -RiskLevel 'R0' -Result 'Skipped'
+                -Issue 'TextStyleNormalizedFitSize' `
+                -Details ("Target font {0}/{1} overflowed the protected shape ({2} vs {3:N1}x{4:N1}); author size {5} pt was fitted to {6} pt with line layout unchanged and geometry restored." -f $latinTarget, $script:Style.FontChinese, $targetBoundsText, $width, $height, $authorSize, $fittedSize) `
+                -RuleId 'STYLE.TEXT.FONT' -Property 'FontName/NameFarEast/Size' -Before ("{0}|{1}|{2}" -f $beforeName, $beforeFarEast, $authorSize) `
+                -After ("{0}|{1}|{2}" -f $latinTarget, $script:Style.FontChinese, $fittedSize) -RiskLevel 'R1' -Result 'Applied'
+            if ($fittedRestored) {
+                Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
+                    -Issue 'AutoSizeGeometryRestored' -Details 'Fitted-size font normalization completed with AutoSize geometry restored to the original bounds.' `
+                    -RuleId 'SAFETY.GEOMETRY.AUTOSIZE' -Property 'Left/Top/Width/Height/AutoSize' `
+                    -Before ("{0}|{1}|{2}|{3}|{4}" -f $left, $top, $width, $height, $autoSize) `
+                    -After ("{0}|{1}|{2}|{3}|{4}" -f $Shape.Left, $Shape.Top, $Shape.Width, $Shape.Height, $Shape.TextFrame2.AutoSize) `
+                    -RiskLevel 'R1' -Result 'Applied'
+            }
             return
         }
 
@@ -1771,9 +1870,15 @@ function Normalize-TextShape {
     }
 
     if (Test-ShapeUsesAutomaticSizing -Shape $Shape) {
+        $isFormulaLike = Test-IsFormulaCandidateText -Text $Text
+        $isFormulaFragment = -not $isFormulaLike -and (Test-IsFormulaFragmentText -Text $Text)
         $latinFamily = Get-NormalizeLatinFontFamily -Text $Text
-        if (Test-IsFormulaCandidateText -Text $Text) {
-            $autoFormulaProfile = Add-FormulaCandidateReport -FileName $FileName -SlideNumber $SlideNumber -ShapeName (Get-ShapeName $Shape) -Text $Text
+        if ($isFormulaLike -or $isFormulaFragment) {
+            $formulaKind = 'FormulaFragment'
+            if ($isFormulaLike) {
+                $autoFormulaProfile = Add-FormulaCandidateReport -FileName $FileName -SlideNumber $SlideNumber -ShapeName (Get-ShapeName $Shape) -Text $Text
+                $formulaKind = $autoFormulaProfile.Kind
+            }
             # The math family keeps quantity letters (I, U, R) serif-italic and
             # distinct from lowercase l; the fit, relayout, and geometry guards
             # in Set-AutoSizeTextFontSafely apply to it unchanged. Only semantic
@@ -1781,7 +1886,7 @@ function Normalize-TextShape {
             $mathFamilyApplied = (Test-StyleRuleEnabled -RuleId 'STYLE.TEXT.FONT') -and ($latinFamily -eq $script:Style.FontMath)
             Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName (Get-ShapeName $Shape) `
                 -Issue 'FormulaStyleAutoSizeMathFamily' `
-                -Details ("Formula-like text detected as {0}; latin family follows the math font while size, color, alignment, and AutoSize geometry stay protected; semantic formula styling is deferred to the reviewed OMML path." -f $autoFormulaProfile.Kind) `
+                -Details ("Formula-like text detected as {0}; latin family follows the math font while size, color, alignment, and AutoSize geometry stay protected; semantic formula styling is deferred to the reviewed OMML path." -f $formulaKind) `
                 -RuleId 'STYLE.FORMULA.TEXT' -Property 'FontName' -RiskLevel 'R1' -Result $(if ($mathFamilyApplied) { 'Applied' } else { 'Skipped' })
         }
         $capLeft = [double]$Shape.Left
