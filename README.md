@@ -45,7 +45,7 @@ physics-ppt-toolkit/
 ├─ manual/                                宿主 AI 只读视觉复核 skill
 ├─ assets/                                品牌图资产（brand/ 背景、图标、水印）
 ├─ PPTX/                                  真实样本资产
-└─ 一键*.cmd                              三个一键入口
+└─ 一键*.cmd                              四个一键入口
 ```
 
 ---
@@ -55,9 +55,10 @@ physics-ppt-toolkit/
 ```text
 1. 把 PPTX 文件放进一个文件夹。
 2. 双击 `一键规范化并导出PDF.cmd`，或把 PPTX/文件夹拖到该文件上（文件名保留兼容）。
-3. 脚本自动检查、规范化 PPTX、导出 PDF，并生成简短报告；默认不导出页面图片。
-4. 处理完成后直接打开生成的 PPTX 复核。
-5. 如报告提示异常页，在生成的完整 PPTX 中定位查看并人工修正。
+3. 需要品牌刷新和强调框完整样式链时，双击 `一键全链规范化并导出PDF.cmd`。
+4. 脚本自动检查、处理 PPTX、导出 PDF，并生成简短报告；默认不导出页面图片。
+5. 处理完成后直接打开生成的 PPTX 复核。
+6. 如报告提示异常页，在生成的完整 PPTX 中定位查看并人工修正。
 ```
 
 ---
@@ -114,15 +115,21 @@ reports/13.2内能（王耀强）_v12/
 # 宿主 AI 审查后，验证结果 JSON 并写入 manifest；Blocked 会明确标记为不可交付
 .\tools\Import-PptxAiReviewResult.ps1 -ManifestPath "D:\课件\输出\review-manifest.json" -ResultPath "D:\课件\输出\ai-visual-review-result.json"
 
-# 增强一键：白名单公式转可编辑 OfficeMath/OMML，并做 Open XML 结构校验
-.\tools\Invoke-PhysicsPptWorkflow.ps1 -InputPath "D:\课件\原始PPT" -Recurse -Mode NormalizeAndPdf -SkipPreflightReport -ApplyFormulaOmmlWhitelist
+# 全链一键：规范化 → 品牌刷新 → 强调框统一，并从最后副本导出 PDF
+.\tools\Invoke-PhysicsPptWorkflow.ps1 -InputPath "D:\课件\原始PPT" -Recurse -Mode NormalizeAndPdf -SkipPreflightReport -FullChain
 
-# 全链一键：规范化 → 品牌刷新 → 强调框统一（→ 可再加 -ApplyFormulaOmmlWhitelist），
-# 阶段副本与最终 PDF 都落在同一交付目录的 01_交付物 内
-.\tools\Invoke-PhysicsPptWorkflow.ps1 -InputPath "D:\课件\原始PPT" -Recurse -Mode NormalizeAndPdf -SkipPreflightReport -BrandRefresh -HighlightBox
+# 全链后另行执行已明确授权的白名单公式写回
+.\tools\Invoke-PhysicsPptWorkflow.ps1 -InputPath "D:\课件\原始PPT" -Recurse -Mode NormalizeAndPdf -SkipPreflightReport -FullChain -ApplyFormulaOmmlWhitelist
+
+# 单独全链启动器：始终执行全部三个样式阶段，并验证最终 PDF 页数
+.\一键全链规范化并导出PDF.cmd "D:\课件\原始PPT"
+
+# -FullChain 只接受 NormalizeAndPdf / ForceRebuild；公式写回需另行请求。
+# 使用 -IncludeReviewArtifacts / -IncludeVisualAudit 产生的图像和审计代表规范化副本；当前 AI packet 也只审查该副本，不能用于全链最终验收。
+# 视觉验收请打开全链最终 PPTX 或 PDF；FullChain 与 -PrepareAiVisualReview/-AiVisualReviewResult 组合会被拒绝。
 
 # 深度视觉审查：需要逐页 PNG、自动确认和低风险修复副本时再开启
-.\tools\Invoke-PhysicsPptWorkflow.ps1 -InputPath "D:\课件\原始PPT" -Recurse -Mode NormalizeAndPdf -IncludeReviewArtifacts -IncludeVisualAudit -ApplyVisualAuditFixes -ApplyFormulaOmmlWhitelist -FormulaOmmlVisualAudit
+.\tools\Invoke-PhysicsPptWorkflow.ps1 -InputPath "D:\课件\原始PPT" -Recurse -Mode NormalizeAndPdf -FullChain -IncludeReviewArtifacts -IncludeVisualAudit -ApplyVisualAuditFixes -ApplyFormulaOmmlWhitelist -FormulaOmmlVisualAudit
 
 # 可选防误触模式：仅在明确需要时关闭鼠标单击换片
 .\tools\Invoke-PhysicsPptWorkflow.ps1 -InputPath "D:\课件\原始PPT" -Recurse -Mode NormalizeAndPdf -DisableAdvanceOnClick

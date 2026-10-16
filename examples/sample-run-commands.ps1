@@ -13,6 +13,15 @@ cd (Split-Path -Parent $PSScriptRoot)
   -SkipPreflightReport `
   -OpenGeneratedPptx
 
+# 1a. 完整样式链：规范化 → 品牌刷新 → 强调框统一 → 从最终副本导出 PDF
+.\tools\Invoke-PhysicsPptWorkflow.ps1 `
+  -InputPath "D:\课件\原始PPT" `
+  -Recurse `
+  -Mode NormalizeAndPdf `
+  -SkipPreflightReport `
+  -FullChain `
+  -OpenGeneratedPptx
+
 # 2. 只生成检查报告，不修改 PPT
 .\tools\Invoke-PhysicsPptWorkflow.ps1 `
   -InputPath "D:\课件\原始PPT" `
@@ -37,12 +46,13 @@ cd (Split-Path -Parent $PSScriptRoot)
   -IncludeReviewArtifacts `
   -IncludeVisualAudit
 
-# 6. 增强一键：白名单公式转换为可编辑 OfficeMath/OMML 副本，并做结构校验（中速默认）
+# 6. 全链后额外请求白名单公式转换为可编辑 OfficeMath/OMML 副本，并做结构校验
 .\tools\Invoke-PhysicsPptWorkflow.ps1 `
   -InputPath "D:\课件\原始PPT" `
   -Recurse `
   -Mode NormalizeAndPdf `
   -SkipPreflightReport `
+  -FullChain `
   -ApplyFormulaOmmlWhitelist `
   -OpenGeneratedPptx
 
@@ -51,6 +61,7 @@ cd (Split-Path -Parent $PSScriptRoot)
   -InputPath "D:\课件\原始PPT" `
   -Recurse `
   -Mode NormalizeAndPdf `
+  -FullChain `
   -IncludeReviewArtifacts `
   -IncludeVisualAudit `
   -ApplyVisualAuditFixes `

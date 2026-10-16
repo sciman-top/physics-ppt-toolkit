@@ -6,6 +6,8 @@
   Creates a timestamped output workspace, runs a light self-check (full repository gate with -FullSelfCheck),
   optionally runs report-only inspection,
   normalizes PPTX/PPTM files, exports same-name PDFs, and writes summary.md plus review-manifest.json.
+  -FullChain makes the complete style sequence atomic: normalize, brand refresh, highlight-box styling,
+  then export a PDF from the final highlight-box copy. Every stage is verified in the manifest.
   SafeNormalize can be used explicitly when PDF/page image export is not needed.
   Detailed visual review artifacts can be generated explicitly with -IncludeReviewArtifacts.
   Rule-based rendered visual audits and deterministic low-risk layout fixes can be enabled with
@@ -53,6 +55,10 @@
 .PARAMETER ApplyFormulaOmmlWhitelist
   Generate editable OfficeMath/OMML copies for formula whitelist hits, then validate them with Open XML.
 
+.PARAMETER FullChain
+  Run the complete style chain: normalization -> brand refresh -> highlight-box styling -> final PDF export.
+  Requires NormalizeAndPdf or ForceRebuild. Formula OMML write-back remains a separate explicit option.
+
 .PARAMETER FormulaOmmlVisualAudit
   Also run the slow rendered visual audit on OMML copies. The default fast formula path uses Open XML validation only.
 
@@ -98,6 +104,7 @@ param(
     [string]$AiVisualReviewResult,
     [switch]$IncludeVisualAudit,
     [switch]$ApplyVisualAuditFixes,
+    [switch]$FullChain,
     [switch]$BrandRefresh,
     [switch]$HighlightBox,
     [switch]$ApplyFormulaOmmlWhitelist,
@@ -148,6 +155,18 @@ if ($script:FormulaProcessingModeExplicit -and
     $script:FormulaProcessingMode -in @('ReportOnly', 'CandidateOnly', 'ReviewRequired') -and
     $ApplyFormulaOmmlWhitelist) {
     throw "Formula processing mode $($script:FormulaProcessingMode) forbids PPTX write-back; use ExplicitMigration or remove -ApplyFormulaOmmlWhitelist."
+}
+if ($FullChain) {
+    if ($Mode -notin @('NormalizeAndPdf', 'ForceRebuild')) {
+        throw '-FullChain requires -Mode NormalizeAndPdf or ForceRebuild because the final style copy must be exported and page-count verified as PDF.'
+    }
+    # Treat the named chain as one contract. Callers must not remember two
+    # independent stage switches and accidentally produce a partial result.
+    $BrandRefresh = [System.Management.Automation.SwitchParameter]::Present
+    $HighlightBox = [System.Management.Automation.SwitchParameter]::Present
+    if ($PrepareAiVisualReview -or -not [string]::IsNullOrWhiteSpace($AiVisualReviewResult)) {
+        throw '-FullChain cannot use -PrepareAiVisualReview/-AiVisualReviewResult: the current AI packet reviews normalized pages, not the final brand/highlight copy. Review the final .callout PPTX or PDF directly.'
+    }
 }
 if (($BrandRefresh -or $HighlightBox -or $ApplyFormulaOmmlWhitelist) -and $Mode -eq 'CheckOnly') {
     throw '-BrandRefresh/-HighlightBox/-ApplyFormulaOmmlWhitelist produce PPTX write-backs and require a normalization mode; CheckOnly never writes deliverables.'
@@ -443,6 +462,9 @@ function Get-DeliveryGateAssessment {
     $blocked = New-Object System.Collections.Generic.List[string]
     $review = New-Object System.Collections.Generic.List[string]
     $requiresDeliveryArtifacts = ($Mode -ne 'CheckOnly')
+    foreach ($failure in @((Get-ObjectPropertyValue -Object $Manifest -PropertyName 'fullChainFailures' -DefaultValue @()))) {
+        $blocked.Add([string]$failure) | Out-Null
+    }
     foreach ($file in @($Manifest.files)) {
         $name = [string](Get-ObjectPropertyValue -Object $file -PropertyName 'displayName' -DefaultValue $file.input)
         if ($Mode -ne 'CheckOnly' -and [string]$file.status -ne 'success') {
@@ -852,9 +874,121 @@ function New-Manifest {
         output = $OutputRoot
         report = $ReportPath
         reviewArtifactsEnabled = $IncludeReviewArtifacts
+        fullChainEnabled = $false
+        fullChainDefinition = @('Normalize', 'BrandRefresh', 'HighlightBox', 'FinalPdf')
+        fullChainStatus = 'NotRequested'
+        fullChainFailures = @()
         formulaReviewIndex = $FormulaReviewIndex
         files = @($items)
     }
+}
+
+function Get-FullChainDeliveryFailures {
+    param($Manifest)
+
+    if (-not [bool](Get-ObjectPropertyValue -Object $Manifest -PropertyName 'fullChainEnabled' -DefaultValue $false)) {
+        return @()
+    }
+
+    $failures = New-Object System.Collections.Generic.List[string]
+    $manifestFiles = @((Get-ObjectPropertyValue -Object $Manifest -PropertyName 'files' -DefaultValue @()))
+    $chain = Get-ObjectPropertyValue -Object $Manifest -PropertyName 'brandStageArtifacts' -DefaultValue $null
+    if ($null -eq $chain) {
+        return @('FullChain: brand/highlight stage receipt is missing.')
+    }
+    if (-not [bool](Get-ObjectPropertyValue -Object $chain -PropertyName 'runBrand' -DefaultValue $false)) {
+        $failures.Add('FullChain: brand refresh stage was not enabled.') | Out-Null
+    }
+    if (-not [bool](Get-ObjectPropertyValue -Object $chain -PropertyName 'runHighlight' -DefaultValue $false)) {
+        $failures.Add('FullChain: highlight-box stage was not enabled.') | Out-Null
+    }
+
+    $chainFiles = @((Get-ObjectPropertyValue -Object $chain -PropertyName 'files' -DefaultValue @()))
+    if ($chainFiles.Count -ne $manifestFiles.Count) {
+        $failures.Add("FullChain: stage receipts cover $($chainFiles.Count) of $($manifestFiles.Count) input file(s).") | Out-Null
+    }
+
+    foreach ($file in $manifestFiles) {
+        $name = [string](Get-ObjectPropertyValue -Object $file -PropertyName 'displayName' -DefaultValue (Get-ObjectPropertyValue -Object $file -PropertyName 'input' -DefaultValue 'input'))
+        $inputPath = [string](Get-ObjectPropertyValue -Object $file -PropertyName 'input' -DefaultValue '')
+        $records = @($chainFiles | Where-Object { [string](Get-ObjectPropertyValue -Object $_ -PropertyName 'file' -DefaultValue '') -eq $inputPath })
+        if ($records.Count -ne 1) {
+            $failures.Add("${name}: FullChain stage receipt count is $($records.Count); expected exactly one.") | Out-Null
+            continue
+        }
+        $record = $records[0]
+        if ([string](Get-ObjectPropertyValue -Object $record -PropertyName 'status' -DefaultValue '') -ne 'Completed') {
+            $failures.Add("${name}: FullChain stage status is $((Get-ObjectPropertyValue -Object $record -PropertyName 'status' -DefaultValue 'Missing')).") | Out-Null
+        }
+
+        $requiredArtifacts = @(
+            @{ Property = 'normalizedPptx'; Label = 'normalized PPTX'; HashProperty = 'normalizedPptxSha256'; File = $file },
+            @{ Property = 'brandSourcePptx'; Label = 'brand-stage input'; HashProperty = 'brandSourcePptxSha256'; File = $record },
+            @{ Property = 'brandPptx'; Label = 'brand-refresh PPTX'; HashProperty = 'brandPptxSha256'; File = $record },
+            @{ Property = 'highlightSourcePptx'; Label = 'highlight-box stage input'; HashProperty = 'highlightSourcePptxSha256'; File = $record },
+            @{ Property = 'highlightPptx'; Label = 'highlight-box PPTX'; HashProperty = 'highlightPptxSha256'; File = $record },
+            @{ Property = 'finalPptx'; Label = 'final PPTX'; HashProperty = 'finalPptxSha256'; File = $record },
+            @{ Property = 'finalPdf'; Label = 'final PDF'; HashProperty = 'finalPdfSha256'; File = $record }
+        )
+        foreach ($artifact in $requiredArtifacts) {
+            $path = [string](Get-ObjectPropertyValue -Object $artifact.File -PropertyName $artifact.Property -DefaultValue '')
+            if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                $failures.Add("${name}: FullChain $($artifact.Label) is missing.") | Out-Null
+                continue
+            }
+            if ((Get-Item -LiteralPath $path).Length -le 0) {
+                $failures.Add("${name}: FullChain $($artifact.Label) is empty.") | Out-Null
+                continue
+            }
+            $expectedHash = [string](Get-ObjectPropertyValue -Object $artifact.File -PropertyName $artifact.HashProperty -DefaultValue '')
+            $actualHash = Get-FileSha256OrNull -Path $path
+            if ([string]::IsNullOrWhiteSpace($expectedHash) -or $actualHash -cne $expectedHash) {
+                $failures.Add("${name}: FullChain $($artifact.Label) hash is missing or changed.") | Out-Null
+            }
+        }
+
+        $highlightPath = [string](Get-ObjectPropertyValue -Object $record -PropertyName 'highlightPptx' -DefaultValue '')
+        $brandSourcePath = [string](Get-ObjectPropertyValue -Object $record -PropertyName 'brandSourcePptx' -DefaultValue '')
+        $normalizedPath = [string](Get-ObjectPropertyValue -Object $file -PropertyName 'normalizedPptx' -DefaultValue '')
+        $visualFixes = @((Get-ObjectPropertyValue -Object $Manifest -PropertyName 'visualAuditArtifacts' -DefaultValue @()) | Where-Object {
+            [string](Get-ObjectPropertyValue -Object $_ -PropertyName 'file' -DefaultValue '') -eq $inputPath -and
+            [string](Get-ObjectPropertyValue -Object $_ -PropertyName 'fixedPptx' -DefaultValue '') -eq $brandSourcePath
+        })
+        if ($brandSourcePath -cne $normalizedPath -and $visualFixes.Count -ne 1) {
+            $failures.Add("${name}: brand refresh input is neither the normalized PPTX nor a recorded visual-fix copy.") | Out-Null
+        }
+        $highlightSourcePath = [string](Get-ObjectPropertyValue -Object $record -PropertyName 'highlightSourcePptx' -DefaultValue '')
+        $brandOutputPath = [string](Get-ObjectPropertyValue -Object $record -PropertyName 'brandPptx' -DefaultValue '')
+        if ([string]::IsNullOrWhiteSpace($brandOutputPath) -or $highlightSourcePath -cne $brandOutputPath) {
+            $failures.Add("${name}: highlight-box stage did not consume the brand-refresh output.") | Out-Null
+        }
+        $finalPptxPath = [string](Get-ObjectPropertyValue -Object $record -PropertyName 'finalPptx' -DefaultValue '')
+        if ([string]::IsNullOrWhiteSpace($highlightPath) -or $finalPptxPath -cne $highlightPath) {
+            $failures.Add("${name}: final PPTX is not the highlight-box stage output.") | Out-Null
+        }
+
+        $finalPdfPath = [string](Get-ObjectPropertyValue -Object $record -PropertyName 'finalPdf' -DefaultValue '')
+        $manifestPdfPath = [string](Get-ObjectPropertyValue -Object $file -PropertyName 'pdf' -DefaultValue '')
+        if ([string]::IsNullOrWhiteSpace($finalPdfPath) -or $manifestPdfPath -cne $finalPdfPath) {
+            $failures.Add("${name}: manifest PDF is not bound to the final-chain PDF.") | Out-Null
+        }
+        $manifestPdfHash = [string](Get-ObjectPropertyValue -Object $file -PropertyName 'pdfSha256' -DefaultValue '')
+        $chainPdfHash = [string](Get-ObjectPropertyValue -Object $record -PropertyName 'finalPdfSha256' -DefaultValue '')
+        if ([string]::IsNullOrWhiteSpace($manifestPdfHash) -or $manifestPdfHash -cne $chainPdfHash) {
+            $failures.Add("${name}: manifest PDF hash is not bound to the final-chain PDF.") | Out-Null
+        }
+        $expectedSlides = Get-ObjectPropertyValue -Object (Get-ObjectPropertyValue -Object $file -PropertyName 'validation' -DefaultValue $null) -PropertyName 'expectedSlides' -DefaultValue $null
+        $finalPdfPages = Get-ObjectPropertyValue -Object $record -PropertyName 'finalPdfPageCount' -DefaultValue $null
+        if ($null -eq $expectedSlides -or [int]$expectedSlides -le 0 -or $null -eq $finalPdfPages -or [int]$finalPdfPages -ne [int]$expectedSlides) {
+            $failures.Add("${name}: final-chain PDF page count is missing or mismatched.") | Out-Null
+        }
+        $validation = Get-ObjectPropertyValue -Object $file -PropertyName 'validation' -DefaultValue $null
+        if ($null -eq $validation -or -not [bool](Get-ObjectPropertyValue -Object $validation -PropertyName 'pdfPagesMatchExpected' -DefaultValue $false)) {
+            $failures.Add("${name}: final-chain PDF page-count validation did not pass.") | Out-Null
+        }
+    }
+
+    return @($failures.ToArray() | Select-Object -Unique)
 }
 
 function Write-Summary {
@@ -986,6 +1120,16 @@ function Write-Summary {
     $lines.Add("- 不可变属性门禁阻断：$invariantBlockedCount")
     $lines.Add("- 宿主 AI 视觉门禁：$aiVisualReviewStatus")
     $lines.Add("- 交付状态：$deliveryStatus")
+    $fullChainEnabled = [bool](Get-ObjectPropertyValue -Object $Manifest -PropertyName 'fullChainEnabled' -DefaultValue $false)
+    $fullChainStatus = [string](Get-ObjectPropertyValue -Object $Manifest -PropertyName 'fullChainStatus' -DefaultValue 'NotRequested')
+    if ($fullChainEnabled) {
+        $fullChainFailures = @((Get-ObjectPropertyValue -Object $Manifest -PropertyName 'fullChainFailures' -DefaultValue @()))
+        $lines.Add("- 全链一键状态：$fullChainStatus；失败项：$($fullChainFailures.Count)")
+        $lines.Add('- 全链定义：规范化 → 品牌刷新 → 强调框统一 → 从最终强调框副本导出 PDF')
+        $lines.Add('- 全链视觉验收：需检查最终 PPTX/PDF；现有页面图、规则审计和 AI 包绑定规范化副本')
+    } else {
+        $lines.Add('- 全链一键状态：NotRequested（本次没有请求全部样式阶段）')
+    }
     $lines.Add("- 配置字体可用/缺失/检查不可用：$configuredFontsAvailableCount / $configuredFontsMissingCount / $configuredFontCheckUnavailableCount（缺失或不可用意味着存在字体回退风险）")
     $lines.Add("- 16:9 课件画布通过/非 16:9/检查不可用：$slideAspect16By9Count / $slideAspectMismatchCount / $slideAspectCheckUnavailableCount（非 16:9 仅报告，不自动缩放画布）")
     if ($exportsPdf) {
@@ -1498,7 +1642,11 @@ function Invoke-BrandStageArtifacts {
             file = [string]$file.input
             deckStem = $safeName
             sourcePptx = $sourcePptx
+            brandSourcePptx = $sourcePptx
+            brandSourcePptxSha256 = Get-FileSha256OrNull -Path $sourcePptx
             brandPptx = $null
+            highlightSourcePptx = $null
+            highlightSourcePptxSha256 = $null
             highlightPptx = $null
             finalPptx = $sourcePptx
             finalPdf = $null
@@ -1526,6 +1674,8 @@ function Invoke-BrandStageArtifacts {
             $current = $brandPptx
         }
         if ($RunHighlight) {
+            $record.highlightSourcePptx = $current
+            $record.highlightSourcePptxSha256 = Get-FileSha256OrNull -Path $current
             $highlightPptx = Join-Path $DeliveryDir "$safeName.callout$extension"
             Write-Host "  highlight box -> $(Split-Path -Leaf $highlightPptx)"
             & $stageHost -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'Apply-PptxHighlightBoxStyle.ps1') -PptxPath $current -OutputPath $highlightPptx | Out-Host
@@ -2137,6 +2287,8 @@ $formulaReviewIndex = New-FormulaReviewIndex -Rows $rows -OutputRoot $OutputRoot
 $manifestPath = Join-Path $OutputRoot 'review-manifest.json'
 $summaryPath = Join-Path $OutputRoot 'summary.md'
 $manifest = New-Manifest -Files $files -InputFullPath $inputFullPath -OutputRoot $OutputRoot -ReportPath $finalReportPath -Mode $Mode -FormulaProcessingMode $script:FormulaProcessingMode -FormulaProcessingModeExplicit $script:FormulaProcessingModeExplicit -FormulaWriteBackRequested ([bool]$ApplyFormulaOmmlWhitelist) -IncludeReviewArtifacts ([bool]$IncludeReviewArtifacts) -ReportRows $rows -ContactSheets $contactSheets -ReviewSheets $reviewSheets -SourceImageDirs $sourceImageDirs -BeforeAfterSheets $beforeAfterSheets -ReviewPagePackages $reviewPagePackages -ReviewIndexes $reviewIndexes -FormulaReviewIndex $formulaReviewIndex -IdentityMap $identityMap
+$manifest | Add-Member -NotePropertyName fullChainEnabled -NotePropertyValue ([bool]$FullChain) -Force
+if ($FullChain) { $manifest | Add-Member -NotePropertyName fullChainStatus -NotePropertyValue 'Pending' -Force }
 
 $invariantGate = Invoke-InvariantGate -Files $files -OutputRoot $OutputRoot -NormalizedDir $normalizedDir -IdentityMap $identityMap -Mode $Mode -AllowAdvanceOnClickDisable ([bool]$DisableAdvanceOnClick)
 $manifest | Add-Member -NotePropertyName invariantGate -NotePropertyValue $invariantGate -Force
@@ -2191,10 +2343,15 @@ if ($BrandRefresh -or $HighlightBox) {
             $exported = Export-FinalChainPdf -PptxPath $finalPptx -PdfPath $finalPdf -FileName (Split-Path -Leaf $finalPptx)
             if (-not $exported) { continue }
             $chainFile.finalPdf = $finalPdf
+            $chainFile | Add-Member -NotePropertyName brandPptxSha256 -NotePropertyValue (Get-FileSha256OrNull -Path ([string](Get-ObjectPropertyValue -Object $chainFile -PropertyName 'brandPptx' -DefaultValue ''))) -Force
+            $chainFile | Add-Member -NotePropertyName highlightPptxSha256 -NotePropertyValue (Get-FileSha256OrNull -Path ([string](Get-ObjectPropertyValue -Object $chainFile -PropertyName 'highlightPptx' -DefaultValue ''))) -Force
+            $chainFile | Add-Member -NotePropertyName finalPptxSha256 -NotePropertyValue (Get-FileSha256OrNull -Path $finalPptx) -Force
+            $chainFile | Add-Member -NotePropertyName finalPdfSha256 -NotePropertyValue (Get-FileSha256OrNull -Path $finalPdf) -Force
             $deckStem = [string](Get-ObjectPropertyValue -Object $chainFile -PropertyName 'deckStem' -DefaultValue '')
             foreach ($mf in @($manifest.files)) {
                 if ([string]$mf.input -ne [string](Get-ObjectPropertyValue -Object $chainFile -PropertyName 'file' -DefaultValue '')) { continue }
                 $finalPdfPageCount = Get-PdfPageCount -PdfPath $finalPdf
+                $chainFile | Add-Member -NotePropertyName finalPdfPageCount -NotePropertyValue $finalPdfPageCount -Force
                 $expectedSlides = Get-ObjectPropertyValue -Object (Get-ObjectPropertyValue -Object $mf -PropertyName 'validation' -DefaultValue $null) -PropertyName 'expectedSlides' -DefaultValue $null
                 $mf.pdf = $finalPdf
                 $mf.pdfBytes = Get-FileLength -Path $finalPdf
@@ -2266,6 +2423,9 @@ if (-not [string]::IsNullOrWhiteSpace($AiVisualReviewResult)) {
     $manifest = $currentManifest
     $manifest | Add-Member -NotePropertyName aiVisualReview -NotePropertyValue (Get-ObjectPropertyValue -Object $importedManifest -PropertyName 'aiVisualReview' -DefaultValue $null) -Force
 }
+$fullChainFailures = @(Get-FullChainDeliveryFailures -Manifest $manifest)
+$manifest | Add-Member -NotePropertyName fullChainFailures -NotePropertyValue $fullChainFailures -Force
+$manifest | Add-Member -NotePropertyName fullChainStatus -NotePropertyValue $(if (-not $FullChain) { 'NotRequested' } elseif ($fullChainFailures.Count -eq 0) { 'Completed' } else { 'Failed' }) -Force
 $aiVisualReviewGate = Get-ObjectPropertyValue -Object $manifest -PropertyName 'aiVisualReview' -DefaultValue $null
 $invariantDeliveryBlocked = [bool]((Get-ObjectPropertyValue -Object $manifest -PropertyName 'invariantGate' -DefaultValue $null).status -eq 'Blocked')
 $aiDeliveryBlocked = [bool](Get-ObjectPropertyValue -Object $aiVisualReviewGate -PropertyName 'deliveryBlocked' -DefaultValue $false)

@@ -17,7 +17,7 @@ set "PS_HOST=pwsh.exe"
 where pwsh.exe >nul 2>&1
 if errorlevel 1 set "PS_HOST=powershell.exe"
 
-"%PS_HOST%" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%SCRIPT_DIR%tools\Invoke-PhysicsPptWorkflow.ps1" -InputPath "%INPUT%" -Recurse -Mode NormalizeAndPdf -SkipPreflightReport -ApplyFormulaOmmlWhitelist -OpenGeneratedPptx
+"%PS_HOST%" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%SCRIPT_DIR%tools\Invoke-PhysicsPptWorkflow.ps1" -InputPath "%INPUT%" -Recurse -Mode NormalizeAndPdf -SkipPreflightReport -FullChain -ApplyFormulaOmmlWhitelist -OpenGeneratedPptx
 
 if errorlevel 1 (
   echo.

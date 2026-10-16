@@ -99,6 +99,7 @@ $required = @(
     'examples\fixtures\formula-goldset.sample.csv',
     'examples\sample-run-commands.ps1',
     '一键规范化并导出PDF.cmd',
+    '一键全链规范化并导出PDF.cmd',
     '一键规范化导出并转换可编辑公式.cmd',
     '一键检查PPT.cmd'
 )
@@ -734,7 +735,7 @@ $normalizeContent = Get-Content -LiteralPath (Join-Path $root 'tools\Normalize-P
 if ($normalizeContent -match '&\s+powershell\.exe') { throw 'Parallel PowerShell workers must resolve the PS7-first host instead of hard-coding powershell.exe.' }
 if ($normalizeContent -notmatch 'Resolve-PowerShellHost') { throw 'Normalize script must use Resolve-PowerShellHost for child workers.' }
 
-foreach ($launcher in @('一键规范化并导出PDF.cmd', '一键检查PPT.cmd', '一键规范化导出并转换可编辑公式.cmd')) {
+foreach ($launcher in @('一键规范化并导出PDF.cmd', '一键全链规范化并导出PDF.cmd', '一键检查PPT.cmd', '一键规范化导出并转换可编辑公式.cmd')) {
     $launcherPath = Join-Path $root $launcher
     # cmd.exe does not strip a UTF-8 BOM: the first line turns into garbage
     # before @echo off and the launcher prints an error on every run.
@@ -744,6 +745,9 @@ foreach ($launcher in @('一键规范化并导出PDF.cmd', '一键检查PPT.cmd'
     if ($launcherContent -notmatch '(?im)where\s+pwsh\.exe') { throw "Launcher must probe pwsh first: $launcher" }
     if ($launcherContent -notmatch '(?im)set\s+"PS_HOST=pwsh\.exe"') { throw "Launcher must default to pwsh.exe: $launcher" }
     if ($launcherContent -notmatch '(?im)powershell\.exe') { throw "Launcher must retain the explicit Windows PowerShell fallback: $launcher" }
+    if ($launcher -in @('一键全链规范化并导出PDF.cmd', '一键规范化导出并转换可编辑公式.cmd') -and $launcherContent -notmatch '(?i)-FullChain') {
+        throw "Full-chain launcher must explicitly use -FullChain: $launcher"
+    }
 }
 foreach ($automationScript in @(
     'tools\Normalize-PhysicsPpt.ps1',

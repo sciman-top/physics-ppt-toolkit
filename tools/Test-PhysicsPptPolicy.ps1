@@ -16,6 +16,7 @@ $testRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('physics-ppt-policy-' +
 try {
     New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
     . (Join-Path $toolRoot 'PhysicsPpt.Common.ps1')
+    . (Join-Path $toolRoot 'PhysicsPpt.ReviewArtifacts.ps1')
     foreach ($counts in @(@(0,0), @(1,0), @(0,1))) {
         $mockApplication = [pscustomobject]@{ Presentations = @{ Count = $counts[0] }; ProtectedViewWindows = @{ Count = $counts[1] }; quitCalled = $false }
         $mockApplication | Add-Member ScriptMethod Quit { $this.quitCalled = $true }
@@ -69,12 +70,80 @@ try {
     $swappedEmphasis = Get-RunFormatFingerprint (New-FormatProbeShape @('ab', 'cd') @(0, 255)) ([ref]$readFailed)
     if ($readFailed -or $normalEmphasis -cne $splitEmphasis -or $normalEmphasis -ceq $swappedEmphasis) { throw 'Emphasis fingerprint lost positions or depended on run splitting.' }
     $workflowAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $toolRoot 'Invoke-PhysicsPptWorkflow.ps1'), [ref]$null, [ref]$null)
+    $workflowPath = Join-Path $toolRoot 'Invoke-PhysicsPptWorkflow.ps1'
+    $workflowContent = Get-Content -LiteralPath $workflowPath -Raw -Encoding UTF8
+    $fullChainParameter = @($workflowAst.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'FullChain' })
+    if ($fullChainParameter.Count -ne 1) { throw 'Workflow must expose one atomic -FullChain switch.' }
+    if ($workflowContent -notmatch '(?s)if\s*\(\$FullChain\).*?\$BrandRefresh\s*=\s*\[System\.Management\.Automation\.SwitchParameter\]::Present.*?\$HighlightBox\s*=\s*\[System\.Management\.Automation\.SwitchParameter\]::Present') {
+        throw '-FullChain must force both the brand-refresh and highlight-box stages.'
+    }
+    $workflowHost = (Get-Process -Id $PID).Path
+    foreach ($invalidFullChainMode in @('CheckOnly', 'SafeNormalize')) {
+        $modeOutput = & $workflowHost -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $workflowPath -InputPath (Join-Path $testRoot 'unused.pptx') -Mode $invalidFullChainMode -FullChain 2>&1
+        $modeExitCode = $LASTEXITCODE
+        if ($modeExitCode -eq 0 -or (($modeOutput | Out-String) -notmatch '-FullChain requires -Mode NormalizeAndPdf or ForceRebuild')) {
+            throw "-FullChain did not fail early for unsupported mode $invalidFullChainMode."
+        }
+    }
+    $reviewOutput = & $workflowHost -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $workflowPath -InputPath (Join-Path $testRoot 'unused.pptx') -Mode NormalizeAndPdf -FullChain -PrepareAiVisualReview 2>&1
+    $reviewExitCode = $LASTEXITCODE
+    if ($reviewExitCode -eq 0 -or (($reviewOutput | Out-String) -notmatch '-FullChain cannot use -PrepareAiVisualReview/-AiVisualReviewResult')) {
+        throw 'FullChain allowed normalized-only AI evidence to be treated as review of the final style copy.'
+    }
     $propertyFunction = $workflowAst.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-ObjectPropertyValue' }, $true) | Select-Object -First 1
     Invoke-Expression $propertyFunction.Extent.Text
     foreach ($propertyObject in @(@{ effectiveMode = 'ReportOnly' }, [ordered]@{ effectiveMode = 'ReportOnly' }, [pscustomobject]@{ effectiveMode = 'ReportOnly' })) {
         if ((Get-ObjectPropertyValue $propertyObject 'effectiveMode' 'Unknown') -ne 'ReportOnly') { throw 'Workflow metadata lost a dictionary property before JSON serialization.' }
         if ((Get-ObjectPropertyValue $propertyObject 'absent' 'fallback') -ne 'fallback') { throw 'Workflow metadata did not honor the missing-property default.' }
     }
+    $fullChainFunction = $workflowAst.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-FullChainDeliveryFailures' }, $true) | Select-Object -First 1
+    if ($null -eq $fullChainFunction) { throw 'FullChain artifact gate function is missing.' }
+    Invoke-Expression $fullChainFunction.Extent.Text
+    $chainFixtureDir = Join-Path $testRoot 'full-chain'
+    New-Item -ItemType Directory -Path $chainFixtureDir -Force | Out-Null
+    $chainFixturePaths = @{}
+    foreach ($artifactName in @('normalized', 'brand', 'highlight', 'final.pdf')) {
+        $artifactPath = Join-Path $chainFixtureDir ($artifactName + '.fixture')
+        [System.IO.File]::WriteAllText($artifactPath, "full-chain-$artifactName")
+        $chainFixturePaths[$artifactName] = $artifactPath
+    }
+    $normalizedHash = Get-FileSha256OrNull -Path $chainFixturePaths.normalized
+    $brandHash = Get-FileSha256OrNull -Path $chainFixturePaths.brand
+    $highlightHash = Get-FileSha256OrNull -Path $chainFixturePaths.highlight
+    $finalPdfHash = Get-FileSha256OrNull -Path $chainFixturePaths['final.pdf']
+    $chainInputPath = Join-Path $chainFixtureDir 'input.pptx'
+    $chainManifestFixture = [pscustomobject]@{
+        fullChainEnabled = $true
+        files = @([pscustomobject]@{
+            input = $chainInputPath; displayName = 'chain-fixture.pptx'; status = 'success'
+            normalizedPptx = $chainFixturePaths.normalized; normalizedPptxSha256 = $normalizedHash
+            pdf = $chainFixturePaths['final.pdf']; pdfSha256 = $finalPdfHash
+            validation = [pscustomobject]@{ expectedSlides = 2; pdfPageCount = 2; pdfPagesMatchExpected = $true }
+        })
+        brandStageArtifacts = [pscustomobject]@{
+            runBrand = $true; runHighlight = $true
+            files = @([pscustomobject]@{
+                file = $chainInputPath; status = 'Completed'
+                brandSourcePptx = $chainFixturePaths.normalized; brandSourcePptxSha256 = $normalizedHash
+                brandPptx = $chainFixturePaths.brand; brandPptxSha256 = $brandHash
+                highlightSourcePptx = $chainFixturePaths.brand; highlightSourcePptxSha256 = $brandHash
+                highlightPptx = $chainFixturePaths.highlight; highlightPptxSha256 = $highlightHash
+                finalPptx = $chainFixturePaths.highlight; finalPptxSha256 = $highlightHash
+                finalPdf = $chainFixturePaths['final.pdf']; finalPdfSha256 = $finalPdfHash; finalPdfPageCount = 2
+            })
+        }
+    }
+    if (@(Get-FullChainDeliveryFailures -Manifest $chainManifestFixture).Count -ne 0) { throw 'Complete FullChain artifacts were rejected by the delivery gate.' }
+    $chainManifestFixture.brandStageArtifacts.runHighlight = $false
+    $missingHighlightFailures = @(Get-FullChainDeliveryFailures -Manifest $chainManifestFixture)
+    if (($missingHighlightFailures -join "`n") -notmatch 'highlight-box stage was not enabled') { throw 'FullChain accepted a missing highlight-box stage.' }
+    $chainManifestFixture.brandStageArtifacts.runHighlight = $true
+    $chainManifestFixture.brandStageArtifacts.files[0].finalPdfPageCount = 1
+    $wrongPageCountFailures = @(Get-FullChainDeliveryFailures -Manifest $chainManifestFixture)
+    if (($wrongPageCountFailures -join "`n") -notmatch 'final-chain PDF page count is missing or mismatched') { throw 'FullChain accepted a final PDF with the wrong page count.' }
+    [System.IO.File]::AppendAllText($chainFixturePaths.highlight, 'tampered')
+    $changedArtifactFailures = @(Get-FullChainDeliveryFailures -Manifest $chainManifestFixture)
+    if (($changedArtifactFailures -join "`n") -notmatch 'FullChain highlight-box PPTX hash is missing or changed') { throw 'FullChain accepted a stage artifact whose bytes changed after the receipt was written.' }
     $beforePath = Join-Path $testRoot 'before.json'
     $afterPath = Join-Path $testRoot 'after.json'
     $blockedPath = Join-Path $testRoot 'blocked.json'
