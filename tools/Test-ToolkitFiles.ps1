@@ -973,13 +973,11 @@ foreach ($oleIdCase in $oleIdProbeCases) {
     }
 }
 
-# Line-layout guard decision probe: the wrap-point comparison is the last
-# defense against same-geometry re-wraps that hide sibling answer text
-# (slide 16 blank-collision class). The COM capture (Lines()) is real-host
-# only, but the decision semantics must hold: an unavailable probe stays
-# inert, and any line-count or per-line text change is a relayout.
+# Line-layout guard probe: text-only comparisons miss same-text glyph shifts
+# that can overlap a sibling answer shape. Verify indexed line capture,
+# geometry, text changes, and overlap-triggered rollback.
 $layoutDecisionText = ''
-foreach ($layoutFnName in @('Get-TextRangeLineLayout', 'Test-TextRangeLayoutUnchanged', 'Get-TextRangeLayoutChangeText', 'Get-AutoSizeGeometryDrift')) {
+foreach ($layoutFnName in @('Get-TextRangeLineLayout', 'Get-TextRangeLayoutLineText', 'Test-TextRangeHasOverlappingSiblingText', 'Test-TextRangeLayoutUnchanged', 'Get-TextRangeLayoutChangeText', 'Get-AutoSizeGeometryDrift')) {
     # Get-AutoSizeGeometryDrift lives in the geometry module; search both ASTs.
     $layoutFnAst = @(
         $normalizeReorderAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $layoutFnName }, $true)
@@ -998,17 +996,38 @@ $layoutCountChangeText = Get-TextRangeLayoutChangeText -Before $layoutBefore -Af
 if ($layoutCountChangeText -notmatch 'rendered lines 3 -> 2; first changed line 3') { throw "Line-layout probe: unexpected count-change report: $layoutCountChangeText" }
 $layoutTextChangeReport = Get-TextRangeLayoutChangeText -Before $layoutBefore -After @('答：', 'A、', 'B')
 if ($layoutTextChangeReport -notmatch 'first changed line 2') { throw "Line-layout probe: unexpected same-count change report: $layoutTextChangeReport" }
-# The capture itself must enumerate: PowerPoint COM TextRange has no Item
-# member, and the former $lines.Item($i) access threw on first use — the
-# decision assertions above stayed green while every real capture silently
-# returned $null and the rollback guard never fired. The mock exposes
-# enumeration only, so a regression back to .Item() fails right here.
-$mockLayoutLines = @([pscustomobject]@{ Text = '答： ' }, [pscustomobject]@{ Text = 'B' })
+# The mock only accepts Lines(start,length), matching PowerPoint's indexed
+# API; it also exposes COM-style bound properties for overlap checks.
+$mockLayoutLines = @(
+    [pscustomobject]@{ Text = '答： '; BoundLeft = 10.0; BoundTop = 20.0; BoundWidth = 30.0; BoundHeight = 15.0 },
+    [pscustomobject]@{ Text = 'B'; BoundLeft = 10.0; BoundTop = 35.0; BoundWidth = 12.0; BoundHeight = 15.0 }
+)
 $mockTextRange = New-Object PSObject
-$mockTextRange | Add-Member -MemberType ScriptMethod -Name Lines -Value { $mockLayoutLines }
+$mockTextRange | Add-Member -MemberType NoteProperty -Name MockLayoutLines -Value $mockLayoutLines
+$mockTextRange | Add-Member -MemberType ScriptMethod -Name Lines -Value {
+    param([int]$Start, [int]$Length)
+    if ($Length -ne 1 -or $Start -lt 1 -or $Start -gt $this.MockLayoutLines.Count) { throw 'line index out of range' }
+    return $this.MockLayoutLines[$Start - 1]
+}
 $mockCapturedLayout = Get-TextRangeLineLayout -TextRange $mockTextRange
-if ($null -eq $mockCapturedLayout -or @($mockCapturedLayout).Count -ne 2 -or [string]$mockCapturedLayout[0] -cne '答：' -or [string]$mockCapturedLayout[1] -cne 'B') {
-    throw ("Line-layout probe: capture must enumerate TextRange lines, not .Item() slices (mock captured: '{0}')." -f (($mockCapturedLayout | ForEach-Object { [string]$_ }) -join '|'))
+if ($null -eq $mockCapturedLayout -or @($mockCapturedLayout).Count -ne 2 -or [string]$mockCapturedLayout[0].Text -cne '答：' -or [string]$mockCapturedLayout[1].Text -cne 'B' -or [double]$mockCapturedLayout[0].Width -ne 30.0) {
+    throw ("Line-layout probe: capture must request indexed lines and retain their bounds (mock captured: '{0}')." -f (($mockCapturedLayout | ForEach-Object { [string]$_.Text }) -join '|'))
+}
+
+$overlapSlide = New-Object PSObject
+$overlapShape = New-Object PSObject
+$overlapShape | Add-Member -MemberType NoteProperty -Name Id -Value 1
+$overlapShape | Add-Member -MemberType NoteProperty -Name Parent -Value $overlapSlide
+$overlapTextShape = [pscustomobject]@{ Id = 2; Left = 25.0; Top = 22.0; Width = 12.0; Height = 12.0; TextFrame2 = [pscustomobject]@{ HasText = -1 } }
+$overlapSlide | Add-Member -MemberType NoteProperty -Name Shapes -Value @($overlapShape, $overlapTextShape)
+$metricBefore = @([pscustomobject]@{ Text = 'U = U1'; Left = 10.0; Top = 20.0; Width = 50.0; Height = 16.0 })
+$metricAfter = @([pscustomobject]@{ Text = 'U = U1'; Left = 10.0; Top = 20.0; Width = 55.0; Height = 16.0 })
+if (Test-TextRangeLayoutUnchanged -Before $metricBefore -After $metricAfter -Shape $overlapShape) {
+    throw 'Line-layout probe: a changed glyph bound overlapping a sibling answer must be rejected.'
+}
+$overlapSlide.Shapes = @($overlapShape)
+if (-not (Test-TextRangeLayoutUnchanged -Before $metricBefore -After $metricAfter -Shape $overlapShape)) {
+    throw 'Line-layout probe: a font metric change without a sibling overlap must remain eligible for normalization.'
 }
 
 # AutoSize geometry drift probe: the rollback trigger measures the max

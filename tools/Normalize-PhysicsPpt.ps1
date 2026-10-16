@@ -878,7 +878,7 @@ function Set-FormulaTextStyle {
         $textRange.ParagraphFormat.Alignment = $script:PpAlignCenter
 
         $afterLayout = Get-TextRangeLineLayout -TextRange $textRange
-        if (-not (Test-TextRangeLayoutUnchanged -Before $beforeLayout -After $afterLayout)) {
+        if (-not (Test-TextRangeLayoutUnchanged -Before $beforeLayout -After $afterLayout -Shape $Shape)) {
             $font.Name = $beforeName
             $font.NameFarEast = $beforeFarEast
             $font.Size = $beforeSize
@@ -979,34 +979,106 @@ function Get-FittedOverflowFontSize {
 }
 
 function Get-TextRangeLineLayout {
-    # Rendered per-line text of a range.  A family/size write can re-wrap a
-    # shape while its bounds and line count stay unchanged, and sibling answer
-    # shapes anchor to the old break points (slide 16 blank-collision class).
+    # Snapshot line text and bounds with indexed TextRange.Lines calls. Text alone
+    # misses same-text glyph shifts that can overlap sibling answer/formula shapes.
     # $null means the COM probe is unavailable; callers must stay inert rather
     # than block normalization on a missing probe.
     param($TextRange)
     try {
-        # PowerPoint COM TextRange exposes no Item member (the slice form is
-        # Lines(start,length)); foreach enumeration is the supported element
-        # access — an .Item() call throws and would leave the guard inert.
-        $texts = New-Object 'System.Collections.Generic.List[string]'
-        foreach ($line in @($TextRange.Lines())) {
-            $texts.Add(([string]$line.Text).TrimEnd("`r", "`v", ' ', '　'))
+        $lines = New-Object 'System.Collections.Generic.List[object]'
+        for ($lineNumber = 1; $lineNumber -le 4096; $lineNumber++) {
+            try {
+                $line = $TextRange.Lines($lineNumber, 1)
+            } catch {
+                if ($lineNumber -eq 1) { return $null }
+                break
+            }
+            if ($null -eq $line) { break }
+            $lineText = ([string]$line.Text).TrimEnd("`r", "`v", ' ', '　')
+            $bounds = @{ Left = $null; Top = $null; Width = $null; Height = $null }
+            foreach ($bound in @(@{ Source = 'BoundLeft'; Target = 'Left' }, @{ Source = 'BoundTop'; Target = 'Top' }, @{ Source = 'BoundWidth'; Target = 'Width' }, @{ Source = 'BoundHeight'; Target = 'Height' })) {
+                try { $bounds[$bound.Target] = [double]$line.($bound.Source) } catch { }
+            }
+            $lines.Add([pscustomobject]@{
+                Text = $lineText
+                Left = $bounds.Left
+                Top = $bounds.Top
+                Width = $bounds.Width
+                Height = $bounds.Height
+            })
         }
-        if ($texts.Count -le 0) { return $null }
-        return ,$texts.ToArray()
+        if ($lineNumber -gt 4096 -or $lines.Count -le 0) { return $null }
+        return ,$lines.ToArray()
     } catch {
         return $null
     }
 }
 
+function Get-TextRangeLayoutLineText {
+    param($Line)
+    if ($Line -is [string]) { return [string]$Line }
+    try { return [string]$Line.Text } catch { return [string]$Line }
+}
+
+function Test-TextRangeHasOverlappingSiblingText {
+    param($Shape, $Lines)
+    if ($null -eq $Shape) { return $null }
+    try {
+        $shapeId = [int]$Shape.Id
+        $siblings = @($Shape.Parent.Shapes)
+    } catch {
+        return $null
+    }
+    foreach ($line in @($Lines)) {
+        if ($null -eq $line) { continue }
+        $leftProperty = $line.PSObject.Properties['Left']
+        $topProperty = $line.PSObject.Properties['Top']
+        $widthProperty = $line.PSObject.Properties['Width']
+        $heightProperty = $line.PSObject.Properties['Height']
+        if ($null -eq $leftProperty -or $null -eq $topProperty -or $null -eq $widthProperty -or $null -eq $heightProperty) { continue }
+        if ($null -eq $leftProperty.Value -or $null -eq $topProperty.Value -or $null -eq $widthProperty.Value -or $null -eq $heightProperty.Value) { continue }
+        try {
+            $lineLeft = [double]$leftProperty.Value
+            $lineTop = [double]$topProperty.Value
+            $lineRight = $lineLeft + [double]$widthProperty.Value
+            $lineBottom = $lineTop + [double]$heightProperty.Value
+        } catch { continue }
+        foreach ($sibling in $siblings) {
+            try {
+                if ([int]$sibling.Id -eq $shapeId) { continue }
+                if ([int]$sibling.TextFrame2.HasText -ne -1) { continue }
+                $siblingLeft = [double]$sibling.Left
+                $siblingTop = [double]$sibling.Top
+                $siblingRight = $siblingLeft + [double]$sibling.Width
+                $siblingBottom = $siblingTop + [double]$sibling.Height
+                if ($lineLeft -lt $siblingRight -and $lineRight -gt $siblingLeft -and $lineTop -lt $siblingBottom -and $lineBottom -gt $siblingTop) {
+                    return $true
+                }
+            } catch { }
+        }
+    }
+    return $false
+}
+
 function Test-TextRangeLayoutUnchanged {
-    param($Before, $After)
+    param($Before, $After, $Shape, [double]$GeometryTolerancePt = 1.0)
     if ($null -eq $Before -or $null -eq $After) { return $true }
     if ($Before.Count -ne $After.Count) { return $false }
+    $geometryChanged = $false
     for ($lineIndex = 0; $lineIndex -lt $Before.Count; $lineIndex++) {
-        if ([string]$Before[$lineIndex] -ne [string]$After[$lineIndex]) { return $false }
+        $beforeLine = $Before[$lineIndex]
+        $afterLine = $After[$lineIndex]
+        if ((Get-TextRangeLayoutLineText -Line $beforeLine) -cne (Get-TextRangeLayoutLineText -Line $afterLine)) { return $false }
+        foreach ($dimension in @('Left', 'Top', 'Width', 'Height')) {
+            $beforeProperty = $beforeLine.PSObject.Properties[$dimension]
+            $afterProperty = $afterLine.PSObject.Properties[$dimension]
+            if ($null -eq $beforeProperty -or $null -eq $afterProperty -or $null -eq $beforeProperty.Value -or $null -eq $afterProperty.Value) { continue }
+            try {
+                if ([Math]::Abs([double]$beforeProperty.Value - [double]$afterProperty.Value) -gt $GeometryTolerancePt) { $geometryChanged = $true }
+            } catch { }
+        }
     }
+    if ($geometryChanged -and (Test-TextRangeHasOverlappingSiblingText -Shape $Shape -Lines (@($Before) + @($After)))) { return $false }
     return $true
 }
 
@@ -1018,12 +1090,29 @@ function Get-TextRangeLayoutChangeText {
     if (($null -ne $Before) -and ($null -ne $After)) {
         $shared = [Math]::Min($beforeCount, $afterCount)
         for ($lineIndex = 0; $lineIndex -lt $shared; $lineIndex++) {
-            if ([string]$Before[$lineIndex] -ne [string]$After[$lineIndex]) { $firstDiff = $lineIndex + 1; break }
+            if ((Get-TextRangeLayoutLineText -Line $Before[$lineIndex]) -cne (Get-TextRangeLayoutLineText -Line $After[$lineIndex])) { $firstDiff = $lineIndex + 1; break }
         }
         if ($firstDiff -eq 0 -and $beforeCount -ne $afterCount) { $firstDiff = $shared + 1 }
     }
     $firstDiffText = if ($firstDiff -gt 0) { [string]$firstDiff } else { 'none' }
-    return ("rendered lines {0} -> {1}; first changed line {2}" -f $beforeCount, $afterCount, $firstDiffText)
+    $summary = ("rendered lines {0} -> {1}; first changed line {2}" -f $beforeCount, $afterCount, $firstDiffText)
+    if (($null -ne $Before) -and ($null -ne $After)) {
+        $shared = [Math]::Min($beforeCount, $afterCount)
+        for ($lineIndex = 0; $lineIndex -lt $shared; $lineIndex++) {
+            foreach ($dimension in @('Left', 'Top', 'Width', 'Height')) {
+                $beforeProperty = $Before[$lineIndex].PSObject.Properties[$dimension]
+                $afterProperty = $After[$lineIndex].PSObject.Properties[$dimension]
+                if ($null -eq $beforeProperty -or $null -eq $afterProperty -or $null -eq $beforeProperty.Value -or $null -eq $afterProperty.Value) { continue }
+                try {
+                    $delta = [Math]::Abs([double]$beforeProperty.Value - [double]$afterProperty.Value)
+                    if ($delta -gt 1.0) {
+                        return ("{0}; line {1} {2} {3:N2} -> {4:N2} pt (delta {5:N2} pt)" -f $summary, ($lineIndex + 1), $dimension.ToLowerInvariant(), [double]$beforeProperty.Value, [double]$afterProperty.Value, $delta)
+                    }
+                } catch { }
+            }
+        }
+    }
+    return $summary
 }
 
 function Resolve-SafeFontSize {
@@ -1066,6 +1155,7 @@ function Set-TextRangeStyle {
         [double]$Size,
         [int]$Color,
         [bool]$Bold,
+        $Shape = $null,
         [string]$FileName = '',
         [int]$SlideNumber = 0,
         [string]$ShapeName = '',
@@ -1106,11 +1196,10 @@ function Set-TextRangeStyle {
             # 18.2 v3 before this guard).
             if ($Bold) { $font.Bold = $script:MsoTrue }
         }
-        # Same-geometry re-wrap guard: sibling answer shapes anchor to the old
-        # break points, so any rendered line-layout change rolls every write
-        # of this function back instead of shipping the shifted layout.
+        # Roll back text or line-bound changes that would shift glyphs into a
+        # sibling text shape; harmless metric changes without overlap can stay.
         $afterLayout = Get-TextRangeLineLayout -TextRange $TextRange
-        if (-not (Test-TextRangeLayoutUnchanged -Before $beforeLayout -After $afterLayout)) {
+        if (-not (Test-TextRangeLayoutUnchanged -Before $beforeLayout -After $afterLayout -Shape $Shape)) {
             $font.Name = $beforeName
             $font.NameFarEast = $beforeFarEast
             if (-not $mixedFontSize) {
@@ -1488,12 +1577,10 @@ function Set-AutoSizeTextFontSafely {
         $beforeLayout = Get-TextRangeLineLayout -TextRange $textRange
         & $setFontFamily $latinTarget $script:Style.FontChinese
 
-        # Same-geometry re-wrap guard.  The fit and drift checks below cannot
-        # see a re-wrap that keeps the box bounds and line count: the glyphs
-        # still slide sideways to new break points, and sibling shapes that
-        # anchor to the old break points (answer blanks) get overlapped.
+        # Compare line bounds as well as text: the line count and shape box can
+        # stay unchanged while a font write shifts glyphs into sibling text.
         $afterLayout = Get-TextRangeLineLayout -TextRange $textRange
-        if (-not (Test-TextRangeLayoutUnchanged -Before $beforeLayout -After $afterLayout)) {
+        if (-not (Test-TextRangeLayoutUnchanged -Before $beforeLayout -After $afterLayout -Shape $Shape)) {
             $layoutChange = Get-TextRangeLayoutChangeText -Before $beforeLayout -After $afterLayout
             & $setFontFamily '' '' -Rollback
             Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
@@ -1540,7 +1627,7 @@ function Set-AutoSizeTextFontSafely {
                 $textRange.Font.Size = $fittedSize
                 $fittedLayout = Get-TextRangeLineLayout -TextRange $textRange
                 $fittedFit = Test-TextRangeFitsShape -TextRange $textRange -ShapeWidth $width -ShapeHeight $height
-                if ($fittedFit.Fits -and (Test-TextRangeLayoutUnchanged -Before $beforeLayout -After $fittedLayout)) {
+                if ($fittedFit.Fits -and (Test-TextRangeLayoutUnchanged -Before $beforeLayout -After $fittedLayout -Shape $Shape)) {
                     $fittedKept = $true
                 }
             }
@@ -1932,7 +2019,7 @@ function Normalize-TextShape {
         # white text over an untouched light background would be unreadable.
         $videoBackgroundNormalized = $IsVideoSlide -and (Test-StyleRuleEnabled -RuleId 'SLIDE.BACKGROUND')
         $color = if ($videoBackgroundNormalized) { $script:Style.ColorWhite } elseif ($isAuxiliary) { $script:Style.ColorDarkGray } else { $script:Style.ColorBody }
-        Set-TextRangeStyle -TextRange $Shape.TextFrame2.TextRange -Size $size -Color $color -Bold $bold `
+        Set-TextRangeStyle -TextRange $Shape.TextFrame2.TextRange -Size $size -Color $color -Bold $bold -Shape $Shape `
             -FileName $FileName -SlideNumber $SlideNumber -ShapeName $Shape.Name -MaxSize $maxSize -ForceTargetSize:$IsSectionTitleSlide
         if ($IsSectionTitleSlide) {
             Set-SectionTitleTextStyle -Shape $Shape -SlideNumber $SlideNumber -FileName $FileName
