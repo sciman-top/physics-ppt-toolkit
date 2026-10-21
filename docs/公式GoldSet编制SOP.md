@@ -22,7 +22,7 @@ CSV 文件（UTF-8 BOM），列与 `Export-FormulaOleMapping.ps1` 校验一致�
 | ShapeIds | 是 | 该页内 OLE 形状 id，分号分隔（多 OLE 合并一条公式时用；动画绑定组合并会被 `OleTimingDangling` 拒绝） |
 | WhitelistName | 是 | 必须是 config `formulaWhitelist` 中已存在的 `name` |
 | SourceFormulaText | 是 | 从裁剪图转录的线性文本；`Test-FormulaWhitelistMatch` 必须以该文本命中 `WhitelistName` 对应规则 |
-| SizePt | 是 | 8–96 整数；可用裁剪清单的 `SuggestedSizePt` 作起点，由 judge 视觉验收定版 |
+| SizePt | 是 | 8–96 整数；可用裁剪清单的 `SuggestedSizePt` 作起点，由 judge 视觉验收定版。注意 `SuggestedSizePt` 是整块位图内容高度的换算值（不是 OMML 基准字号）：OMML 上下分式的排版高度约为基准字号的 2.24 倍（PowerPoint `TextRange.BoundHeight` 实测），选值时须保证 `字号×2.24 ≤ 原 OLE 包围盒高`，否则批次 size-fit 步骤会按实测再收缩 |
 | MainColorHex | 是 | 6 位十六进制，无 # |
 | SubColorHex | 否 | 中文下标色；空则同主色 |
 | Note | 否 | 复核提示（如"黄框主式"） |
@@ -37,6 +37,7 @@ CSV 文件（UTF-8 BOM），列与 `Export-FormulaOleMapping.ps1` 校验一致�
 5. **独立定稿（Approved）**：**另一个** agent 或人工对照裁剪图与整页图逐条核验转录与公式名，确认无误后改 `ReviewStatus=Approved`。同一会话不得自我验收。
 6. **白名单不命中时**：不批准。走 `Export-FormulaWhitelistSuggestions.ps1` 证据整理 → 人工确认后在 config `formulaWhitelist` 晋升（含 `targetUnicodeMath` canonical，书写遵守《公式处理说明》§4.1）→ 重跑本流程。
 7. **映射**：`Export-FormulaOleMapping.ps1 -CarrierInventoryJson <inventory.json> -GoldSetCsv <goldset.csv> -OutputDir <版本目录>/00_检查报告`。2026-09-14 起小结页不再例外，不排任何页型。
+8. **写回批次内建 size-fit 守卫**（2026-10-21 定版）：`Invoke-FormulaOleBatch.ps1` 在 apply 之后用 PowerPoint 实测每个 `FormulaOmml` 形状的排版文本高度，超出原 OLE 包围盒（+2pt 容差）的按纯函数 `Get-OmmlFormulaFitSizePt` 半磅步进收缩，并等比重写该形状全部 `sz`（下标 0.72 比例与 800 下限保持）；两轮后仍溢出则整批失败。逐形状证据在 `00_检查报告/formula-ole-size-fit-report.csv`。背景：16.3 slide17 的分式堆叠曾超出贴页顶包围盒，分子被页缘裁切。
 
 ## 4. 拒绝与降级语义（自动，不可绕过）
 

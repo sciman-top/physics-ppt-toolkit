@@ -6,9 +6,10 @@
   Chains the OLE pipeline end to end into a versioned delivery directory
   (reports/<stem>_v<N>): carrier inventory (with optional page-kind annotation)
   -> rendered pages -> OLE crops -> GoldSet mapping -> OMML candidates -> apply
-  (new copy, mc:Fallback preserved) -> Open XML validator -> visual audit. Any
-  step failure stops the batch and records the completed prefix in the batch
-  manifest. The source PPTX is never modified.
+  (new copy, mc:Fallback preserved) -> size fit (PowerPoint-measured overflow
+  guard, shrinks FormulaOmml shapes back into the original OLE box) -> Open XML
+  validator -> visual audit. Any step failure stops the batch and records the
+  completed prefix in the batch manifest. The source PPTX is never modified.
 
   This is an explicit migration entry point. The default workflow does not call
   it, and config formulaProcessing switches remain untouched.
@@ -136,6 +137,194 @@ try {
 } finally { $toolHashSha.Dispose() }
 $styleConfigPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'config\physics-ppt-style.config.json'
 $script:SignatureConfigHash = if (Test-Path -LiteralPath $styleConfigPath) { Get-FileSha256 -Path $styleConfigPath } else { 'no-config' }
+
+# --- rendered size fit -------------------------------------------------------
+# OMML display fractions are laid out by the renderer at roughly 2.24x the
+# base font size (PowerPoint TextRange.BoundHeight measurement, consistent
+# across sizes), while the source MathType bitmaps pack the same glyphs far
+# tighter. A GoldSet SizePt that matches the original bitmap glyphs can
+# therefore overflow the original OLE box; the applier centers the text in
+# that box, so the overflow bleeds symmetrically and clips wherever the box
+# touches a slide edge (16.3 slide17 shipped with the numerator cut off at
+# the slide top). The batch measures the applied copy in PowerPoint and
+# shrinks overflowing shapes back into their box; the decision itself is a
+# pure function so the gate can probe it.
+
+$script:NsDrawingMain = 'http://schemas.openxmlformats.org/drawingml/2006/main'
+$script:NsPresentationMain = 'http://schemas.openxmlformats.org/presentationml/2006/main'
+
+function Get-OmmlFormulaFitSizePt {
+    # Pure decision: half-point stepped corrected base size that brings the
+    # PowerPoint-measured formula text bound inside its shape box (+tolerance).
+    # $null means no fitted size exists (already fits, below the 8pt mapping
+    # floor, or not smaller than current) and the caller must fail the shape
+    # loudly instead of writing a clipped formula.
+    param(
+        [double]$CurrentSizePt,
+        [double]$TextBoundHeightPt,
+        [double]$BoxHeightPt,
+        [double]$TolerancePt = 2.0
+    )
+    if ($CurrentSizePt -le 0 -or $TextBoundHeightPt -le 0 -or $BoxHeightPt -le 0) { return $null }
+    $scale = (($BoxHeightPt + $TolerancePt) / $TextBoundHeightPt) * 0.98
+    if ($scale -ge 1.0) { return $null }
+    $fitted = [Math]::Floor(($CurrentSizePt * $scale) * 2.0) / 2.0
+    if ($fitted -lt 8 -or $fitted -ge $CurrentSizePt) { return $null }
+    return $fitted
+}
+
+function Measure-FormulaOmmlRenderBounds {
+    # PowerPoint-measured laid-out text bounds for every FormulaOmml shape.
+    # COM is the only authority: OMML stack height is renderer layout, not
+    # derivable from the XML alone. TextBoundHeightPt = -1 marks a shape the
+    # COM probe could not measure; callers must treat that as a failure.
+    # Activation and enumeration retry on transient COM failures: this runs
+    # right after other automation sessions released PowerPoint, where
+    # RPC_S_UNKNOWN_IF (0x800706B5) activation races are routine.
+    param([string]$PptxPath)
+    $fullPath = [System.IO.Path]::GetFullPath($PptxPath)
+    $attempts = 0
+    while ($true) {
+        $attempts++
+        $powerPoint = $null
+        $presentation = $null
+        try {
+            $powerPoint = New-Object -ComObject PowerPoint.Application
+            $presentation = $powerPoint.Presentations.Open($fullPath, $true, $false, $false)
+            $rows = New-Object System.Collections.Generic.List[object]
+            foreach ($slide in @($presentation.Slides)) {
+                foreach ($shape in @($slide.Shapes)) {
+                    if ([string]$shape.Name -notlike 'FormulaOmml*') { continue }
+                    $boundHeight = -1.0
+                    try { $boundHeight = [double]$shape.TextFrame2.TextRange.BoundHeight } catch { $boundHeight = -1.0 }
+                    $null = $rows.Add([pscustomobject]@{
+                        Slide = [int]$slide.SlideIndex
+                        Name = [string]$shape.Name
+                        BoxHeightPt = [double]$shape.Height
+                        TextBoundHeightPt = $boundHeight
+                    })
+                }
+            }
+            return ,$rows.ToArray()
+        } catch {
+            $category = Get-ComFailureCategory -ErrorRecord $_
+            if ($attempts -ge 4 -or -not (Test-IsRetryablePresentationFailure -Category $category -Message $_.Exception.Message)) { throw }
+            Write-Host ("[size-fit] COM attempt {0} failed transiently, retrying: {1}" -f $attempts, (Format-ComFailureDetails -ErrorRecord $_))
+            Start-Sleep -Seconds (3 * $attempts)
+        } finally {
+            if ($null -ne $presentation) { $presentation.Close() }
+            if ($null -ne $powerPoint) { $powerPoint.Quit() }
+            Release-ComObjectSafe $presentation
+            Release-ComObjectSafe $powerPoint
+        }
+    }
+}
+
+function Repair-FormulaOmmlOverflowSizes {
+    # One deterministic XML rewrite pass: scale every a:rPr sz inside each
+    # overflowing FormulaOmml shape by fitted/base, so subscript runs keep
+    # their 0.72 ratio (the applier's 800 floor is re-applied). The measurement
+    # comes from Measure-FormulaOmmlRenderBounds; this function is pure zip/XML.
+    # Returns $true when at least one shape was rewritten.
+    param(
+        [object[]]$Measurements,
+        [double]$TolerancePt,
+        [string]$PptxPath,
+        [System.Collections.Generic.List[object]]$ReportRows,
+        [int]$Iteration
+    )
+    $fullPath = [System.IO.Path]::GetFullPath($PptxPath)
+    $bySlide = @{}
+    foreach ($item in @($Measurements)) {
+        if ([double]$item.TextBoundHeightPt -lt 0) { continue }
+        if ([double]$item.TextBoundHeightPt -le ([double]$item.BoxHeightPt + $TolerancePt)) { continue }
+        $key = [int]$item.Slide
+        if (-not $bySlide.ContainsKey($key)) { $bySlide[$key] = New-Object System.Collections.Generic.List[object] }
+        $null = $bySlide[$key].Add($item)
+    }
+    if ($bySlide.Count -eq 0) { return $false }
+    $zip = $null
+    $openAttempts = 0
+    while ($null -eq $zip) {
+        $openAttempts++
+        if ($openAttempts -gt 5) { throw ("Output pptx still locked after {0} open attempts: {1}" -f ($openAttempts - 1), $fullPath) }
+        try {
+            $zip = [System.IO.Compression.ZipFile]::Open($fullPath, [System.IO.Compression.ZipArchiveMode]::Update)
+        } catch {
+            Start-Sleep -Seconds (2 * $openAttempts)
+        }
+    }
+    $rewroteAny = $false
+    try {
+        foreach ($slideNumber in @($bySlide.Keys | Sort-Object)) {
+            $partName = 'ppt/slides/slide{0}.xml' -f $slideNumber
+            $doc = New-Object System.Xml.XmlDocument
+            $doc.PreserveWhitespace = $false
+            $doc.LoadXml((Read-ZipEntryText -Zip $zip -EntryName $partName))
+            $ns = New-Object System.Xml.XmlNamespaceManager($doc.NameTable)
+            $ns.AddNamespace('p', $script:NsPresentationMain)
+            $ns.AddNamespace('a', $script:NsDrawingMain)
+            $changed = $false
+            foreach ($item in $bySlide[$slideNumber]) {
+                $target = $null
+                foreach ($spNode in @($doc.SelectNodes('//p:sp', $ns))) {
+                    $cNvPr = $spNode.SelectSingleNode('./p:nvSpPr/p:cNvPr', $ns)
+                    if ($null -ne $cNvPr -and [string]$cNvPr.GetAttribute('name') -eq [string]$item.Name) { $target = $spNode; break }
+                }
+                if ($null -eq $target) {
+                    throw ("FormulaOmml shape not found for size fit: slide={0} name={1}" -f $slideNumber, $item.Name)
+                }
+                $szNodes = @($target.SelectNodes('.//a:rPr[@sz]', $ns))
+                if ($szNodes.Count -eq 0) {
+                    throw ("FormulaOmml shape carries no sz runs: slide={0} name={1}" -f $slideNumber, $item.Name)
+                }
+                $baseSz = 0
+                foreach ($szNode in $szNodes) {
+                    $value = 0
+                    if ([int]::TryParse([string]$szNode.GetAttribute('sz'), [ref]$value) -and $value -gt $baseSz) { $baseSz = $value }
+                }
+                if ($baseSz -le 0) {
+                    throw ("FormulaOmml shape has no positive sz: slide={0} name={1}" -f $slideNumber, $item.Name)
+                }
+                $basePt = $baseSz / 100.0
+                $fittedPt = Get-OmmlFormulaFitSizePt -CurrentSizePt $basePt -TextBoundHeightPt ([double]$item.TextBoundHeightPt) -BoxHeightPt ([double]$item.BoxHeightPt)
+                $rowBase = [ordered]@{
+                    Slide = $slideNumber
+                    Shape = [string]$item.Name
+                    Iteration = $Iteration
+                    BoxHeightPt = [Math]::Round([double]$item.BoxHeightPt, 2)
+                    TextBoundHeightPt = [Math]::Round([double]$item.TextBoundHeightPt, 2)
+                    SizePtBefore = $basePt
+                    SizePtFitted = ''
+                    Status = 'Unfittable'
+                }
+                if ($null -eq $fittedPt) {
+                    $ReportRows.Add([pscustomobject]$rowBase) | Out-Null
+                    continue
+                }
+                $factor = $fittedPt / $basePt
+                foreach ($szNode in $szNodes) {
+                    $value = 0
+                    if (-not [int]::TryParse([string]$szNode.GetAttribute('sz'), [ref]$value)) { continue }
+                    $newSz = [int][Math]::Round($value * $factor)
+                    if ($newSz -lt 800) { $newSz = 800 }
+                    $szNode.SetAttribute('sz', [string]$newSz)
+                }
+                $changed = $true
+                $rewroteAny = $true
+                $rowBase.Status = 'Fitted'
+                $rowBase.SizePtFitted = $fittedPt
+                $ReportRows.Add([pscustomobject]$rowBase) | Out-Null
+            }
+            if ($changed) {
+                Write-ZipEntryText -Zip $zip -EntryName $partName -Text (Convert-XmlDocumentToString -Document $doc)
+            }
+        }
+    } finally {
+        $zip.Dispose()
+    }
+    return $rewroteAny
+}
 
 # --- delivery root: explicit (outside reports/) or auto-versioned ---
 $reportsRoot = Join-Path (Split-Path -Parent $PSScriptRoot) 'reports'
@@ -289,7 +478,45 @@ try {
         & (Join-Path $PSScriptRoot 'Apply-FormulaOmmlForOle.ps1') -InputPath $inputFullPath -MappingCsv $mappingCsv -OmmlCandidateCsv $candidatesCsv -OutputPath $outputPptx -ReportPath $applyReport -MaxItems $MaxItems | Out-Null
     }
 
-    # --- step 7: Open XML validator ---
+    # --- step 7: rendered size fit (PowerPoint-measured overflow guard) ---
+    $sizeFitReport = Join-Path $reportDir 'formula-ole-size-fit-report.csv'
+    Invoke-BatchStep -StepName 'size-fit' -Inputs @($outputPptx) -Outputs @($outputPptx, $sizeFitReport) -Action {
+        $fitRows = New-Object System.Collections.Generic.List[object]
+        $sizeFitTolerancePt = 2.0
+        $stillOverflow = @()
+        foreach ($iteration in 1..2) {
+            $measurements = Measure-FormulaOmmlRenderBounds -PptxPath $outputPptx
+            if (@($measurements).Count -eq 0) { break }
+            $unmeasured = @($measurements | Where-Object { [double]$_.TextBoundHeightPt -lt 0 })
+            if (@($unmeasured).Count -gt 0) {
+                throw ("FormulaOmml shapes could not be measured in PowerPoint: {0}" -f (($unmeasured | ForEach-Object { 'slide={0} {1}' -f $_.Slide, $_.Name }) -join '; '))
+            }
+            foreach ($m in @($measurements | Where-Object { [double]$_.TextBoundHeightPt -le ([double]$_.BoxHeightPt + $sizeFitTolerancePt) })) {
+                $fitRows.Add([pscustomobject]@{
+                    Slide = [int]$m.Slide
+                    Shape = [string]$m.Name
+                    Iteration = $iteration
+                    BoxHeightPt = [Math]::Round([double]$m.BoxHeightPt, 2)
+                    TextBoundHeightPt = [Math]::Round([double]$m.TextBoundHeightPt, 2)
+                    SizePtBefore = ''
+                    SizePtFitted = ''
+                    Status = 'Ok'
+                }) | Out-Null
+            }
+            $rewrote = Repair-FormulaOmmlOverflowSizes -Measurements $measurements -TolerancePt $sizeFitTolerancePt -PptxPath $outputPptx -ReportRows $fitRows -Iteration $iteration
+            if (-not $rewrote) { break }
+            if ($iteration -eq 2) {
+                $finalMeasurements = Measure-FormulaOmmlRenderBounds -PptxPath $outputPptx
+                $stillOverflow = @($finalMeasurements | Where-Object { [double]$_.TextBoundHeightPt -gt ([double]$_.BoxHeightPt + $sizeFitTolerancePt) })
+            }
+        }
+        Write-Utf8BomCsv -InputObject $fitRows.ToArray() -Path $sizeFitReport
+        if (@($stillOverflow).Count -gt 0) {
+            throw ("FormulaOmml shapes still overflow their box after size fit: {0}" -f (($stillOverflow | ForEach-Object { 'slide={0} {1} (bound {2:N1}pt > box {3:N1}pt)' -f $_.Slide, $_.Name, $_.TextBoundHeightPt, $_.BoxHeightPt }) -join '; '))
+        }
+    }
+
+    # --- step 8: Open XML validator ---
     $validatorJson = Join-Path $reportDir 'validator.json'
     $dotnetPath = $null
     foreach ($candidatePath in @(Get-DotNetCommandCandidates)) {
@@ -306,7 +533,7 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "FormulaOfficeMathValidator failed with exit code $LASTEXITCODE." }
     }
 
-    # --- step 8: after visual audit (PowerPoint open proof + pages) ---
+    # --- step 9: after visual audit (PowerPoint open proof + pages) ---
     if (-not $SkipVisualAudit) {
         $afterAuditDir = Join-Path $reportDir 'after-audit'
         Invoke-BatchStep -StepName 'after-audit' -Inputs @($outputPptx) -Outputs @((Join-Path $afterAuditDir 'pptx-visual-audit.csv'), $afterAuditDir) -Action {
@@ -321,6 +548,11 @@ try {
     }
     $replacedCount = @($applyRows | Where-Object { $_.Issue -eq 'OleFormulaReplaced' }).Count
     $refusedCount = @($applyRows | Where-Object { $_.Issue -notin @('OleFormulaReplaced', 'SavedAs') }).Count
+    $sizeFitRowsForManifest = @()
+    if (Test-Path -LiteralPath $sizeFitReport) {
+        $sizeFitRowsForManifest = @(Import-Csv -LiteralPath $sizeFitReport -Encoding UTF8)
+    }
+    $sizeFitAppliedCount = @($sizeFitRowsForManifest | Where-Object { [string]$_.Status -eq 'Fitted' }).Count
     # A batch whose mapping promised rows but replaced nothing is a failure,
     # not a quiet pass: the whole point of the run was the conversion.
     $batchStatus = 'Passed'
@@ -346,6 +578,10 @@ try {
         applySummary = [ordered]@{
             replaced = $replacedCount
             refused = $refusedCount
+        }
+        sizeFit = [ordered]@{
+            report = $sizeFitReport
+            appliedCount = $sizeFitAppliedCount
         }
         steps = $batchSteps.ToArray()
         writeBackAllowed = $writeBackAllowed

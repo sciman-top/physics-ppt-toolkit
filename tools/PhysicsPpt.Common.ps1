@@ -246,6 +246,7 @@ function Get-ComFailureCategory {
         -2147287038 { return 'FileNotFoundOrUnavailable' }   # 0x80030002
         -2147417842 { return 'PowerPointDisconnected' }      # 0x80010108 RPC_E_DISCONNECTED
         -2147023174 { return 'PowerPointDisconnected' }      # 0x800706BA RPC_S_SERVER_UNAVAILABLE
+        -2147023179 { return 'PowerPointDisconnected' }      # 0x800706B5 RPC_S_UNKNOWN_IF (instance teardown transient)
         -2147023170 { return 'PowerPointDisconnected' }      # 0x800706BE RPC_S_CALL_FAILED
         default {
             if ($null -ne $exception -and $exception.Message -match 'PowerPoint|COM|RPC|rejected|busy') {

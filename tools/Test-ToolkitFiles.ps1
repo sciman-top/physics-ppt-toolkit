@@ -1075,6 +1075,23 @@ try {
     Set-Variable -Name Style -Scope Script -Value $probeStyleBackup -ErrorAction SilentlyContinue
 }
 
+# OMML size-fit decision probe: the OLE batch must shrink renderer-laid-out
+# formula stacks back into the original OLE box (16.3 slide17 shipped with the
+# fraction numerator clipped at the slide top because OMML display fractions
+# render ~2.24x the base size while the MathType bitmap packed the same glyphs
+# far tighter). The decider is IEX'd from the batch AST into THIS scope; it
+# must stay a pure function for that to be safe.
+$oleBatchAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'tools\Invoke-FormulaOleBatch.ps1'), [ref]$null, [ref]$null)
+$fitFnAst = $oleBatchAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-OmmlFormulaFitSizePt' }, $true) | Select-Object -First 1
+if ($null -eq $fitFnAst) { throw 'OMML size-fit function not found in the batch script for the behavioral probe.' }
+Invoke-Expression $fitFnAst.Extent.Text
+$fitProbe = Get-OmmlFormulaFitSizePt -CurrentSizePt 68 -TextBoundHeightPt 152.2 -BoxHeightPt 124.0
+if ([double]$fitProbe -ne 55.0) { throw "OMML size-fit probe: the 16.3 slide17 class overflow must fit at 55 pt, got $fitProbe." }
+if ([double](Get-OmmlFormulaFitSizePt -CurrentSizePt 53 -TextBoundHeightPt 118.7 -BoxHeightPt 96.2) -ne 42.5) { throw 'OMML size-fit probe: expected the 53pt/118.7pt/96.2pt overflow to fit at 42.5 pt.' }
+if ($null -ne (Get-OmmlFormulaFitSizePt -CurrentSizePt 68 -TextBoundHeightPt 152.2 -BoxHeightPt 200.0)) { throw 'OMML size-fit probe: a fitting stack must not be shrunk.' }
+if ($null -ne (Get-OmmlFormulaFitSizePt -CurrentSizePt 9 -TextBoundHeightPt 100.0 -BoxHeightPt 20.0)) { throw 'OMML size-fit probe: a below-8pt fitted size must be rejected.' }
+if ($null -ne (Get-OmmlFormulaFitSizePt -CurrentSizePt 0 -TextBoundHeightPt 100.0 -BoxHeightPt 96.0)) { throw 'OMML size-fit probe: an unknown current size must be rejected.' }
+
 # Geometry-restore lock probe: retry gating must classify lock conflicts by
 # HRESULT (0x80070020/21) with the bilingual phrases as fallback — the 5.1
 # fallback host throws localized IO messages (zh-CN: 正由另一进程使用), which
