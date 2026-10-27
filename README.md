@@ -125,8 +125,10 @@ reports/13.2内能（王耀强）_v12/
 .\一键全链规范化并导出PDF.cmd "D:\课件\原始PPT"
 
 # -FullChain 只接受 NormalizeAndPdf / ForceRebuild；公式写回需另行请求。
-# 使用 -IncludeReviewArtifacts / -IncludeVisualAudit 产生的图像和审计代表规范化副本；当前 AI packet 也只审查该副本，不能用于全链最终验收。
-# 视觉验收请打开全链最终 PPTX 或 PDF；FullChain 与 -PrepareAiVisualReview/-AiVisualReviewResult 组合会被拒绝。
+# -IncludeReviewArtifacts / -IncludeVisualAudit 的“规范化”图像和基线判断只代表规范化副本；最终 _callout 另见 17_全链最终审查。
+# 全链审计对最终副本新增的裁切、越界、溢出或可读性警告阻断交付；仅视觉差异超阈值时列为待复核。
+# 最终人工确认仍打开全链 PPTX/PDF。
+# FullChain 与 -PrepareAiVisualReview/-AiVisualReviewResult 组合会被拒绝。
 
 # 深度视觉审查：需要逐页 PNG、自动确认和低风险修复副本时再开启
 .\tools\Invoke-PhysicsPptWorkflow.ps1 -InputPath "D:\课件\原始PPT" -Recurse -Mode NormalizeAndPdf -FullChain -IncludeReviewArtifacts -IncludeVisualAudit -ApplyVisualAuditFixes -ApplyFormulaOmmlWhitelist -FormulaOmmlVisualAudit

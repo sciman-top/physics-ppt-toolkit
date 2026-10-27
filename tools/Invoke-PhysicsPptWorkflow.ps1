@@ -503,6 +503,28 @@ function Get-DeliveryGateAssessment {
                 $review.Add("${name}: visual confirmation requires review ($confirmationGate)") | Out-Null
             }
         }
+        if ([bool](Get-ObjectPropertyValue -Object $Manifest -PropertyName 'fullChainEnabled' -DefaultValue $false)) {
+            foreach ($final in @((Get-ObjectPropertyValue -Object $Manifest -PropertyName 'finalVisualAuditArtifacts' -DefaultValue @()))) {
+                $name = [string](Get-ObjectPropertyValue -Object $final -PropertyName 'file' -DefaultValue 'final visual audit')
+                if ([string](Get-ObjectPropertyValue -Object $final -PropertyName 'status' -DefaultValue '') -ne 'Completed') {
+                    $blocked.Add("${name}: final visual audit status is $((Get-ObjectPropertyValue -Object $final -PropertyName 'status' -DefaultValue 'Missing')).") | Out-Null
+                    continue
+                }
+                $auditStatus = [string](Get-ObjectPropertyValue -Object $final -PropertyName 'visualAuditStatus' -DefaultValue '')
+                if ($auditStatus -eq 'NeedsReviewNoNormalizedBaseline') {
+                    $review.Add("${name}: final visual audit has no normalized baseline") | Out-Null
+                } elseif ($auditStatus -eq 'NeedsReview') {
+                    $review.Add("${name}: final visual audit requests rendered-page review") | Out-Null
+                } elseif ($auditStatus -ne 'Passed') {
+                    $blocked.Add("${name}: final visual audit is $auditStatus") | Out-Null
+                }
+                $newErrors = [int](Get-ObjectPropertyValue -Object $final -PropertyName 'newErrorCount' -DefaultValue 0)
+                $newWarnings = [int](Get-ObjectPropertyValue -Object $final -PropertyName 'newWarningCount' -DefaultValue 0)
+                if ($newErrors -gt 0 -or $newWarnings -gt 0) {
+                    $blocked.Add("${name}: final visual audit introduced $newErrors error(s) and $newWarnings warning(s) versus the normalized stage") | Out-Null
+                }
+            }
+        }
     }
     [pscustomobject]@{ blocked = @($blocked.ToArray() | Select-Object -Unique); review = @($review.ToArray() | Select-Object -Unique) }
 }
@@ -986,6 +1008,35 @@ function Get-FullChainDeliveryFailures {
         if ($null -eq $validation -or -not [bool](Get-ObjectPropertyValue -Object $validation -PropertyName 'pdfPagesMatchExpected' -DefaultValue $false)) {
             $failures.Add("${name}: final-chain PDF page-count validation did not pass.") | Out-Null
         }
+        $finalVisuals = @((Get-ObjectPropertyValue -Object $Manifest -PropertyName 'finalVisualAuditArtifacts' -DefaultValue @()) | Where-Object {
+            [string](Get-ObjectPropertyValue -Object $_ -PropertyName 'file' -DefaultValue '') -eq $inputPath
+        })
+        if ($finalVisuals.Count -ne 1) {
+            $failures.Add("${name}: final visual audit receipt count is $($finalVisuals.Count); expected exactly one.") | Out-Null
+        } else {
+            $finalVisual = $finalVisuals[0]
+            $finalVisualStatus = [string](Get-ObjectPropertyValue -Object $finalVisual -PropertyName 'status' -DefaultValue '')
+            if ($finalVisualStatus -ne 'Completed') {
+                $failures.Add("${name}: final visual audit status is $finalVisualStatus.") | Out-Null
+            }
+            $auditStatus = [string](Get-ObjectPropertyValue -Object $finalVisual -PropertyName 'visualAuditStatus' -DefaultValue '')
+            if ($auditStatus -notin @('Passed', 'NeedsReview', 'NeedsReviewNoNormalizedBaseline', 'SkippedNoRuleAudit')) {
+                $failures.Add("${name}: final visual audit is $auditStatus.") | Out-Null
+            }
+            $finalVisualPath = [string](Get-ObjectPropertyValue -Object $finalVisual -PropertyName 'finalPptx' -DefaultValue '')
+            if ([string]::IsNullOrWhiteSpace($finalVisualPath) -or $finalVisualPath -cne $finalPptxPath) {
+                $failures.Add("${name}: final visual audit is not bound to the final PPTX.") | Out-Null
+            }
+            $pages = Get-ObjectPropertyValue -Object $finalVisual -PropertyName 'finalPageCount' -DefaultValue 0
+            if ($null -eq $expectedSlides -or [int]$pages -ne [int]$expectedSlides) {
+                $failures.Add("${name}: final visual audit page count is missing or mismatched.") | Out-Null
+            }
+            $newErrors = [int](Get-ObjectPropertyValue -Object $finalVisual -PropertyName 'newErrorCount' -DefaultValue 0)
+            $newWarnings = [int](Get-ObjectPropertyValue -Object $finalVisual -PropertyName 'newWarningCount' -DefaultValue 0)
+            if ($newErrors -gt 0 -or $newWarnings -gt 0) {
+                $failures.Add("${name}: final visual audit introduced $newErrors error(s) and $newWarnings warning(s).") | Out-Null
+            }
+        }
     }
 
     return @($failures.ToArray() | Select-Object -Unique)
@@ -1126,7 +1177,26 @@ function Write-Summary {
         $fullChainFailures = @((Get-ObjectPropertyValue -Object $Manifest -PropertyName 'fullChainFailures' -DefaultValue @()))
         $lines.Add("- 全链一键状态：$fullChainStatus；失败项：$($fullChainFailures.Count)")
         $lines.Add('- 全链定义：规范化 → 品牌刷新 → 强调框统一 → 从最终强调框副本导出 PDF')
-        $lines.Add('- 全链视觉验收：需检查最终 PPTX/PDF；现有页面图、规则审计和 AI 包绑定规范化副本')
+        $finalVisualItems = @((Get-ObjectPropertyValue -Object $Manifest -PropertyName 'finalVisualAuditArtifacts' -DefaultValue @()))
+        if ($finalVisualItems.Count -gt 0) {
+            $finalRenderedCount = @($finalVisualItems | Where-Object { [string](Get-ObjectPropertyValue -Object $_ -PropertyName 'status' -DefaultValue '') -eq 'Completed' }).Count
+            $finalRuleAuditedCount = @($finalVisualItems | Where-Object {
+                [string](Get-ObjectPropertyValue -Object $_ -PropertyName 'visualAuditStatus' -DefaultValue '') -in @('Passed', 'NeedsReview') -and
+                [int](Get-ObjectPropertyValue -Object $_ -PropertyName 'newErrorCount' -DefaultValue 0) -eq 0 -and
+                [int](Get-ObjectPropertyValue -Object $_ -PropertyName 'newWarningCount' -DefaultValue 0) -eq 0
+            }).Count
+            $finalReviewCount = @($finalVisualItems | Where-Object { [string](Get-ObjectPropertyValue -Object $_ -PropertyName 'visualAuditStatus' -DefaultValue '') -in @('NeedsReview', 'NeedsReviewNoNormalizedBaseline') }).Count
+            $finalNewErrorCount = Get-VisualArtifactCountSum -Items $finalVisualItems -PropertyName 'newErrorCount'
+            $finalNewWarningCount = Get-VisualArtifactCountSum -Items $finalVisualItems -PropertyName 'newWarningCount'
+            $lines.Add("- 全链最终逐页渲染：$finalRenderedCount / $($finalVisualItems.Count)；规则审计且相对规范化无新增问题：$finalRuleAuditedCount / $($finalVisualItems.Count)；待人工复核：$finalReviewCount；新增错误/警告：$finalNewErrorCount / $finalNewWarningCount")
+            if ($finalRuleAuditedCount -eq 0) {
+                $lines.Add('- 全链视觉验收：最终页面图已渲染并做边界/溢出检查；启用 `-IncludeVisualAudit` 可对最终副本做基线差异门禁')
+            } else {
+                $lines.Add('- 全链视觉验收：最终 `.callout` 副本已完成渲染、边界/溢出规则审计和规范化基线差异门禁')
+            }
+        } else {
+            $lines.Add('- 全链视觉验收：需检查最终 PPTX/PDF')
+        }
     } else {
         $lines.Add('- 全链一键状态：NotRequested（本次没有请求全部样式阶段）')
     }
@@ -1150,6 +1220,10 @@ function Write-Summary {
             $lines.Add("- 修复后视觉审查错误/警告：$fixedVisualAuditErrorCount / $fixedVisualAuditWarningCount")
             $lines.Add("- 修复后视觉自动确认通过/需复核/失败：$fixedVisualConfirmationGatePassedCount / $fixedVisualConfirmationNeedsReviewCount / $fixedVisualConfirmationFailedCount")
         }
+    }
+    $finalVisualItemsForStructure = @((Get-ObjectPropertyValue -Object $Manifest -PropertyName 'finalVisualAuditArtifacts' -DefaultValue @()))
+    if ($finalVisualItemsForStructure.Count -gt 0) {
+        $lines.Add('- `17_全链最终审查/`：直接从最终 `_callout` 副本导出的逐页 PNG；启用深度审查时包含规则审计与规范化基线差异确认')
     }
     if ($null -ne $formulaOmmlArtifacts) {
         $candidateStatus = Get-ObjectPropertyValue -Object $formulaOmmlArtifacts -PropertyName 'candidateStatus' -DefaultValue ''
@@ -1729,6 +1803,107 @@ function Export-FinalChainPdf {
         [GC]::Collect()
         [GC]::WaitForPendingFinalizers()
     }
+}
+
+function Invoke-FinalChainVisualAudit {
+    <#  The pre-chain visual audit deliberately covers the normalized copy.
+        After branding and highlight styling, that evidence no longer proves
+        the actual deliverable is visually sound. Audit the final .callout
+        copy against the normalized audit so newly introduced clipping,
+        overflow, or unreadable text blocks the chain.
+
+        A full-chain run without -IncludeVisualAudit still gets final page
+        images and PNG inspection, but no rule-based baseline adjudication.
+        That keeps the normal three-stage command reasonably fast while the
+        explicit deep-audit switch owns the stricter visual gate. #>
+    param(
+        $Manifest,
+        [string]$OutputRoot,
+        [bool]$RunRuleAudit
+    )
+    $items = New-Object System.Collections.Generic.List[object]
+    $auditRoot = Join-Path $OutputRoot '17_全链最终审查'
+    if (-not (Test-Path -LiteralPath $auditRoot)) {
+        New-Item -ItemType Directory -Path $auditRoot -Force | Out-Null
+    }
+    foreach ($file in @($Manifest.files)) {
+        $record = [ordered]@{
+            file = [string]$file.input
+            finalPptx = $null
+            finalVisualAuditDir = $null
+            finalVisualAuditCsv = $null
+            finalVisualAuditContactSheet = $null
+            finalPageCount = 0
+            status = 'SkippedNoFinalPptx'
+            error = ''
+            visualAuditStatus = 'SkippedNoRuleAudit'
+            visualAuditErrorCount = 0
+            visualAuditWarningCount = 0
+            visualConfirmationCsv = $null
+            visualConfirmationGateStatus = 'Skipped'
+            newErrorCount = 0
+            newWarningCount = 0
+        }
+        $chainFile = @((Get-ObjectPropertyValue -Object (Get-ObjectPropertyValue -Object $Manifest -PropertyName 'brandStageArtifacts' -DefaultValue $null) -PropertyName 'files' -DefaultValue @()) | Where-Object {
+            [string](Get-ObjectPropertyValue -Object $_ -PropertyName 'file' -DefaultValue '') -eq [string]$file.input
+        }) | Select-Object -First 1
+        if ($null -eq $chainFile) { $items.Add([pscustomobject]$record) | Out-Null; continue }
+        $finalPptx = [string](Get-ObjectPropertyValue -Object $chainFile -PropertyName 'finalPptx' -DefaultValue '')
+        $record.finalPptx = if (-not [string]::IsNullOrWhiteSpace($finalPptx) -and (Test-Path -LiteralPath $finalPptx)) { $finalPptx } else { $null }
+        if ($null -eq $record.finalPptx) {
+            $record.status = 'FailedNoFinalPptx'
+            $items.Add([pscustomobject]$record) | Out-Null
+            continue
+        }
+        $safeName = [string]$file.outputStem
+        $finalAuditDir = Join-Path $auditRoot $safeName
+        $finalAuditCsv = Join-Path $finalAuditDir 'pptx-visual-audit.csv'
+        $finalAuditManifestPath = Join-Path $finalAuditDir 'pptx-visual-audit-manifest.json'
+        $finalContactSheet = Join-Path $finalAuditDir 'pptx-visual-audit.contact-sheet.png'
+        $record.finalVisualAuditDir = $finalAuditDir
+        $record.finalVisualAuditCsv = $finalAuditCsv
+        $record.finalVisualAuditContactSheet = $finalContactSheet
+        $visualArtifact = @((Get-ObjectPropertyValue -Object $Manifest -PropertyName 'visualAuditArtifacts' -DefaultValue @()) | Where-Object {
+            [string](Get-ObjectPropertyValue -Object $_ -PropertyName 'file' -DefaultValue '') -eq [string]$file.input
+        }) | Select-Object -First 1
+        $normalizedAuditDir = [string](Get-ObjectPropertyValue -Object $visualArtifact -PropertyName 'visualAuditDir' -DefaultValue '')
+        try {
+            if ($RunRuleAudit) {
+                & (Join-Path $PSScriptRoot 'Export-PptxVisualAudit.ps1') -InputPath $record.finalPptx -OutputDir $finalAuditDir -ContactSheet | Out-Host
+                $finalAuditManifest = Read-JsonObject -Path $finalAuditManifestPath
+                $record.finalPageCount = [int](Get-ObjectPropertyValue -Object $finalAuditManifest -PropertyName 'exportedSlideCount' -DefaultValue 0)
+                $record.visualAuditStatus = 'Completed'
+                $record.visualAuditErrorCount = [int](Get-ObjectPropertyValue -Object $finalAuditManifest -PropertyName 'errorCount' -DefaultValue 0)
+                $record.visualAuditWarningCount = [int](Get-ObjectPropertyValue -Object $finalAuditManifest -PropertyName 'warningCount' -DefaultValue 0)
+                if (-not [string]::IsNullOrWhiteSpace($normalizedAuditDir) -and (Test-Path -LiteralPath $normalizedAuditDir)) {
+                    $confirmation = Invoke-VisualConfirmationArtifact -VisualAuditDir $finalAuditDir -BaselineVisualAuditDir $normalizedAuditDir
+                    $record.visualConfirmationCsv = $confirmation.csv
+                    $record.visualConfirmationGateStatus = $confirmation.gateStatus
+                    $record.visualAuditStatus = if ($confirmation.gateStatus -eq 'Passed') { 'Passed' } else { $confirmation.status }
+                    $record.newErrorCount = [int]$confirmation.newErrorCount
+                    $record.newWarningCount = [int]$confirmation.newWarningCount
+                } else {
+                    $record.visualAuditStatus = 'NeedsReviewNoNormalizedBaseline'
+                }
+            } else {
+                & (Join-Path $PSScriptRoot 'Export-PptxVisualAudit.ps1') -InputPath $record.finalPptx -OutputDir $finalAuditDir -ContactSheet -NoPdf | Out-Host
+                $finalAuditManifest = Read-JsonObject -Path $finalAuditManifestPath
+                $record.finalPageCount = [int](Get-ObjectPropertyValue -Object $finalAuditManifest -PropertyName 'exportedSlideCount' -DefaultValue 0)
+            }
+            $expectedSlides = [int](Get-ObjectPropertyValue -Object (Get-ObjectPropertyValue -Object $file -PropertyName 'validation' -DefaultValue $null) -PropertyName 'expectedSlides' -DefaultValue 0)
+            if ($expectedSlides -gt 0 -and $record.finalPageCount -ne $expectedSlides) {
+                $record.status = 'FailedPageCount'
+                $record.error = "Rendered final pages $($record.finalPageCount), expected $expectedSlides."
+            } else {
+                $record.status = 'Completed'
+            }
+        } catch {
+            $record.status = 'Failed'
+            $record.error = $_.Exception.Message
+        }
+        $items.Add([pscustomobject]$record) | Out-Null
+    }
+    return [pscustomobject]@{ files = @($items.ToArray()) }
 }
 
 function Invoke-FormulaOmmlArtifacts {
@@ -2364,9 +2539,16 @@ if ($BrandRefresh -or $HighlightBox) {
             }
         }
     }
+        # The final style copy is a different document from the normalized
+        # copy audited in step 5. Render every final page after the PDF export
+        # so a later stage cannot introduce a clipped title or overflowing
+        # conclusion box while the workflow still reports Completed.
+        $finalVisualAuditArtifacts = Invoke-FinalChainVisualAudit -Manifest $manifest -OutputRoot $OutputRoot -RunRuleAudit ([bool]$IncludeVisualAudit)
+        $manifest | Add-Member -NotePropertyName finalVisualAuditArtifacts -NotePropertyValue $finalVisualAuditArtifacts.files -Force
 } else {
     $manifest | Add-Member -NotePropertyName brandStageEnabled -NotePropertyValue $false -Force
     $manifest | Add-Member -NotePropertyName brandStageArtifacts -NotePropertyValue $null -Force
+        $manifest | Add-Member -NotePropertyName finalVisualAuditArtifacts -NotePropertyValue @() -Force
 }
 
 if ($ApplyFormulaOmmlWhitelist) {

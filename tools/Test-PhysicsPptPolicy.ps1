@@ -133,6 +133,22 @@ try {
             })
         }
     }
+    foreach ($reviewStatus in @('NeedsReview', 'NeedsReviewNoNormalizedBaseline')) {
+        $chainManifestFixture | Add-Member -NotePropertyName finalVisualAuditArtifacts -NotePropertyValue @([pscustomobject]@{
+            file = $chainInputPath; finalPptx = $chainFixturePaths.highlight; status = 'Completed'
+            visualAuditStatus = $reviewStatus; finalPageCount = 2; newErrorCount = 0; newWarningCount = 0
+        }) -Force
+        if (@(Get-FullChainDeliveryFailures -Manifest $chainManifestFixture).Count -ne 0) {
+            throw "FullChain incorrectly failed on a review-only final visual audit status '$reviewStatus'."
+        }
+    }
+    $chainManifestFixture.finalVisualAuditArtifacts[0].newWarningCount = 1
+    $reviewWarningFailures = @(Get-FullChainDeliveryFailures -Manifest $chainManifestFixture)
+    if (($reviewWarningFailures -join "`n") -notmatch 'final visual audit introduced 0 error\(s\) and 1 warning\(s\)') {
+        throw 'FullChain did not block a new final visual audit warning when the page also requires review.'
+    }
+    $chainManifestFixture.finalVisualAuditArtifacts[0].visualAuditStatus = 'Passed'
+    $chainManifestFixture.finalVisualAuditArtifacts[0].newWarningCount = 0
     if (@(Get-FullChainDeliveryFailures -Manifest $chainManifestFixture).Count -ne 0) { throw 'Complete FullChain artifacts were rejected by the delivery gate.' }
     $chainManifestFixture.brandStageArtifacts.runHighlight = $false
     $missingHighlightFailures = @(Get-FullChainDeliveryFailures -Manifest $chainManifestFixture)

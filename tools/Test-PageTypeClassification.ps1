@@ -34,14 +34,34 @@ foreach ($functionName in @('Test-DividerSlide', 'Get-SlideRole')) {
 }
 
 function New-PageShape {
-    param([string]$Text = '', [int]$Type = 17, [string]$Name = 'TextBox')
+    param(
+        [string]$Text = '',
+        [int]$Type = 17,
+        [string]$Name = 'TextBox',
+        [int]$Paragraphs = 1,
+        [bool]$Bulleted = $false
+    )
+    $textRange = [pscustomobject]@{
+        Text            = $Text
+        ParagraphCount  = $Paragraphs
+        ParagraphFormat = [pscustomobject]@{
+            Bullet = [pscustomobject]@{ Visible = $(if ($Bulleted) { -1 } else { 0 }) }
+        }
+    }
+    # The production COM TextRange exposes Paragraphs() as a method. A bare
+    # PSCustomObject cannot invoke methods, so add the same non-enumerable
+    # method shape here; otherwise every divider in this probe would pass the
+    # paragraph check vacuously as a MethodNotFound path.
+    $textRange | Add-Member -MemberType ScriptMethod -Name Paragraphs -Value {
+        [pscustomobject]@{ Count = $this.ParagraphCount }
+    }.GetNewClosure()
     return [pscustomobject]@{
         Name         = $Name
         Type         = $Type
         HasTextFrame = -1
         TextFrame    = [pscustomobject]@{
             HasText   = -1
-            TextRange = [pscustomobject]@{ Text = $Text }
+            TextRange = $textRange
         }
     }
 }
@@ -143,6 +163,11 @@ Assert-PageClass -Case 'blank slide' -Shapes @() -ExpectedRole 'Blank' -Expected
 # CJK text shape is divider-shaped by design, so the substring page lands on
 # Divider — the assertion proves the End regex did not fire on 'TREND'.
 Assert-PageClass -Case 'END substring not End role' -Shapes @(, (New-PageShape -Text 'TREND 观察趋势')) -ExpectedRole 'Divider' -ExpectedDivider $true
+# 16.4 slide37 regression: the short first paragraph carries a list number,
+# and a second visible paragraph means this is a content summary page. The
+# auto-numbered text value ("3、") must never turn it into a divider.
+Assert-PageClass -Case '16.4 s37 auto-numbered summary' -Shapes @(, (New-PageShape -Text '3、' -Paragraphs 2)) -ExpectedRole 'Content' -ExpectedDivider $false
+Assert-PageClass -Case 'single bulleted short paragraph' -Shapes @(, (New-PageShape -Text '小结' -Bulleted $true)) -ExpectedRole 'Content' -ExpectedDivider $false
 Assert-PageClass -Case 'plain content' -Shapes @(
     (New-PageShape -Text '第三节 电流的测量'),
     (New-PageShape -Text '1. 认识电流表；2. 学会使用电流表测量电流。')) -ExpectedRole 'Content' -ExpectedDivider $false

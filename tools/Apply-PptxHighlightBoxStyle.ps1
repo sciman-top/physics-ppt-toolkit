@@ -178,6 +178,12 @@ function Get-ShapeStyleSnapshot {
         LineWeightPt = $weight
         AutoShapeType = $autoShapeType
         CornerAdj = $adj
+        Frame = [pscustomobject]@{
+            Left = $(try { [double]$Shape.Left } catch { 0.0 })
+            Top = $(try { [double]$Shape.Top } catch { 0.0 })
+            Width = $(try { [double]$Shape.Width } catch { 0.0 })
+            Height = $(try { [double]$Shape.Height } catch { 0.0 })
+        }
     }
 }
 
@@ -230,11 +236,18 @@ function Set-HighlightBoxStyle {
     $targetFill = if ($isConclusion) { $rgbConclusionFill } else { $rgbChipFill }
     $before = Get-ShapeStyleSnapshot -Shape $Shape
     try {
+        $slideWidth = 960.0
+        try {
+            $pageSetup = $Shape.Parent.Parent.PageSetup
+            $slideWidth = [double]$pageSetup.SlideWidth
+        } catch { }
         # Geometry first: it is the assignment most likely to be refused, and
         # failing before any write keeps the shape free of half-applied styles.
         # Assigning AutoShapeType (even the same value) makes PowerPoint rewrite
         # the bounding box, so the original frame is restored inside the same
-        # idempotent block; type is only switched for true rectangles.
+        # idempotent block; type is only switched for true rectangles. A
+        # conclusion box can also need a modest symmetric expansion when the
+        # 36pt display guard makes its text wider than the source frame.
         Invoke-WithComRetry -Action {
             $left0 = [double]$Shape.Left
             $top0 = [double]$Shape.Top
@@ -264,10 +277,31 @@ function Set-HighlightBoxStyle {
                         $run.Font.Size = $script:ConclusionTextSize
                     }
                 }
+                $textWidth = [double]$tr.BoundWidth
+                $marginWidth = [double]$Shape.TextFrame.MarginLeft + [double]$Shape.TextFrame.MarginRight
+                $requiredWidth = $textWidth + $marginWidth + 4.0
+                $edgeMargin = 8.0
+                $minLeft = $edgeMargin
+                $maxRight = $slideWidth - $edgeMargin
+                if ($requiredWidth -gt ($width0 + 0.5)) {
+                    $targetWidth = $requiredWidth
+                    $targetLeft = $left0 - ($targetWidth - $width0) / 2
+                    if ($targetLeft -lt $minLeft) {
+                        $targetWidth -= ($minLeft - $targetLeft)
+                        $targetLeft = $minLeft
+                    }
+                    if (($targetLeft + $targetWidth) -gt $maxRight) {
+                        $targetWidth -= (($targetLeft + $targetWidth) - $maxRight)
+                    }
+                    if ($targetWidth -ge $requiredWidth - 0.5 -and $targetWidth -gt $width0) {
+                        $Shape.Width = [single][Math]::Round($targetWidth, 1)
+                        $Shape.Left = [single][Math]::Round($targetLeft, 1)
+                    }
+                }
             }
-            if ([Math]::Abs([double]$Shape.Left - $left0) -gt 0.1) { $Shape.Left = $left0 }
+            if (-not $isConclusion -and [Math]::Abs([double]$Shape.Left - $left0) -gt 0.1) { $Shape.Left = $left0 }
             if ([Math]::Abs([double]$Shape.Top - $top0) -gt 0.1) { $Shape.Top = $top0 }
-            if ([Math]::Abs([double]$Shape.Width - $width0) -gt 0.1) { $Shape.Width = $width0 }
+            if (-not $isConclusion -and [Math]::Abs([double]$Shape.Width - $width0) -gt 0.1) { $Shape.Width = $width0 }
             if ([Math]::Abs([double]$Shape.Height - $height0) -gt 0.1) { $Shape.Height = $height0 }
             # Assigning AutoShapeType renames the default shape name; downstream
             # tooling matches shapes by name across saves, so keep it stable.
@@ -280,12 +314,25 @@ function Set-HighlightBoxStyle {
         return
     }
     $after = Get-ShapeStyleSnapshot -Shape $Shape
+    $frameMotion = 0.0
+    try {
+        $frameMotion = [Math]::Max(
+            [Math]::Abs([double]$Shape.Left - [double]$before.Frame.Left),
+            [Math]::Abs([double]$Shape.Top - [double]$before.Frame.Top)
+        )
+        $frameMotion = [Math]::Max($frameMotion, [Math]::Abs([double]$Shape.Width - [double]$before.Frame.Width))
+        $frameMotion = [Math]::Max($frameMotion, [Math]::Abs([double]$Shape.Height - [double]$before.Frame.Height))
+    } catch { }
     $changed = ($before.Fill -ne $after.Fill) -or ($before.LineColor -ne $after.LineColor) -or
         ([Math]::Abs($before.LineWeightPt - $after.LineWeightPt) -gt 0.01) -or
-        ([Math]::Abs($before.CornerAdj - $after.CornerAdj) -gt 0.001)
+        ([Math]::Abs($before.CornerAdj - $after.CornerAdj) -gt 0.001) -or
+        ($frameMotion -gt 0.1)
     if ($changed) {
         $script:counters.Changed++
-        Add-ReportRow -SlideNumber $SlideNumber -ShapeName $ShapeName -Class $Class -Before $before -After $after -Result 'Changed' -Details ''
+        $details = if ($frameMotion -gt 0.1) {
+            'Frame expanded symmetrically for 36pt conclusion text; top/height preserved.'
+        } else { '' }
+        Add-ReportRow -SlideNumber $SlideNumber -ShapeName $ShapeName -Class $Class -Before $before -After $after -Result 'Changed' -Details $details
     } else {
         $script:counters.AlreadyApplied++
         Add-ReportRow -SlideNumber $SlideNumber -ShapeName $ShapeName -Class $Class -Before $after -After $after -Result 'AlreadyApplied' -Details ''

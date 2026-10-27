@@ -21,8 +21,8 @@
     End       text contains END
     Resource  text contains 课件下载地址
     LinkHub   text contains 网盘群
-    Divider   a single short title matches the divider pattern and the slide
-              has no pictures (第N课时 / 比热容（N）/ 比热容公式 / 拓展)
+    Divider   one text shape with one paragraph matches the divider pattern
+              and the slide has no pictures (第N课时 / 比热容（N）/ 比热容公式 / 拓展)
     Blank     no shapes at all (left untouched)
 
 .EXAMPLE
@@ -72,6 +72,8 @@ $PptxPath = [System.IO.Path]::GetFullPath($PptxPath)
 # 2026-09-15 用户定版：分隔页统一 80pt（华文行楷）。单一真源同时供分隔页
 # 写入与 review-manifest.json 记录，避免证据文件与交付物漂移。
 $script:DividerFontSizePt = 80
+$script:DividerMinimumFontSizePt = 56
+$script:DividerSideMarginPt = 24
 if (-not (Test-Path -LiteralPath $PptxPath)) {
     throw "Input PPTX not found: $PptxPath"
 }
@@ -172,7 +174,12 @@ function Test-DividerSlide {
     # Series dividers are ONE bare title (every 13.3/14.x divider carries
     # exactly one text shape). Multi-shape symbol diagrams built purely from
     # autoshapes (15.1 slide 34 charge circles "+ - +3 -3") and symbol-only
-    # text must never restyle: require exactly one text shape, and a title
+    # text must never restyle: require exactly one text shape with exactly one
+    # visible, non-list paragraph. 16.4 slide37 is a content page: its first
+    # visible paragraph is "小结" and its second is a numbered list. PowerPoint
+    # auto-numbering makes TextRange.Text report that first paragraph as "3、",
+    # so checking only text length would mistake it for a divider title.
+    # The divider must also carry a title
     # that is either a CJK headline (>=2 CJK chars, up to 20 chars — 18.2
     # slide28 "额定功率、实际功率/伏安法测电功率" is 16) or a short formula
     # divider like "P=UI" (18.2 slide14, <=6 chars with an '=' sign).
@@ -191,6 +198,8 @@ function Test-DividerSlide {
     if (-not ($isCjkHeadline -or $isFormulaDivider)) { return $false }
     $hasTitle = $false
     $textShapeCount = 0
+    $paragraphCount = 0
+    $hasAutoNumberedOrBulletedParagraph = $false
     foreach ($shape in @($Slide.Shapes)) {
         try {
             if ($shape.Name -eq 'sciman-brand-icon') { continue }
@@ -201,10 +210,17 @@ function Test-DividerSlide {
             if (([string]$shape.TextFrame.TextRange.Text).Trim().Length -gt 0) {
                 $hasTitle = $true
                 $textShapeCount++
+                $textRange = $shape.TextFrame.TextRange
+                $paragraphCount = [int]$textRange.Paragraphs().Count
+                if ($paragraphCount -gt 1) { return $false }
+                try {
+                    $bulletVisible = [double]$textRange.ParagraphFormat.Bullet.Visible
+                    $hasAutoNumberedOrBulletedParagraph = ($bulletVisible -ne 0)
+                } catch { }
             }
         } catch { }
     }
-    return ($hasTitle -and $textShapeCount -le 1)
+    return ($hasTitle -and $textShapeCount -eq 1 -and $paragraphCount -eq 1 -and -not $hasAutoNumberedOrBulletedParagraph)
 }
 
 function Get-SlideRole {
@@ -390,7 +406,7 @@ function Update-SpecialSlideText {
                             # Contact lines: 华文行楷 labels/values with the
                             # monospace Latin kept for URLs and numbers — the
                             # elegant special-page voice, distinct from body.
-                            Set-ParagraphLook $paragraph 'Secondary' 22 '华文行楷' 'Consolas'
+                            Set-ParagraphLook $paragraph 'Secondary' 24 '华文行楷' 'Consolas'
                             Set-InfoLabelSplit $paragraph 'Gold' 'InfoValue'
                             # LineRuleAfter must be off, otherwise SpaceAfter is
                             # counted in LINES and pushes the next paragraphs
@@ -471,7 +487,7 @@ function Update-SpecialSlideText {
                 $infoFrame.AutoSize = 0  # ppAutoSizeNone: manual hug sizing
                 $hugHeight = $textRange.BoundHeight + $infoFrame.MarginTop + $infoFrame.MarginBottom
                 # BoundWidth counts the trailing paragraph-break advance of the
-                # last line (~one Consolas cell at 22pt); trim it so the ink,
+                # last line (~one Consolas cell at 24pt); trim it so the ink,
                 # not the phantom cell, is what gets centred.
                 $hugWidth = [Math]::Max(100, $textRange.BoundWidth - 12 + $infoFrame.MarginLeft + $infoFrame.MarginRight)
                 $shape.Width = [Math]::Round($hugWidth, 1)
@@ -593,8 +609,9 @@ function Update-DividerSlide {
         $Slide,
         [System.Collections.Generic.List[string]]$Actions
     )
-    $slideWidth = $Slide.Parent.PageSetup.SlideWidth
-    $slideHeight = $Slide.Parent.PageSetup.SlideHeight
+    $pageSetup = $Slide.Parent.PageSetup
+    $slideWidth = [double]$pageSetup.SlideWidth
+    $slideHeight = [double]$pageSetup.SlideHeight
     $centered = 0
     foreach ($shape in @($Slide.Shapes)) {
         try {
@@ -603,6 +620,21 @@ function Update-DividerSlide {
             $trimmed = ([string]$shape.TextFrame.TextRange.Text).Trim()
             if ($trimmed.Length -eq 0) { continue }
             $textRange = $shape.TextFrame.TextRange
+            $originalState = [pscustomobject]@{
+                Left = [double]$shape.Left
+                Top = [double]$shape.Top
+                Width = [double]$shape.Width
+                Height = [double]$shape.Height
+                AutoSize = [int]$shape.TextFrame.AutoSize
+                WordWrap = [int]$shape.TextFrame.WordWrap
+                VerticalAnchor = [int]$shape.TextFrame.VerticalAnchor
+                ParagraphAlignment = [int]$textRange.ParagraphFormat.Alignment
+                FontName = [string]$textRange.Font.Name
+                FontNameFarEast = [string]$textRange.Font.NameFarEast
+                FontBold = [int]$textRange.Font.Bold
+                FontSize = [single]$textRange.Font.Size
+                FontColorRgb = [int]$textRange.Font.Color.RGB
+            }
             $isSectionMark = ($trimmed -match '^(第[0-9０-９]+课时|拓展)$')
             if ($isSectionMark) {
                 $textRange.Font.Color.RGB = Resolve-ColorSpecToRgbLong 'DividerRed'
@@ -621,23 +653,68 @@ function Update-DividerSlide {
             $shape.TextFrame.WordWrap = 0  # msoFalse so the box hugs the text
             $shape.TextFrame.VerticalAnchor = 3  # msoAnchorMiddle
             $textRange.ParagraphFormat.Alignment = 2  # ppAlignCenter
-            $boundWidth = $textRange.BoundWidth + 20
-            $boundHeight = $textRange.BoundHeight + 12
+            $boundWidth = [double]$textRange.BoundWidth + 20
+            $boundHeight = [double]$textRange.BoundHeight + 12
             # BoundWidth arrives as a COM Single; the +offset makes these
             # Doubles.  Assign [single] so the put marshals as VT_R4 —
             # assigning the raw Double can hit an IDispatch conversion path
             # that throws InvalidCastException Double->Decimal.
+            # Long CJK divider titles reach the usable width before the 80pt
+            # title reaches its intended height. Reduce only the font just
+            # enough to keep the complete title inside the slide; geometry is
+            # derived from the measured text bounds after that fit.
+            $availableWidth = $slideWidth - 2 * $script:DividerSideMarginPt
+            $fontSize = [double]$script:DividerFontSizePt
+            $fitSteps = 0
+            $maxFitSteps = [int][Math]::Ceiling(($script:DividerFontSizePt - $script:DividerMinimumFontSizePt) / 2.0)
+            while ($boundWidth -gt $availableWidth -and
+                   $fontSize -gt [double]$script:DividerMinimumFontSizePt -and
+                   $fitSteps -lt $maxFitSteps) {
+                $fontSize = [Math]::Max([double]$script:DividerMinimumFontSizePt, $fontSize - 2.0)
+                $textRange.Font.Size = [single]$fontSize
+                $boundWidth = [double]$textRange.BoundWidth + 20
+                $boundHeight = [double]$textRange.BoundHeight + 12
+                $fitSteps++
+            }
+            # The page title must keep its full ink inside the layout grid. A
+            # centered box that merely fits the requested 80pt size but has
+            # its left edge outside the slide is still a delivery failure.
+            if ($boundWidth -gt $availableWidth) {
+                # Do not leave a failed fit with a widened, off-slide box or
+                # partially applied divider styling. Restore the original
+                # shape and text formatting before recording the skip.
+                $shape.Left = [single]$originalState.Left
+                $shape.Top = [single]$originalState.Top
+                $shape.Width = [single]$originalState.Width
+                $shape.Height = [single]$originalState.Height
+                $shape.TextFrame.AutoSize = $originalState.AutoSize
+                $shape.TextFrame.WordWrap = $originalState.WordWrap
+                $shape.TextFrame.VerticalAnchor = $originalState.VerticalAnchor
+                $textRange.ParagraphFormat.Alignment = $originalState.ParagraphAlignment
+                $textRange.Font.Name = $originalState.FontName
+                $textRange.Font.NameFarEast = $originalState.FontNameFarEast
+                $textRange.Font.Bold = $originalState.FontBold
+                $textRange.Font.Size = $originalState.FontSize
+                $textRange.Font.Color.RGB = $originalState.FontColorRgb
+                throw ('Divider title exceeds usable width ({0:N1} > {1:N1} pt).' -f $boundWidth, $availableWidth)
+            }
+            # Audited grid range: this is deliberately stricter than legal
+            # title length (the 20-char boundary probe remains valid) while
+            # ensuring long titles are centered and reachable, not clipped.
             $shape.Width = [single]$boundWidth
             $shape.Height = [single]$boundHeight
             $shape.Left = [single][Math]::Round(($slideWidth - $boundWidth) / 2, 1)
             $shape.Top = [single][Math]::Round(($slideHeight - $boundHeight) / 2, 1)
             $centered++
+            if ($fitSteps -gt 0) {
+                $Actions.Add("DividerFitted(font $([string]$fontSize)pt, steps $fitSteps)") | Out-Null
+            }
         } catch {
             $Actions.Add("DividerShapeSkipped: $($_.Exception.Message) << $($_.ScriptStackTrace)") | Out-Null
         }
     }
     if ($centered -gt 0) {
-        $Actions.Add("DividerUnified x$centered (行楷 80pt 规范色 双居中)") | Out-Null
+        $Actions.Add("DividerUnified x$centered (行楷 80pt 规范色 双居中，超宽时缩字号)") | Out-Null
     }
 }
 
