@@ -1659,6 +1659,63 @@ function Set-AutoSizeTextFontSafely {
         # stay unchanged while a font write shifts glyphs into sibling text.
         $afterLayout = Get-TextRangeLineLayout -TextRange $textRange
         if (-not (Test-TextRangeLayoutUnchanged -Before $beforeLayout -After $afterLayout -Shape $Shape)) {
+            # A same-size family swap can rewrap a tightly fitted box: 宋体→雅黑
+            # metrics are wider, so a 5-line list may become 7 lines (16.3
+            # slide26). Before giving up on the normalization, try proportional
+            # size reductions — the first factor that restores the original
+            # line layout keeps the family at slightly smaller sizes. Mixed
+            # run sizes scale per run so the author's emphasis hierarchy stays
+            # intact (the mixed-size guard forbids flattening, not scaling).
+            # Bounded at 25% total shrink and the configured minimum; when no
+            # factor holds the layout, roll back exactly as before.
+            $relayoutFitFactor = 0.0
+            $authorSizeForFit = Get-TextRangeFontSize $textRange
+            $perRunSizes = $null
+            if ($null -eq $authorSizeForFit) {
+                try {
+                    $perRunSizes = New-Object System.Collections.Generic.List[object]
+                    foreach ($runRange in @($textRange.Runs())) {
+                        $runSize = Get-TextRangeFontSize $runRange
+                        if ($null -eq $runSize -or $runSize -le 0) { $perRunSizes = $null; break }
+                        $perRunSizes.Add([pscustomobject]@{ Range = $runRange; Size = [double]$runSize }) | Out-Null
+                    }
+                } catch { $perRunSizes = $null }
+                if ($null -ne $perRunSizes -and $perRunSizes.Count -gt 0) {
+                    $authorSizeForFit = ($perRunSizes | Measure-Object -Property Size -Maximum).Maximum
+                } else {
+                    $authorSizeForFit = $null
+                }
+            }
+            if ($null -ne $authorSizeForFit -and $authorSizeForFit -gt 0) {
+                foreach ($factor in @(0.98, 0.96, 0.94, 0.92, 0.90, 0.88, 0.86, 0.84, 0.82, 0.80, 0.78, 0.75)) {
+                    $probeSize = [Math]::Max([double]$script:Style.SizeMinimum, [Math]::Floor((($authorSizeForFit * $factor) * 2.0)) / 2.0)
+                    if ($null -ne $perRunSizes) {
+                        foreach ($entry in $perRunSizes) {
+                            $entry.Range.Font.Size = [Math]::Max([double]$script:Style.SizeMinimum, [Math]::Floor((($entry.Size * $factor) * 2.0)) / 2.0)
+                        }
+                    } else {
+                        $font.Size = $probeSize
+                    }
+                    $probeLayout = Get-TextRangeLineLayout -TextRange $textRange
+                    if (Test-TextRangeLayoutUnchanged -Before $beforeLayout -After $probeLayout -Shape $Shape) {
+                        $relayoutFitFactor = $factor
+                        break
+                    }
+                }
+            }
+            if ($relayoutFitFactor -gt 0) {
+                Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
+                    -Issue 'TextStyleNormalizedRelayoutFitSize' `
+                    -Details ("Target font {0}/{1} re-wrapped the shape at {2:N1} pt; family normalization kept at x{3:N2} scale (per-run for mixed sizes), which restores the original line layout." -f $latinTarget, $script:Style.FontChinese, $authorSizeForFit, $relayoutFitFactor) `
+                    -RuleId 'STYLE.TEXT.FONT' -Property 'FontName/NameFarEast/Size' -Before $beforeSummary -After $beforeSummary `
+                    -RiskLevel 'R1' -Result 'Applied'
+                return
+            }
+            if ($null -ne $perRunSizes) {
+                foreach ($entry in $perRunSizes) { $entry.Range.Font.Size = $entry.Size }
+            } elseif ($null -ne $authorSizeForFit) {
+                $font.Size = $authorSizeForFit
+            }
             $layoutChange = Get-TextRangeLayoutChangeText -Before $beforeLayout -After $afterLayout
             & $setFontFamily '' '' -Rollback
             Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
