@@ -566,6 +566,23 @@ foreach ($signal in @($packageByKey.Values | Sort-Object Slide, @{ Expression = 
         $decisionTarget = 'None'
         $decisionReason = 'Non-equation OLE carrier observed; inspect its ProgId and source application before any migration.'
         $rawCandidates.Add((New-RawCandidate -Value (($signal.OleProgIds -join '|')) -Source 'OpenXml.p:oleObj@progId' -Score 0.4 -Warnings @('unknown-ole'))) | Out-Null
+    } elseif ($signal.NodeKind -eq 'pic') {
+        # Claim-free package fact: a top-level picture is addressable as an
+        # explicit-migration target without asserting anything about its
+        # content. The formula claim comes solely from an Approved GoldSet row
+        # (independent visual transcription + whitelist match) — heuristic
+        # image classification stays out of the trust chain. 16.3 slide20's
+        # worked-solution bitmap (R=U/I=6V/0.3A=20Ω) carried no
+        # formula-image-candidate evidence, so without this record class the
+        # GoldSet had no addressable target even though the shape was visible
+        # in the package facts.
+        $carrier = 'Picture'
+        $detectionStatus = 'Observed'
+        $confidence = 1.0
+        $decisionStatus = 'OriginalKept'
+        $decisionTarget = 'Original'
+        $decisionReason = 'Top-level picture observed; content is not classified. An explicit GoldSet row may address it like a MathType OLE block.'
+        $rawCandidates.Add((New-RawCandidate -Value 'top-level picture' -Source 'OpenXml.p:pic' -Score 1.0)) | Out-Null
     } else {
         continue
     }

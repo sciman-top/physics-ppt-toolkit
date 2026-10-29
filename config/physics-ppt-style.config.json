@@ -475,6 +475,13 @@
       "note": "额定电阻数值代入链；来源：18.2电功率 OLE slide37（蓝字红下标）。"
     },
     {
+      "name": "电阻数值代入链6V0.3A",
+      "sourcePattern": "^R=U/I=6V/0\\.3A=20Ω$",
+      "targetUnicodeMath": "R=U/I=6V/0.3A=20Ω",
+      "targetTex": "R=\\frac{U}{I}=\\frac{6V}{0.3A}=20\\Omega",
+      "note": "电阻数值代入链；来源：16.3电阻、欧姆定律 Picture slide20（用户确认晋升，公式位图转原生）。"
+    },
+    {
       "name": "电流数值代入式0.3A",
       "sourcePattern": "^I=0\\.3A$",
       "targetUnicodeMath": "I=0.3A",

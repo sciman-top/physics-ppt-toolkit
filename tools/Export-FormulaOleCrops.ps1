@@ -30,7 +30,7 @@
   Extra margin added around the bbox crop, clamped to the page. Defaults to 4.
 
 .PARAMETER Carrier
-  Carrier filter from the inventory. Defaults to MathTypeOle; 'All' keeps every record.
+  Carrier filter from the inventory. Defaults to MathTypeOle; 'Convertable' keeps every explicit-migration target (MathTypeOle/FormulaImage/Picture); 'All' keeps every record.
 #>
 [CmdletBinding()]
 param(
@@ -127,7 +127,11 @@ $ptPerPx = $slideHeightPt / $pageHeightPx
 
 $allRecords = @($inventory.records)
 if ($Carrier -ne 'All') {
-    $allRecords = @($allRecords | Where-Object { [string]$_.source.carrier -eq $Carrier })
+    $convertableCarriers = @('MathTypeOle', 'FormulaImage', 'Picture')
+    $allRecords = @($allRecords | Where-Object {
+            $recordCarrier = [string]$_.source.carrier
+            if ($Carrier -eq 'Convertable') { $recordCarrier -in $convertableCarriers } else { $recordCarrier -eq $Carrier }
+        })
 }
 
 $cropDir = Join-Path $outputFullPath 'ole-crops'

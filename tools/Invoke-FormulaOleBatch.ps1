@@ -453,7 +453,7 @@ try {
     $cropsDir = Join-Path $reportDir 'crops'
     $cropsCsv = Join-Path $cropsDir 'ole-crops.csv'
     Invoke-BatchStep -StepName 'crops' -Inputs @($inputFullPath, $inventoryJson, $resolvedPagesDir) -Outputs @($cropsCsv, $cropsDir) -Action {
-        & (Join-Path $PSScriptRoot 'Export-FormulaOleCrops.ps1') -CarrierInventoryJson $inventoryJson -PagesDir $resolvedPagesDir -OutputDir $cropsDir | Out-Null
+        & (Join-Path $PSScriptRoot 'Export-FormulaOleCrops.ps1') -CarrierInventoryJson $inventoryJson -PagesDir $resolvedPagesDir -OutputDir $cropsDir -Carrier Convertable | Out-Null
     }
 
     # --- step 4: GoldSet mapping (page-kind exclusion lives here) ---

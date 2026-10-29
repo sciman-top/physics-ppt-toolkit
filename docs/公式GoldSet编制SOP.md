@@ -19,7 +19,7 @@ CSV 文件（UTF-8 BOM），列与 `Export-FormulaOleMapping.ps1` 校验一致�
 |---|---|---|
 | ReviewStatus | 是 | `Draft` 或 `Approved`；只有 `Approved` 进入映射 |
 | Slide | 是 | 1 起始的页码（演示顺序） |
-| ShapeIds | 是 | 该页内 OLE 形状 id，分号分隔（多 OLE 合并一条公式时用；动画绑定组合并会被 `OleTimingDangling` 拒绝） |
+| ShapeIds | 是 | 该页内公式载体形状 id，分号分隔（多 OLE 合并一条公式时用；动画绑定组合并会被 `OleTimingDangling` 拒绝）。可寻址载体：`MathTypeOle`（Equation OLE 块）、`FormulaImage`（启发式公式图）、`Picture`（顶层图片，无内容断言——"这是公式 X"的判定完全来自本表转录+白名单命中+独立定稿，映射对其不做 embedding 指纹校验） |
 | WhitelistName | 是 | 必须是 config `formulaWhitelist` 中已存在的 `name` |
 | SourceFormulaText | 是 | 从裁剪图转录的线性文本；`Test-FormulaWhitelistMatch` 必须以该文本命中 `WhitelistName` 对应规则 |
 | SizePt | 是 | 8–96 整数；可用裁剪清单的 `SuggestedSizePt` 作起点，由 judge 视觉验收定版。注意 `SuggestedSizePt` 是整块位图内容高度的换算值（不是 OMML 基准字号）：OMML 上下分式的排版高度约为基准字号的 2.24 倍（PowerPoint `TextRange.BoundHeight` 实测），选值时须保证 `字号×2.24 ≤ 原 OLE 包围盒高`，否则批次 size-fit 步骤会按实测再收缩 |
@@ -47,7 +47,7 @@ CSV 文件（UTF-8 BOM），列与 `Export-FormulaOleMapping.ps1` 校验一致�
 | SourceFormulaText 未命中指定白名单规则 | 行被拒 |
 | 页码/形状 id 不在盘点或非 MathTypeOle | 行被拒 |
 | 证据文件缺失 | 行被拒 |
-| OLE 内容指纹缺少 SourceFormulaText 声明的中文字符 | 行被拒（`OLE content fingerprint mismatch`；映射读取 MathType embedding 的 UTF-16LE 字符做交叉验证，防裁剪图-形状错标——2026-09-17 slide16 sh13/sh16 对调事故后加入） |
+| OLE 内容指纹缺少 SourceFormulaText 声明的中文字符 | 行被拒（`OLE content fingerprint mismatch`；映射读取 MathType embedding 的 UTF-16LE 字符做交叉验证，防裁剪图-形状错标——2026-09-17 slide16 sh13/sh16 对调事故后加入）。`FormulaImage`/`Picture` 载体无 embedding 可指纹，不做此校验，错标防线=裁剪图+整页图证据+独立定稿 |
 | 多 OLE 合并且次形状有动画绑定 | 写回阶段 `OleTimingDangling` 拒绝，保留 MathType |
 | 任何一行被拒 | `Export-FormulaOleMapping.ps1` 整体 Failed（有 error 即 throw） |
 

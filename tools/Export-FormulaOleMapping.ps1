@@ -77,7 +77,7 @@ if ($actualInputSha256 -ne ([string]$inventory.input.sha256).ToLowerInvariant())
 
 $oleRecords = @(
     $inventory.records |
-        Where-Object { [string]$_.source.carrier -eq 'MathTypeOle' } |
+        Where-Object { [string]$_.source.carrier -in @('MathTypeOle', 'FormulaImage', 'Picture') } |
         Sort-Object @{ Expression = { [int]$_.source.slide } }, @{ Expression = { [double]$_.source.bbox.top } }, @{ Expression = { [double]$_.source.bbox.left } }, @{ Expression = { [int]$_.source.shapeId } }
 )
 $indexByKey = @{}
@@ -134,8 +134,8 @@ foreach ($row in $goldRows) {
             $rowValid = $false
             continue
         }
-        if ([string]$entry.Record.source.carrier -ne 'MathTypeOle') {
-            $errors.Add("${rowLabel}: source carrier is not MathTypeOle") | Out-Null
+        if ([string]$entry.Record.source.carrier -notin @('MathTypeOle', 'FormulaImage', 'Picture')) {
+            $errors.Add("${rowLabel}: source carrier is not a migration target (MathTypeOle/FormulaImage/Picture)") | Out-Null
             $rowValid = $false
             continue
         }
@@ -154,9 +154,12 @@ foreach ($row in $goldRows) {
     # with the MathType embedding's actual CJK characters. The v37-era goldset
     # attributed slide16 sh13/sh16 to each other's formulas and passed every
     # schema check — only the embedding bytes know what the OLE really holds.
+    # Picture/FormulaImage carriers have no MathType embedding to fingerprint;
+    # their crop-to-shape attribution is guarded by the required crop + page
+    # evidence and the independent GoldSet review instead.
     $claimedCjkChars = @([regex]::Matches($sourceFormulaText, '[\u4E00-\u9FFF]') | ForEach-Object { $_.Value } | Sort-Object -Unique)
     if ($claimedCjkChars.Count -gt 0) {
-        foreach ($shapeRecord in $shapeRecords) {
+        foreach ($shapeRecord in @($shapeRecords | Where-Object { [string]$_.source.carrier -eq 'MathTypeOle' })) {
             $foundChars = Get-OleEquationCjkFingerprint -PptxPath $inputPath -SlideNumber ([int]$shapeRecord.source.slide) -ShapeId ([int]$shapeRecord.source.shapeId)
             $missingChars = @($claimedCjkChars | Where-Object { -not $foundChars.Contains($_) })
             if ($missingChars.Count -gt 0) {
