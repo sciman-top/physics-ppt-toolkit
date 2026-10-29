@@ -458,6 +458,23 @@ function Test-FactsHaveLargeVisual {
     return $false
 }
 
+function Test-FactsHaveAnyVisual {
+    # Any visible picture/media/group a real page shows, above the tiny-area
+    # floor the empty-slide check uses. An appendix text page is text-only, so
+    # a slide carrying such a fact is a content page even when every visual is
+    # small: 16.4 slide27 (two small circuit pictures plus a dense 楷体 usage
+    # list) kept its original fonts because only the 120000 pt^2 large-visual
+    # threshold was consulted and both pictures sat below it.
+    param($Facts)
+    foreach ($fact in $Facts) {
+        if ($null -ne $fact.Type -and ($fact.Type -eq $script:MsoPicture -or $fact.Type -eq $script:MsoMedia -or $fact.Type -eq $script:MsoGroup)) {
+            if ($fact.Visible -eq $script:MsoFalse) { continue }
+            if ($null -ne $fact.Width -and $null -ne $fact.Height -and (($fact.Width * $fact.Height) -gt 100)) { return $true }
+        }
+    }
+    return $false
+}
+
 function Test-IsSectionTitleSlide {
     param($Slide, $Facts)
     if ($null -eq $Facts) { $Facts = Get-SlideShapeFacts -Slide $Slide }
@@ -594,7 +611,7 @@ function Get-SlideKind {
     if (Test-IsExerciseOrQuestionText -Text $joined) {
         return 'Exercise'
     }
-    if ($summary.TextShapeCount -le 2 -and -not $hasLargeVisual -and $plain.Length -gt 80) {
+    if ($summary.TextShapeCount -le 2 -and -not $hasLargeVisual -and $plain.Length -gt 80 -and -not (Test-FactsHaveAnyVisual $Facts)) {
         return 'AppendixText'
     }
 
@@ -1021,6 +1038,10 @@ function Get-TextRangeLayoutLineText {
 }
 
 function Test-TextRangeHasOverlappingSiblingText {
+    # Conservative any-overlap predicate kept as the fallback for lines whose
+    # bounds cannot be read; the decision path uses
+    # Test-TextRangeIntroducesNewSiblingOverlap so a metric wiggle inside a
+    # statically overlapping layout stays eligible for font normalization.
     param($Shape, $Lines)
     if ($null -eq $Shape) { return $null }
     try {
@@ -1030,31 +1051,88 @@ function Test-TextRangeHasOverlappingSiblingText {
         return $null
     }
     foreach ($line in @($Lines)) {
-        if ($null -eq $line) { continue }
-        $leftProperty = $line.PSObject.Properties['Left']
-        $topProperty = $line.PSObject.Properties['Top']
-        $widthProperty = $line.PSObject.Properties['Width']
-        $heightProperty = $line.PSObject.Properties['Height']
-        if ($null -eq $leftProperty -or $null -eq $topProperty -or $null -eq $widthProperty -or $null -eq $heightProperty) { continue }
-        if ($null -eq $leftProperty.Value -or $null -eq $topProperty.Value -or $null -eq $widthProperty.Value -or $null -eq $heightProperty.Value) { continue }
+        $ids = Get-TextRangeSiblingOverlapIds -Shape $Shape -Line $line
+        if ($null -eq $ids) { continue }
+        if ($ids.Count -gt 0) { return $true }
+    }
+    return $false
+}
+
+function Get-TextRangeSiblingOverlapIds {
+    # IDs of sibling text shapes whose bounds intersect the line bound. Pure
+    # set builder so the layout guard can tell a metric wiggle inside an
+    # already-shared region apart from glyphs genuinely growing into a new
+    # sibling; $null means the bounds or the sibling enumeration were
+    # unreadable and the caller must fall back to conservative semantics.
+    param($Shape, $Line)
+    if ($null -eq $Shape -or $null -eq $Line) { return $null }
+    $leftProperty = $Line.PSObject.Properties['Left']
+    $topProperty = $Line.PSObject.Properties['Top']
+    $widthProperty = $Line.PSObject.Properties['Width']
+    $heightProperty = $Line.PSObject.Properties['Height']
+    if ($null -eq $leftProperty -or $null -eq $topProperty -or $null -eq $widthProperty -or $null -eq $heightProperty) { return $null }
+    if ($null -eq $leftProperty.Value -or $null -eq $topProperty.Value -or $null -eq $widthProperty.Value -or $null -eq $heightProperty.Value) { return $null }
+    try {
+        $shapeId = [int]$Shape.Id
+        $siblings = @($Shape.Parent.Shapes)
+    } catch {
+        return $null
+    }
+    try {
+        $lineLeft = [double]$leftProperty.Value
+        $lineTop = [double]$topProperty.Value
+        $lineRight = $lineLeft + [double]$widthProperty.Value
+        $lineBottom = $lineTop + [double]$heightProperty.Value
+    } catch {
+        return $null
+    }
+    $ids = New-Object 'System.Collections.Generic.HashSet[int]'
+    foreach ($sibling in $siblings) {
         try {
-            $lineLeft = [double]$leftProperty.Value
-            $lineTop = [double]$topProperty.Value
-            $lineRight = $lineLeft + [double]$widthProperty.Value
-            $lineBottom = $lineTop + [double]$heightProperty.Value
-        } catch { continue }
-        foreach ($sibling in $siblings) {
-            try {
-                if ([int]$sibling.Id -eq $shapeId) { continue }
-                if ([int]$sibling.TextFrame2.HasText -ne -1) { continue }
-                $siblingLeft = [double]$sibling.Left
-                $siblingTop = [double]$sibling.Top
-                $siblingRight = $siblingLeft + [double]$sibling.Width
-                $siblingBottom = $siblingTop + [double]$sibling.Height
-                if ($lineLeft -lt $siblingRight -and $lineRight -gt $siblingLeft -and $lineTop -lt $siblingBottom -and $lineBottom -gt $siblingTop) {
-                    return $true
-                }
-            } catch { }
+            if ([int]$sibling.Id -eq $shapeId) { continue }
+            if ([int]$sibling.TextFrame2.HasText -ne -1) { continue }
+            $siblingLeft = [double]$sibling.Left
+            $siblingTop = [double]$sibling.Top
+            $siblingRight = $siblingLeft + [double]$sibling.Width
+            $siblingBottom = $siblingTop + [double]$sibling.Height
+            if ($lineLeft -lt $siblingRight -and $lineRight -gt $siblingLeft -and $lineTop -lt $siblingBottom -and $lineBottom -gt $siblingTop) {
+                [void]$ids.Add([int]$sibling.Id)
+            }
+        } catch { }
+    }
+    # Array subexpression: an unwrapped HashSet enumerates through the
+    # pipeline and a single-hit set would arrive as a scalar int.
+    return ,$ids
+}
+
+function Test-TextRangeIntroducesNewSiblingOverlap {
+    # The layout guard rejects glyphs that grow into a sibling text shape they
+    # did not already share bounds with, and tolerates metric wiggles inside a
+    # statically overlapping layout. 16.4 slide36 proved the previous
+    # any-overlap rule structurally blocked such shapes: the 示数 answer box
+    # overlaps a neighbour by author design, so even a 37.5 pt SHRINK kept the
+    # original 宋体 in the delivery. Line count and per-line text equality are
+    # enforced by the caller before this test, so before/after pairing by
+    # index is well defined.
+    param($Shape, $Before, $After)
+    if ($null -eq $Shape) { return $false }
+    for ($lineIndex = 0; $lineIndex -lt $After.Count; $lineIndex++) {
+        $afterIds = Get-TextRangeSiblingOverlapIds -Shape $Shape -Line $After[$lineIndex]
+        if ($null -eq $afterIds) {
+            # Unreadable bounds: fall back to the conservative rule — any
+            # intersecting sibling counts as a new overlap.
+            $conservative = Test-TextRangeHasOverlappingSiblingText -Shape $Shape -Lines @($After[$lineIndex])
+            if ($conservative) { return $true }
+            continue
+        }
+        if ($afterIds.Count -eq 0) { continue }
+        $beforeIds = $null
+        if ($lineIndex -lt $Before.Count) {
+            $beforeIds = Get-TextRangeSiblingOverlapIds -Shape $Shape -Line $Before[$lineIndex]
+        }
+        if ($null -eq $beforeIds) { return $true }
+        foreach ($siblingId in $afterIds) {
+            if (-not $beforeIds.Contains($siblingId)) { return $true }
         }
     }
     return $false
@@ -1078,7 +1156,7 @@ function Test-TextRangeLayoutUnchanged {
             } catch { }
         }
     }
-    if ($geometryChanged -and (Test-TextRangeHasOverlappingSiblingText -Shape $Shape -Lines (@($Before) + @($After)))) { return $false }
+    if ($geometryChanged -and (Test-TextRangeIntroducesNewSiblingOverlap -Shape $Shape -Before $Before -After $After)) { return $false }
     return $true
 }
 
@@ -1970,6 +2048,24 @@ function Normalize-TextShape {
             # distinct from lowercase l; the fit, relayout, and geometry guards
             # in Set-AutoSizeTextFontSafely apply to it unchanged. Only semantic
             # styling (size/alignment) stays deferred to the reviewed OMML path.
+            # A shape whose rendered lines share bounds with a sibling text
+            # shape is part of an author-composed overlay (16.4 slide36:
+            # "示数：_____Ω" with the red answer "3945" in a sibling box sitting
+            # on the underscores). Math-family advance widths are much narrower
+            # for blanks and symbols, so the trailing glyphs slide into the
+            # sibling's ink — a collision line-bound layout guards cannot see.
+            # Such overlays take the body latin family whose metric delta stays
+            # within what the composition tolerates; the CJK family normalizes
+            # as usual.
+            $overlayLines = Get-TextRangeLineLayout -TextRange $Shape.TextFrame2.TextRange
+            if ($null -ne $overlayLines -and $latinFamily -eq $script:Style.FontMath -and
+                (Test-TextRangeHasOverlappingSiblingText -Shape $Shape -Lines $overlayLines)) {
+                $latinFamily = $script:Style.FontLatin
+                Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName (Get-ShapeName $Shape) `
+                    -Issue 'FormulaStyleAutoSizeMathFamilySkippedSiblingOverlay' `
+                    -Details ("Formula-like text (kind {0}) shares line bounds with a sibling text shape (author-composed answer overlay); latin family follows the body font because math-family advance widths move the trailing glyphs inside the shared region." -f $formulaKind) `
+                    -RuleId 'STYLE.FORMULA.TEXT' -Property 'FontName' -RiskLevel 'R1' -Result 'Skipped'
+            }
             $mathFamilyApplied = (Test-StyleRuleEnabled -RuleId 'STYLE.TEXT.FONT') -and ($latinFamily -eq $script:Style.FontMath)
             Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName (Get-ShapeName $Shape) `
                 -Issue 'FormulaStyleAutoSizeMathFamily' `

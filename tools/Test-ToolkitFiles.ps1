@@ -981,7 +981,7 @@ foreach ($oleIdCase in $oleIdProbeCases) {
 # that can overlap a sibling answer shape. Verify indexed line capture,
 # geometry, text changes, and overlap-triggered rollback.
 $layoutDecisionText = ''
-foreach ($layoutFnName in @('Get-TextRangeLineLayout', 'Get-TextRangeLayoutLineText', 'Test-TextRangeHasOverlappingSiblingText', 'Test-TextRangeLayoutUnchanged', 'Get-TextRangeLayoutChangeText', 'Get-AutoSizeGeometryDrift')) {
+foreach ($layoutFnName in @('Get-TextRangeLineLayout', 'Get-TextRangeLayoutLineText', 'Test-TextRangeHasOverlappingSiblingText', 'Get-TextRangeSiblingOverlapIds', 'Test-TextRangeIntroducesNewSiblingOverlap', 'Test-TextRangeLayoutUnchanged', 'Get-TextRangeLayoutChangeText', 'Get-AutoSizeGeometryDrift')) {
     # Get-AutoSizeGeometryDrift lives in the geometry module; search both ASTs.
     $layoutFnAst = @(
         $normalizeReorderAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $layoutFnName }, $true)
@@ -1026,12 +1026,66 @@ $overlapTextShape = [pscustomobject]@{ Id = 2; Left = 25.0; Top = 22.0; Width = 
 $overlapSlide | Add-Member -MemberType NoteProperty -Name Shapes -Value @($overlapShape, $overlapTextShape)
 $metricBefore = @([pscustomobject]@{ Text = 'U = U1'; Left = 10.0; Top = 20.0; Width = 50.0; Height = 16.0 })
 $metricAfter = @([pscustomobject]@{ Text = 'U = U1'; Left = 10.0; Top = 20.0; Width = 55.0; Height = 16.0 })
+# A metric wiggle inside a statically overlapping layout (the line shared
+# bounds with the sibling before and after the font write) must stay
+# eligible — 16.4 slide36's 示数 answer box kept its original 宋体 because
+# even a 37.5 pt shrink was rejected under the previous any-overlap rule.
+$overlapSlide.Shapes = @($overlapShape, $overlapTextShape)
+if (-not (Test-TextRangeLayoutUnchanged -Before $metricBefore -After $metricAfter -Shape $overlapShape)) {
+    throw 'Line-layout probe: a metric change inside a statically overlapping layout must stay eligible for normalization.'
+}
+# Glyphs growing into a sibling text shape they did not share bounds with
+# before must still be rejected — that is the relayout the guard exists for.
+$overlapNewTextShape = [pscustomobject]@{ Id = 3; Left = 62.0; Top = 22.0; Width = 12.0; Height = 12.0; TextFrame2 = [pscustomobject]@{ HasText = -1 } }
+$overlapSlide.Shapes = @($overlapShape, $overlapNewTextShape)
 if (Test-TextRangeLayoutUnchanged -Before $metricBefore -After $metricAfter -Shape $overlapShape) {
-    throw 'Line-layout probe: a changed glyph bound overlapping a sibling answer must be rejected.'
+    throw 'Line-layout probe: a glyph bound growing into a new sibling text shape must be rejected.'
+}
+# Unreadable line bounds must fall back to the conservative any-overlap rule.
+if (-not (Test-TextRangeIntroducesNewSiblingOverlap -Shape $overlapShape -Before @([pscustomobject]@{ Text = 'U = U1' }) -After $metricAfter)) {
+    throw 'Line-layout probe: unreadable before-bounds must fall back to the conservative overlap rule.'
 }
 $overlapSlide.Shapes = @($overlapShape)
 if (-not (Test-TextRangeLayoutUnchanged -Before $metricBefore -After $metricAfter -Shape $overlapShape)) {
     throw 'Line-layout probe: a font metric change without a sibling overlap must remain eligible for normalization.'
+}
+
+# Slide-kind probe: an appendix text page is text-only. 16.4 slide27 (dense
+# 楷体 usage list plus two small circuit pictures, both under the 120000 pt^2
+# large-visual threshold) was styled as an appendix and kept its original
+# fonts; any visible picture/media/group must classify the page as content.
+$slideKindFnText = ''
+foreach ($slideKindFnName in @('Get-SlideTextSummary', 'Test-FactsHaveLargeVisual', 'Test-FactsHaveAnyVisual', 'Test-IsSectionTitleSlide', 'Test-IsExtensionSectionText', 'Test-IsExerciseOrQuestionText', 'Get-SlideKind')) {
+    $slideKindFnAst = $normalizeReorderAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $slideKindFnName }, $true) | Select-Object -First 1
+    if ($null -eq $slideKindFnAst) { throw "Slide-kind guard function not found for the behavioral probe: $slideKindFnName" }
+    $slideKindFnText += "`n" + $slideKindFnAst.Extent.Text
+}
+$script:MsoPicture = 13
+$script:MsoMedia = 16
+$script:MsoGroup = 6
+$script:MsoTrue = -1
+$script:MsoFalse = 0
+Invoke-Expression $slideKindFnText
+$s27UsageText = '滑动变阻器的使用：1、连接“一上一下”的接线柱；2、金属杆的两端是等效的。 关键是看接了电阻线圈的哪一端？ 有效电阻是哪一段？ 3、闭合开关前，阻值调至最大。滑片移到电阻线圈的另一端。'
+$s27Facts = @(
+    [pscustomobject]@{ Type = 13; Visible = -1; Width = 370.0; Height = 193.0; HasText = 0; Text = '' },
+    [pscustomobject]@{ Type = 13; Visible = -1; Width = 301.0; Height = 166.0; HasText = 0; Text = '' },
+    [pscustomobject]@{ Type = 17; Visible = -1; Width = 615.0; Height = 373.0; HasText = -1; Text = $s27UsageText }
+)
+$kindWithPictures = Get-SlideKind -Slide $null -SlideNumber 27 -Facts $s27Facts
+if ($kindWithPictures -cne 'Normal') {
+    throw "Slide-kind probe: a dense text page carrying small pictures must normalize as content, got '$kindWithPictures' (16.4 slide27 regression)."
+}
+$kindTextOnly = Get-SlideKind -Slide $null -SlideNumber 27 -Facts @($s27Facts[2])
+if ($kindTextOnly -cne 'AppendixText') {
+    throw "Slide-kind probe: a text-only dense page must stay a preserved appendix page, got '$kindTextOnly'."
+}
+$kindLargeVisual = Get-SlideKind -Slide $null -SlideNumber 5 -Facts @(
+    [pscustomobject]@{ Type = 13; Visible = -1; Width = 400.0; Height = 400.0; HasText = 0; Text = '' },
+    $s27Facts[2]
+)
+if ($kindLargeVisual -cne 'Normal') {
+    throw "Slide-kind probe: a dense text page with a large visual must normalize as content, got '$kindLargeVisual'."
 }
 
 # AutoSize geometry drift probe: the rollback trigger measures the max
