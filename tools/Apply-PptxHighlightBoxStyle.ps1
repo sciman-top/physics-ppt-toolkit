@@ -132,11 +132,10 @@ if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
     $deliveryDir = Split-Path -Parent $OutputPath
     $reportDir = Join-Path $deliveryRoot '00_检查报告'
     $backupDir = Join-Path $deliveryRoot '03_原始备份'
-    foreach ($dir in @($deliveryDir, $reportDir)) {
+    foreach ($dir in @($deliveryDir, $reportDir, $backupDir)) {
         if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     }
-    # The caller's delivery tree already keeps the true source in 03_原始备份;
-    # a second copy of the chain input would overwrite it with an intermediate.
+    Copy-Item -LiteralPath $PptxPath -Destination (Join-Path $backupDir ([System.IO.Path]::GetFileName($PptxPath))) -Force
     $workingPptx = $OutputPath
     Copy-Item -LiteralPath $PptxPath -Destination $workingPptx -Force
 } else {
@@ -341,6 +340,7 @@ function Set-HighlightBoxStyle {
 
 $application = New-PowerPointApplication
 $presentation = $null
+$slideCount = 0
 try {
     $presentation = Invoke-WithComRetry -Action { $application.Presentations.Open($workingPptx, $false, $false, $false) }
     $slideCount = $presentation.Slides.Count
@@ -374,6 +374,10 @@ try {
         }
     }
     Invoke-WithComRetry -Action { $presentation.Save() } | Out-Null
+} catch {
+    Add-ReportRow -SlideNumber 0 -ShapeName '(presentation)' -Class 'Presentation' -Before $null -After $null `
+        -Result 'Failed' -Details ([string]$_.Exception.Message)
+    if (Test-Path -LiteralPath $workingPptx) { Remove-Item -LiteralPath $workingPptx -Force -ErrorAction SilentlyContinue }
 } finally {
     if ($null -ne $presentation) {
         try { $presentation.Close() } catch { }
@@ -412,6 +416,10 @@ $deliveryManifest = [ordered]@{
 }
 $deliveryManifestPath = Join-Path $reportDir 'highlight-box-unify-manifest.json'
 Write-Utf8BomText -Text ($deliveryManifest | ConvertTo-Json -Depth 6) -Path $deliveryManifestPath
+
+if ($script:counters.Failed -gt 0 -or @($reportRows | Where-Object { $_.Result -eq 'Failed' }).Count -gt 0) {
+    throw 'Highlight-box styling failed; inspect highlight-box-unify-report.csv and manifest.'
+}
 
 Write-Host "Highlight box unify complete: $workingPptx"
 Write-Host ("Changed={0} AlreadyApplied={1} GroupsSkipped={2} Failed={3} SlideCount={4}" -f `

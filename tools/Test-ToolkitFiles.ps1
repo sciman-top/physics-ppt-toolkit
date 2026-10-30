@@ -764,6 +764,23 @@ foreach ($automationScript in @(
         throw "PowerPoint automation script must use New-PowerPointApplication: $automationScript"
     }
 }
+
+# Explicit output paths are supported by the standalone visual stages. They
+# must retain the same backup and failure-receipt guarantees as auto-versioned
+# delivery runs, otherwise a failed COM save can leave an untracked artifact.
+foreach ($stageScript in @('tools\Apply-PptxBrandVisualRefresh.ps1', 'tools\Apply-PptxHighlightBoxStyle.ps1')) {
+    $stageContent = Get-Content -LiteralPath (Join-Path $root $stageScript) -Raw -Encoding UTF8
+    if ($stageContent -notmatch '(?s)if \(-not \[string\]::IsNullOrWhiteSpace\(\$OutputPath\)\).*?foreach \(\$dir in @\([^\)]*\$backupDir') {
+        throw "Explicit output path must create the original backup directory: $stageScript"
+    }
+    if ($stageContent -notmatch '(?s)\$backupDir.*?Copy-Item -LiteralPath \$PptxPath -Destination \(Join-Path \$backupDir') {
+        throw "Explicit output path must copy the source into the original backup directory: $stageScript"
+    }
+}
+$visualFixContent = Get-Content -LiteralPath (Join-Path $root 'tools\Apply-PptxVisualAuditFixes.ps1') -Raw -Encoding UTF8
+if ($visualFixContent -notmatch '(?s)Copy-Item -LiteralPath \$InputPath -Destination \$OutputPath.*?catch \{.*?Remove-Item -LiteralPath \$OutputPath') {
+    throw 'Visual audit fixes must remove incomplete output after a presentation-level failure.'
+}
 if ($normalizeContent -match [regex]::Escape('$font.Fill.ForeColor.RGB = $Color')) { throw 'Normalize body path must never write author text colors.' }
 if ($normalizeContent -match [regex]::Escape('$font.Bold = $(if ($Bold) { $script:MsoTrue } else { $script:MsoFalse })')) { throw 'Normalize body path must never write Bold=false over author bold runs.' }
 

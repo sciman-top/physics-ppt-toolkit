@@ -95,11 +95,10 @@ if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
     $pageImageDir = Join-Path $deliveryDir '页面图片'
     $reportDir = Join-Path $deliveryRoot '00_检查报告'
     $backupDir = Join-Path $deliveryRoot '03_原始备份'
-    foreach ($dir in @($deliveryDir, $pageImageDir, $reportDir)) {
+    foreach ($dir in @($deliveryDir, $pageImageDir, $reportDir, $backupDir)) {
         if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     }
-    # The caller's delivery tree already keeps the true source in 03_原始备份;
-    # a second copy of the chain input would overwrite it with an intermediate.
+    Copy-Item -LiteralPath $PptxPath -Destination (Join-Path $backupDir ([System.IO.Path]::GetFileName($PptxPath))) -Force
     $workingPptx = $OutputPath
     Copy-Item -LiteralPath $PptxPath -Destination $workingPptx -Force
 } else {
@@ -784,6 +783,7 @@ function Add-BrandIcon {
 
 $application = New-PowerPointApplication
 $presentation = $null
+$slideCount = 0
 $slideRecords = New-Object System.Collections.Generic.List[object]
 try {
     $presentation = Invoke-WithComRetry -Action {
@@ -854,6 +854,9 @@ try {
     $pdfPath = Join-Path $deliveryDir "$stem.brand.pdf"
     Invoke-WithComRetry -Action { $presentation.SaveAs($pdfPath, 32) } | Out-Null  # ppSaveAsPDF
     Write-Host "Exported PDF: $pdfPath"
+} catch {
+    $slideRecords.Add([pscustomobject]@{ Slide = 0; Role = '(presentation)'; Actions = $_.Exception.Message; Status = 'Failed' }) | Out-Null
+    if (Test-Path -LiteralPath $workingPptx) { Remove-Item -LiteralPath $workingPptx -Force -ErrorAction SilentlyContinue }
 } finally {
     if ($null -ne $presentation) {
         try { $presentation.Close() } catch { }
@@ -867,7 +870,7 @@ try {
 
 # --- delivery reports -------------------------------------------------------
 $inputHash = (Get-FileHash -LiteralPath $PptxPath -Algorithm SHA256).Hash
-$outputHash = (Get-FileHash -LiteralPath $workingPptx -Algorithm SHA256).Hash
+$outputHash = if (Test-Path -LiteralPath $workingPptx) { (Get-FileHash -LiteralPath $workingPptx -Algorithm SHA256).Hash } else { '' }
 
 $csvRows = foreach ($record in $slideRecords) {
     [pscustomobject]@{
@@ -899,7 +902,7 @@ $manifest = [pscustomobject]@{
     outputSha256  = $outputHash
     pdf           = (Join-Path $deliveryDir "$stem.brand.pdf")
     deliveryRoot  = $deliveryRoot
-    deliveryStatus = 'PendingManualVisualReview'
+    deliveryStatus = if (@($slideRecords | Where-Object { $_.Status -eq 'Failed' }).Count -gt 0) { 'Failed' } else { 'PendingManualVisualReview' }
     assets        = [pscustomobject]@{
         background      = Get-AssetFingerprint $bgPath
         iconShadow      = Get-AssetFingerprint $iconShadowPath
@@ -948,4 +951,7 @@ $summaryLines = @(
 Write-Utf8BomText -Text ($summaryLines -join "`r`n") -Path (Join-Path $deliveryRoot 'summary.md')
 
 Write-Host "Delivery folder: $deliveryRoot"
+if (@($slideRecords | Where-Object { $_.Status -eq 'Failed' }).Count -gt 0) {
+    throw 'Brand visual refresh failed; inspect brand-visual-refresh-report.csv and review-manifest.json.'
+}
 Write-Host 'Brand visual refresh completed.'

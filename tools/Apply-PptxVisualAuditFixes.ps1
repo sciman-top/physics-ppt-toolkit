@@ -194,6 +194,10 @@ try {
     $saveFormat = if ([IO.Path]::GetExtension($OutputPath) -ieq '.pptm') { 25 } else { 24 }
     Invoke-WithComRetry -Action { $pres.SaveAs($OutputPath, $saveFormat) } | Out-Null
     Add-FixRow -Rows $reportRows -File ([System.IO.Path]::GetFileName($InputPath)) -Slide 0 -Shape '(presentation)' -Issue 'SavedAs' -Status 'Saved' -Details $OutputPath
+} catch {
+    Add-FixRow -Rows $reportRows -File ([System.IO.Path]::GetFileName($InputPath)) -Slide 0 -Shape '(presentation)' `
+        -Issue 'Presentation' -Status 'Failed' -Details $_.Exception.Message
+    if (Test-Path -LiteralPath $OutputPath) { Remove-Item -LiteralPath $OutputPath -Force -ErrorAction SilentlyContinue }
 } finally {
     if ($null -ne $pres) {
         try { $pres.Close() | Out-Null } catch { }
