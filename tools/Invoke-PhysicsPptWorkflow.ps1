@@ -1338,7 +1338,7 @@ function Write-Summary {
     $lines.Add('## 输出结构')
     $lines.Add('')
     $lines.Add('- `00_检查报告/`：检查报告与规范化报告')
-    $lines.Add('- `01_交付物/`：处理后的 PPTX/PPTM 与同名导出 PDF 存放在同一目录')
+    $lines.Add('- `01_交付物/`：正式交付物——与源件同名的最终 PPTX 和 PDF（唯一对外 PPTX）')
     if (-not $exportsPdf) {
         $lines.Add('  （当前模式不导出 PDF，目录内仅包含 PPTX/PPTM）')
     }
@@ -1366,7 +1366,7 @@ function Write-Summary {
     }
     if ($null -ne $Manifest -and ($Manifest.PSObject.Properties.Name -contains 'brandStageArtifacts') -and $null -ne $Manifest.brandStageArtifacts) {
         $chainCompleted = @($Manifest.brandStageArtifacts.files | Where-Object { [string]$_.status -eq 'Completed' }).Count
-        $lines.Add("- 品牌链副本（规范化→品牌→强调框）：$chainCompleted 份；最终交付以 01_交付物 内 `_callout`/`_brand` 副本及其同名 PDF 为准")
+        $lines.Add("- 品牌链阶段副本（规范化→品牌→强调框）：$chainCompleted 份，存放在 ``02_阶段副本/``（哈希与回溯用，不对外交付）；正式交付物为 01_交付物 内与源件同名的 PPTX/PDF")
     }
     if ($null -ne $formulaOmmlArtifacts) {
         $lines.Add('- `14_公式OMML副本/`：白名单公式转换为可编辑 OfficeMath/OMML 的 PPTX 副本')
@@ -1803,6 +1803,87 @@ function Export-FinalChainPdf {
         [GC]::Collect()
         [GC]::WaitForPendingFinalizers()
     }
+}
+
+function Complete-FinalDeliveryPackaging {
+    # Post-gate delivery layout (2026-10-29 convention, executing the
+    # 2026-09-17 same-name deliverable rule): 01_交付物 carries exactly one
+    # final PPTX named after the source file plus its same-name PDF; the
+    # normalized/brand stage copies (and their stage PDFs and the normalize
+    # probe cache) move to 02_阶段副本 so the folder a user opens shows the
+    # one file to deliver. Runs after every gate, before the manifest write;
+    # manifest strings are rewritten through the JSON roundtrip so the
+    # receipt checks and the written manifest reference the final locations.
+    # A failure here degrades to the stage-suffixed layout instead of
+    # throwing: all gates already passed and every file is present on disk.
+    param($Manifest)
+
+    $receipt = [ordered]@{
+        applied = $false
+        stageDir = ''
+        renamedFinal = ''
+        movedCount = 0
+        note = ''
+    }
+    $chain = Get-ObjectPropertyValue -Object $Manifest -PropertyName 'brandStageArtifacts' -DefaultValue $null
+    if ($null -eq $chain) {
+        $receipt.note = 'no brand/highlight stage receipt; layout unchanged'
+        return [pscustomobject]$receipt
+    }
+    $pathMap = [ordered]@{}
+    try {
+        foreach ($record in @((Get-ObjectPropertyValue -Object $chain -PropertyName 'files' -DefaultValue @()))) {
+            if ([string](Get-ObjectPropertyValue -Object $record -PropertyName 'status' -DefaultValue '') -ne 'Completed') { continue }
+            $finalPptx = [string](Get-ObjectPropertyValue -Object $record -PropertyName 'finalPptx' -DefaultValue '')
+            if ([string]::IsNullOrWhiteSpace($finalPptx) -or -not (Test-Path -LiteralPath $finalPptx)) { continue }
+            $deliveryDir = Split-Path -Parent $finalPptx
+            $stageDir = Join-Path (Split-Path -Parent $deliveryDir) '02_阶段副本'
+            if (-not (Test-Path -LiteralPath $stageDir)) { New-Item -ItemType Directory -Path $stageDir -Force | Out-Null }
+            $receipt.stageDir = $stageDir
+            $sourceBase = [System.IO.Path]::GetFileNameWithoutExtension([string](Get-ObjectPropertyValue -Object $record -PropertyName 'file' -DefaultValue ''))
+            if ([string]::IsNullOrWhiteSpace($sourceBase)) { continue }
+            # Stage copies by name pattern: every stage-suffixed artifact of
+            # this file moves; the callout copy renames to the source name.
+            foreach ($stageFile in @(Get-ChildItem -LiteralPath $deliveryDir -File | Where-Object {
+                        $_.Name -like "$sourceBase.normalized.*" -or $_.Name -like "$sourceBase.brand.*"
+                    })) {
+                $target = Join-Path $stageDir $stageFile.Name
+                $attempt = 0
+                while ($true) {
+                    $attempt++
+                    try { Move-Item -LiteralPath $stageFile.FullName -Destination $target -Force; break }
+                    catch {
+                        if ($attempt -ge 3) { throw }
+                        Start-Sleep -Seconds (2 * $attempt)
+                    }
+                }
+                $pathMap[$stageFile.FullName] = $target
+                $receipt.movedCount++
+            }
+            $sameNamePptx = Join-Path $deliveryDir ("$sourceBase" + [System.IO.Path]::GetExtension($finalPptx))
+            if ($sameNamePptx -ne $finalPptx) {
+                if (Test-Path -LiteralPath $sameNamePptx) { Remove-Item -LiteralPath $sameNamePptx -Force }
+                Rename-Item -LiteralPath $finalPptx -NewName ([System.IO.Path]::GetFileName($sameNamePptx))
+                $pathMap[$finalPptx] = $sameNamePptx
+                $receipt.renamedFinal = $sameNamePptx
+            }
+        }
+        if ($pathMap.Count -gt 0) {
+            # Patch every manifest string through the JSON roundtrip (the same
+            # serializer the manifest write uses). JSON escapes backslashes,
+            # so both ends of each replacement are escaped the same way; the
+            # longest old paths replace first to avoid prefix collisions.
+            $manifestJson = $Manifest | ConvertTo-Json -Depth 8
+            foreach ($oldPath in @($pathMap.Keys | Sort-Object { $_.Length } -Descending)) {
+                $manifestJson = $manifestJson.Replace($oldPath.Replace('\', '\\'), $pathMap[$oldPath].Replace('\', '\\'))
+            }
+            $Manifest = $manifestJson | ConvertFrom-Json
+            $receipt.applied = $true
+        }
+    } catch {
+        $receipt.note = "packaging degraded to stage-suffixed layout: $($_.Exception.Message)"
+    }
+    return [pscustomobject]@{ Manifest = $Manifest; Receipt = $receipt }
 }
 
 function Invoke-FinalChainVisualAudit {
@@ -2573,6 +2654,14 @@ if ($ApplyFormulaOmmlWhitelist -and $null -ne $manifest.formulaOmmlArtifacts) {
 }
 $manifest.formulaProcessing.actualWriteBack = ($actualFormulaWriteCount -gt 0)
 $manifest.formulaProcessing.actualWriteCount = $actualFormulaWriteCount
+
+# Delivery packaging runs after every gate and before the receipt checks:
+# stage copies move to 02_阶段副本 and the final style copy takes the
+# source-same-name, so the failure/hash checks below validate the layout
+# the user actually sees.
+$deliveryPackaging = Complete-FinalDeliveryPackaging -Manifest $manifest
+$manifest = $deliveryPackaging.Manifest
+$manifest | Add-Member -NotePropertyName deliveryPackaging -NotePropertyValue $deliveryPackaging.Receipt -Force
 
 Write-Host "Step ${stepCount}/${stepCount}: write summary and manifest"
 $currentManifest = $manifest

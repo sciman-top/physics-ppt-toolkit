@@ -471,7 +471,11 @@ try {
     }
 
     # --- step 6: apply to a new copy ---
-    $outputName = [System.IO.Path]::GetFileName($inputFullPath)
+    # The delivery artifact is named after the canonical deck stem (the
+    # 2026-09-17 deliverable rule: no stage suffixes), not after the chain
+    # head's .callout/.brand file name.
+    $outputStem = Get-CanonicalDeckStem -FileName ([System.IO.Path]::GetFileName($inputFullPath))
+    $outputName = "$outputStem$([System.IO.Path]::GetExtension($inputFullPath))"
     $outputPptx = Join-Path $deliveryDir $outputName
     $applyReport = Join-Path $reportDir 'formula-ole-apply-report.csv'
     Invoke-BatchStep -StepName 'apply' -Inputs @($inputFullPath, $mappingCsv, $fragmentsDir) -Outputs @($outputPptx, $applyReport) -Action {
@@ -533,7 +537,61 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "FormulaOfficeMathValidator failed with exit code $LASTEXITCODE." }
     }
 
-    # --- step 9: after visual audit (PowerPoint open proof + pages) ---
+    # --- step 9: same-name final PDF (delivery completeness) ---
+    # The converted PPTX is the new final deliverable; its PDF must match it,
+    # not the pre-conversion copy the upstream full chain exported.
+    $finalPdfPath = Join-Path $deliveryDir "$outputStem.pdf"
+    Invoke-BatchStep -StepName 'final-pdf' -Inputs @($outputPptx) -Outputs @($finalPdfPath) -Action {
+        # Activation races with the size-fit session that just released
+        # PowerPoint (0x800706B5 family), so each attempt activates, opens,
+        # and saves as one unit: a failure tears the attempt's objects down
+        # before the next retry, and the finally block only handles the last
+        # attempt's state.
+        $attempts = 0
+        while ($true) {
+            $attempts++
+            $powerPoint = $null
+            $presentation = $null
+            try {
+                $powerPoint = New-PowerPointApplication
+                $presentation = Invoke-WithComRetry -MaxRetries 3 -DelayMs 1200 -Action {
+                    $powerPoint.Presentations.Open([System.IO.Path]::GetFullPath($outputPptx), $true, $false, $false)
+                }.GetNewClosure()
+                Invoke-WithComRetry -MaxRetries 3 -DelayMs 1200 -Action {
+                    $presentation.SaveAs([System.IO.Path]::GetFullPath($finalPdfPath), 32)  # ppSaveAsPDF
+                }.GetNewClosure() | Out-Null
+                if (-not (Test-Path -LiteralPath $finalPdfPath) -or (Get-Item -LiteralPath $finalPdfPath).Length -le 0) {
+                    throw "PowerPoint did not create a non-empty final PDF: $finalPdfPath"
+                }
+                break
+            } catch {
+                if ($null -ne $presentation) {
+                    try { $presentation.Close() | Out-Null } catch { }
+                    Release-ComObjectSafe $presentation
+                    $presentation = $null
+                }
+                if ($null -ne $powerPoint) {
+                    try { Stop-PowerPointApplicationIfIdle -Application $powerPoint | Out-Null } catch { }
+                    Release-ComObjectSafe $powerPoint
+                    $powerPoint = $null
+                }
+                if ($attempts -ge 4 -or -not (Test-IsRetryablePresentationFailure -Category (Get-ComFailureCategory -ErrorRecord $_) -Message $_.Exception.Message)) { throw }
+                Write-Host "[final-pdf] COM attempt $attempts failed transiently, retrying: $(Format-ComFailureDetails -ErrorRecord $_)"
+                Start-Sleep -Seconds (3 * $attempts)
+            } finally {
+                if ($null -ne $presentation) {
+                    try { $presentation.Close() | Out-Null } catch { }
+                    Release-ComObjectSafe $presentation
+                }
+                if ($null -ne $powerPoint) {
+                    try { Stop-PowerPointApplicationIfIdle -Application $powerPoint | Out-Null } catch { }
+                    Release-ComObjectSafe $powerPoint
+                }
+            }
+        }
+    }
+
+    # --- step 10: after visual audit (PowerPoint open proof + pages) ---
     if (-not $SkipVisualAudit) {
         $afterAuditDir = Join-Path $reportDir 'after-audit'
         Invoke-BatchStep -StepName 'after-audit' -Inputs @($outputPptx) -Outputs @((Join-Path $afterAuditDir 'pptx-visual-audit.csv'), $afterAuditDir) -Action {
@@ -575,6 +633,8 @@ try {
         deliveryRoot = $deliveryFullPath
         outputPptx = $outputPptx
         outputSha256 = Get-FileSha256 -Path $outputPptx
+        finalPdf = $finalPdfPath
+        finalPdfSha256 = Get-FileSha256 -Path $finalPdfPath
         applySummary = [ordered]@{
             replaced = $replacedCount
             refused = $refusedCount
@@ -589,6 +649,25 @@ try {
     }
     Write-Utf8BomText -Text ($manifest | ConvertTo-Json -Depth 10) -Path $manifestPath
     $completedManifestWritten = $true
+
+    # Root summary.md: the same top-level overview the full-chain deliveries
+    # carry, so every versioned delivery answers "which file is the final
+    # deliverable" the same way regardless of which producer built it.
+    $summaryLines = New-Object System.Collections.Generic.List[string]
+    $summaryLines.Add('# 公式迁移批次交付总览') | Out-Null
+    $summaryLines.Add('') | Out-Null
+    $summaryLines.Add("- 生成时间：$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')") | Out-Null
+    $summaryLines.Add("- 批次状态：$batchStatus") | Out-Null
+    $summaryLines.Add("- 输入（链头）：$inputFullPath") | Out-Null
+    $summaryLines.Add("- 输出：$outputPptx") | Out-Null
+    $summaryLines.Add("- 同名 PDF：$finalPdfPath") | Out-Null
+    $summaryLines.Add("- 公式写回：replaced=$($manifest.applySummary.replaced)；refused=$($manifest.applySummary.refused)") | Out-Null
+    $summaryLines.Add("- 尺寸守卫：size-fit 收缩 $($manifest.sizeFit.appliedCount) 处（明细见 00_检查报告/formula-ole-size-fit-report.csv）") | Out-Null
+    $summaryLines.Add("- GoldSet：$goldSetPath") | Out-Null
+    $summaryLines.Add('- 交付物说明：`01_交付物/` 内与源件同名的 PPTX/PDF 为唯一正式交付物；检查报告与逐页审查在 `00_检查报告/`。') | Out-Null
+    $summaryLines.Add('- 结构化清单：`00_检查报告/formula-ole-batch-manifest.json`（步骤收据与哈希绑定）。') | Out-Null
+    Write-Utf8BomText -Text ($summaryLines -join "`r`n") -Path (Join-Path $deliveryFullPath 'summary.md')
+
     if ($batchStatus -eq 'Passed') {
         Write-Output ("Batch passed: {0}" -f $deliveryFullPath)
     } else {
