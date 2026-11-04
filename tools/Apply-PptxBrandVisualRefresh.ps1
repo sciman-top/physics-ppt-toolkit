@@ -875,7 +875,7 @@ try {
         $diagnosticCopy = Join-Path $reportDir ('brand-failed-' + [IO.Path]::GetFileName($presentationToPublish))
         Move-Item -LiteralPath $presentationToPublish -Destination $diagnosticCopy -Force
     } elseif ($brandStageFailed -and (Test-Path -LiteralPath $workingPptx) -and
-        (Get-FileSha256OrNull -Path $workingPptx) -eq (Get-FileSha256OrNull -Path $PptxPath)) {
+        (Get-FileSha256Hex -Path $workingPptx) -eq (Get-FileSha256Hex -Path $PptxPath)) {
         # Explicit -OutputPath failed before a usable stage was published.
         # Remove only the exact byte copy created by this invocation; no
         # downstream consumer may mistake it for a completed brand stage.
@@ -957,10 +957,10 @@ $summaryLines = @(
     '## 本次动作',
     '- 仅封面/END/资源页/网盘群页替换品牌背景图（右上角已合成新公众号图标），其余页面保持白底',
     '- 删除蓝底特殊页上的旧公众号图标，避免与新背景重复',
-    '- 封面：标题浅金（保留行楷）、副标题近白；三行联系信息 22pt 左对齐、文本块随最长行收窄后整体水平居中，"标签："浅金加粗 + 内容浅蓝灰，雅黑+Consolas',
+    '- 封面：标题浅金（保留行楷）、副标题近白；三行联系信息 24pt 左对齐、文本块随最长行收窄后整体水平居中，"标签："浅金加粗 + 内容浅蓝灰，华文行楷+Consolas',
     '- END：END 浅金加粗 Georgia 居中、声明行 24pt/链接 18pt 左对齐且整块贴最长行后水平居中（楷体/Consolas）、"禁止"金色加粗（按字符定位保留高亮）',
     '- 资源页：页标题浅金加粗、网盘名白色加粗、链接天蓝 18pt 单行、说明文字浅蓝灰',
-    '- 网盘群页：标题浅金加粗、群号数字行天蓝、说明行白色（版式与字号保持原样）',
+    '- 网盘群页：标题浅金加粗、群号数字行天蓝、说明行白色（说明文本块收进安全区并按最长行紧宽后水平居中，超出时按 2pt 步进缩号至可容纳）',
     '- 分隔页（第N课时/课题名/拓展等短标题页）：不加背景图，白底 + 华文行楷加粗 80pt（课题名标题蓝、课时/拓展强调红），双居中，右上角不透明图标',
     '- 正文等其余页面：不加背景图、不加图标（内容页按设计无品牌元素），并移除历史遗留的旧公众号图标，避免与正文抢读',
     '- 原空白页保持原样（不加背景、不加图标）',

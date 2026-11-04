@@ -38,9 +38,17 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'PhysicsPpt.Common.ps1')
+# Picture-fill carriers are detected from the package XML layer; the reader
+# lives in the geometry module (Common alone is not enough).
+. (Join-Path $PSScriptRoot 'PhysicsPpt.Geometry.ps1')
 
 $script:MsoFalse = 0
 $script:MsoGroup = 6
+# Shape types whose visible content is carried by a bitmap or an embedding:
+# linked picture (4), embedded OLE (7), linked OLE (10), picture (13),
+# media (16). A COM position write marks these dirty and PowerPoint re-bakes
+# the bitmap on save (Normalize 18.2: 0.6-28% pixel drift on formula shots).
+$script:MsoBitmapCarriedTypes = @(4, 7, 10, 13, 16)
 
 function Add-FixRow {
     param(
@@ -105,9 +113,14 @@ $rows = @(
 
 $reportRows = New-Object System.Collections.Generic.List[object]
 Copy-Item -LiteralPath $InputPath -Destination $OutputPath -Force
+# blipFill carriers (formula-screenshot text boxes) are invisible to COM
+# Fill.Type (msoFillMixed), so the XML layer is the only dependable signal;
+# the working copy carries the same slide XML as the input.
+$pictureFillShapeIds = Get-PictureFillShapeIds -SourcePath $OutputPath
 
 $pp = $null
 $pres = $null
+$presentationFailed = $false
 try {
     # Application start and Open reject transiently while a previous
     # automation instance is still tearing down; use the shared COM retry.
@@ -141,6 +154,16 @@ try {
             try { $shapeType = [int]$shape.Type } catch { }
             if ($shapeType -eq $script:MsoGroup) {
                 Add-FixRow -Rows $reportRows -File ([System.IO.Path]::GetFileName($InputPath)) -Slide $slideNo -Shape $shapeName -Issue 'ShapeOutOfSlideBounds' -Status 'SkippedGroup' -Details 'Group shapes are skipped by default; moving one would change every child shape position.'
+                continue
+            }
+            if ($shapeType -in $script:MsoBitmapCarriedTypes) {
+                Add-FixRow -Rows $reportRows -File ([System.IO.Path]::GetFileName($InputPath)) -Slide $slideNo -Shape $shapeName -Issue 'ShapeOutOfSlideBounds' -Status 'SkippedBitmapCarriedType' -Details ("shapeType={0}; moving bitmap-backed shapes would trigger a fill re-bake on save." -f $shapeType)
+                continue
+            }
+            $shapeId = 0
+            try { $shapeId = [int]$shape.Id } catch { }
+            if (Test-PictureFillShapeId -Map $pictureFillShapeIds -SlideNumber $slideNo -ShapeId $shapeId) {
+                Add-FixRow -Rows $reportRows -File ([System.IO.Path]::GetFileName($InputPath)) -Slide $slideNo -Shape $shapeName -Issue 'ShapeOutOfSlideBounds' -Status 'SkippedPictureFillCarrier' -Details 'spPr blipFill carrier (formula-screenshot class); moving it would re-bake the fill bitmap on save.'
                 continue
             }
 
@@ -195,9 +218,9 @@ try {
     Invoke-WithComRetry -Action { $pres.SaveAs($OutputPath, $saveFormat) } | Out-Null
     Add-FixRow -Rows $reportRows -File ([System.IO.Path]::GetFileName($InputPath)) -Slide 0 -Shape '(presentation)' -Issue 'SavedAs' -Status 'Saved' -Details $OutputPath
 } catch {
+    $presentationFailed = $true
     Add-FixRow -Rows $reportRows -File ([System.IO.Path]::GetFileName($InputPath)) -Slide 0 -Shape '(presentation)' `
         -Issue 'Presentation' -Status 'Failed' -Details $_.Exception.Message
-    if (Test-Path -LiteralPath $OutputPath) { Remove-Item -LiteralPath $OutputPath -Force -ErrorAction SilentlyContinue }
 } finally {
     if ($null -ne $pres) {
         try { $pres.Close() | Out-Null } catch { }
@@ -209,6 +232,14 @@ try {
     }
     [System.GC]::Collect()
     [System.GC]::WaitForPendingFinalizers()
+}
+if ($presentationFailed -and (Test-Path -LiteralPath $OutputPath)) {
+    # Removal happens only after the COM session is fully released above;
+    # deleting under the live PowerPoint file lock would silently fail and
+    # leave the half-done copy behind.
+    try { Remove-Item -LiteralPath $OutputPath -Force -ErrorAction Stop } catch {
+        Write-Warning ("Could not remove the incomplete visual-fix copy: {0}" -f $_.Exception.Message)
+    }
 }
 
 $reportPath = Join-Path $outDir 'pptx-visual-audit-fixes.csv'

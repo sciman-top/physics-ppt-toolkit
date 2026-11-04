@@ -205,7 +205,7 @@ function Get-HighlightBoxClass {
             $lineRgb = [int]$Shape.Line.ForeColor.RGB
             if ($lineRgb -eq $rgbLegacyBorderOrange -or $lineRgb -eq $rgbLegacyBorderRed) { return 'Conclusion' }
         }
-    } catch { return $null }
+    } catch { return 'ClassifyFailed' }
     return $null
 }
 
@@ -253,6 +253,7 @@ function Set-HighlightBoxStyle {
             $width0 = [double]$Shape.Width
             $height0 = [double]$Shape.Height
             $name0 = [string]$Shape.Name
+            $expanded = $false
             if ([int]$Shape.AutoShapeType -eq $script:MsoShapeRectangle) {
                 $Shape.AutoShapeType = $script:MsoShapeRoundedRectangle
             }
@@ -295,12 +296,17 @@ function Set-HighlightBoxStyle {
                     if ($targetWidth -ge $requiredWidth - 0.5 -and $targetWidth -gt $width0) {
                         $Shape.Width = [single][Math]::Round($targetWidth, 1)
                         $Shape.Left = [single][Math]::Round($targetLeft, 1)
+                        $expanded = $true
                     }
                 }
             }
-            if (-not $isConclusion -and [Math]::Abs([double]$Shape.Left - $left0) -gt 0.1) { $Shape.Left = $left0 }
+            # AutoShapeType assignment rewrites the bounding box even when the
+            # style itself is unchanged, so left/width are restored unless an
+            # intentional conclusion expansion claimed them this run.
+            $keepLeftWidth = $isConclusion -and $expanded
+            if (-not $keepLeftWidth -and [Math]::Abs([double]$Shape.Left - $left0) -gt 0.1) { $Shape.Left = $left0 }
             if ([Math]::Abs([double]$Shape.Top - $top0) -gt 0.1) { $Shape.Top = $top0 }
-            if (-not $isConclusion -and [Math]::Abs([double]$Shape.Width - $width0) -gt 0.1) { $Shape.Width = $width0 }
+            if (-not $keepLeftWidth -and [Math]::Abs([double]$Shape.Width - $width0) -gt 0.1) { $Shape.Width = $width0 }
             if ([Math]::Abs([double]$Shape.Height - $height0) -gt 0.1) { $Shape.Height = $height0 }
             # Assigning AutoShapeType renames the default shape name; downstream
             # tooling matches shapes by name across saves, so keep it stable.
@@ -341,6 +347,7 @@ function Set-HighlightBoxStyle {
 $application = New-PowerPointApplication
 $presentation = $null
 $slideCount = 0
+$presentationFailed = $false
 try {
     $presentation = Invoke-WithComRetry -Action { $application.Presentations.Open($workingPptx, $false, $false, $false) }
     $slideCount = $presentation.Slides.Count
@@ -362,7 +369,24 @@ try {
                             -Result 'GroupSkipped' -Details 'Grouped shapes are skipped by invariant.'
                         continue
                     }
-                    $class = Get-HighlightBoxClass -Shape $shape
+                    $class = $null
+                    try {
+                        # Transient COM rejections must not silently skip a box
+                        # (Changed counts would quietly shrink); retryable
+                        # failures retry here, persistent ones surface as a
+                        # Failed row below.
+                        $class = Invoke-WithComRetry -MaxRetries 3 -DelayMs 800 -Action { Get-HighlightBoxClass -Shape $shape }
+                    } catch {
+                        $class = 'ClassifyFailed'
+                    }
+                    if ($class -eq 'ClassifyFailed') {
+                        $script:counters.Failed++
+                        Add-ReportRow -SlideNumber $i -ShapeName $shapeName -Class 'Unknown' `
+                            -Before ([pscustomobject]@{ Fill = 'none'; LineColor = 'none'; LineWeightPt = 0; AutoShapeType = -1; CornerAdj = -1 }) `
+                            -After ([pscustomobject]@{ Fill = 'none'; LineColor = 'none'; LineWeightPt = 0; AutoShapeType = -1; CornerAdj = -1 }) `
+                            -Result 'Failed' -Details 'Highlight-box classification reads failed; the shape may be an unhandled box.'
+                        continue
+                    }
                     if ($null -eq $class) { continue }
                     Set-HighlightBoxStyle -Shape $shape -SlideNumber $i -ShapeName $shapeName -Class $class
                 } finally {
@@ -375,9 +399,13 @@ try {
     }
     Invoke-WithComRetry -Action { $presentation.Save() } | Out-Null
 } catch {
-    Add-ReportRow -SlideNumber 0 -ShapeName '(presentation)' -Class 'Presentation' -Before $null -After $null `
+    # Snapshot-shaped placeholder rows (same pattern as the GroupSkipped rows):
+    # passing raw $null here would crash inside Add-ReportRow under
+    # StrictMode and defeat the whole failure walk-down below.
+    $presentationFailed = $true
+    $failedSnapshot = [pscustomobject]@{ Fill = 'none'; LineColor = 'none'; LineWeightPt = 0; AutoShapeType = -1; CornerAdj = -1 }
+    Add-ReportRow -SlideNumber 0 -ShapeName '(presentation)' -Class 'Presentation' -Before $failedSnapshot -After $failedSnapshot `
         -Result 'Failed' -Details ([string]$_.Exception.Message)
-    if (Test-Path -LiteralPath $workingPptx) { Remove-Item -LiteralPath $workingPptx -Force -ErrorAction SilentlyContinue }
 } finally {
     if ($null -ne $presentation) {
         try { $presentation.Close() } catch { }
@@ -385,6 +413,13 @@ try {
     }
     try { Stop-PowerPointApplicationIfIdle -Application $application } catch { }
     Release-ComObjectSafe $application
+}
+if ($presentationFailed -and (Test-Path -LiteralPath $workingPptx)) {
+    # Only now is the COM session fully released; removing earlier would hit
+    # the live PowerPoint file lock and silently leave the half-done copy.
+    try { Remove-Item -LiteralPath $workingPptx -Force -ErrorAction Stop } catch {
+        Write-Warning ("Could not remove the incomplete highlight-box copy: {0}" -f $_.Exception.Message)
+    }
 }
 
 function Get-FileSha256Safe {

@@ -319,7 +319,10 @@ try {
     $pres = Invoke-WithComRetry -MaxRetries 3 -DelayMs 1500 -Action { $pp.Presentations.Open($InputPath, $script:MsoTrue, $script:MsoFalse, $script:MsoFalse) }
     $slideWidth = [double]$pres.PageSetup.SlideWidth
     $slideHeight = [double]$pres.PageSetup.SlideHeight
-    $slideCount = [int]$pres.Slides.Count
+    # Right after a PDF export PowerPoint can still reject reads (RPC_E_
+    # CALL_REJECTED family); an unguarded count here would abort the audit
+    # with every CSV/manifest lost (only pages/*.png survive).
+    $slideCount = [int](Invoke-WithComRetry -MaxRetries 3 -DelayMs 1000 -Action { $pres.Slides.Count })
 
     if (-not $NoPdf) {
         $pdfPath = Join-Path $OutputDir ($safeBase + '.pdf')
@@ -348,7 +351,7 @@ try {
     }
 
     for ($slideNo = 1; $slideNo -le $slideCount; $slideNo++) {
-        $slide = $pres.Slides.Item($slideNo)
+        $slide = Invoke-WithComRetry -MaxRetries 3 -DelayMs 1000 -Action { $pres.Slides.Item($slideNo) }.GetNewClosure()
         $imagePath = Join-Path $pageDir ('slide-{0:000}.png' -f $slideNo)
         $slideExportStatus = 'Failed'
         $slideExportError = ''
