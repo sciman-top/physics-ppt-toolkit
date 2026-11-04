@@ -40,8 +40,31 @@ if (-not [bool](Get-MetadataValue $manifest 'fullChainEnabled' $false)) {
 
 $files = @((Get-MetadataValue $manifest 'files' @()))
 if ($files.Count -eq 0) { throw 'Manifest contains no final delivery files.' }
-    $reviews = New-Object System.Collections.Generic.List[object]
-    foreach ($file in $files) {
+# Multi-deck deliveries share one 01_交付物 directory: the cleanliness check
+# must compare against the union of every deck's final same-name PPTX/PDF,
+# not against each deck in isolation (the sibling deck's files are expected).
+$expectedNamesByDir = @{}
+foreach ($file in $files) {
+    $inputPath = [string](Get-MetadataValue $file 'input' '')
+    $pdfPath = [string](Get-MetadataValue $file 'pdf' '')
+    if ([string]::IsNullOrWhiteSpace($inputPath) -or [string]::IsNullOrWhiteSpace($pdfPath)) {
+        throw 'Manifest does not identify the original input and final delivery directory.'
+    }
+    $deliveryDir = Split-Path -Parent $pdfPath
+    if (-not $expectedNamesByDir.ContainsKey($deliveryDir)) { $expectedNamesByDir[$deliveryDir] = New-Object System.Collections.Generic.List[string] }
+    foreach ($markerName in @([IO.Path]::GetFileName($inputPath), ([IO.Path]::GetFileNameWithoutExtension($inputPath) + '.pdf'))) {
+        if (-not $expectedNamesByDir[$deliveryDir].Contains($markerName)) { $expectedNamesByDir[$deliveryDir].Add($markerName) }
+    }
+}
+foreach ($deliveryDir in $expectedNamesByDir.Keys) {
+    $expectedNames = @($expectedNamesByDir[$deliveryDir].ToArray())
+    $deliveryFiles = @(Get-ChildItem -LiteralPath $deliveryDir -File)
+    if (@($deliveryFiles | Where-Object { $_.Name -notin $expectedNames }).Count -gt 0) {
+        throw 'Final delivery directory contains files other than the final same-name PPTX and PDF.'
+    }
+}
+$reviews = New-Object System.Collections.Generic.List[object]
+foreach ($file in $files) {
     $input = [string](Get-MetadataValue $file 'input' '')
     $stem = [IO.Path]::GetFileNameWithoutExtension($input)
     $finalVisualItems = @((Get-MetadataValue $manifest 'finalVisualAuditArtifacts' @()) | Where-Object {
@@ -56,11 +79,6 @@ if ($files.Count -eq 0) { throw 'Manifest contains no final delivery files.' }
     $pdfFullPath = [IO.Path]::GetFullPath((Join-Path $deliveryDir ($stem + '.pdf')))
     $pptx = Get-Item -LiteralPath $pptxFullPath -ErrorAction Stop
     $pdf = Get-Item -LiteralPath $pdfFullPath -ErrorAction Stop
-    $markerNames = @($pptx.Name, $pdf.Name)
-    $deliveryFiles = @(Get-ChildItem -LiteralPath $deliveryDir -File)
-    if (@($deliveryFiles | Where-Object { $_.Name -notin $markerNames }).Count -gt 0) {
-        throw 'Final delivery directory contains files other than the final same-name PPTX and PDF.'
-    }
     if (-not (Test-PptxPackageIntegrity -Path $pptx.FullName)) { throw "Final PPTX is not readable: $($pptx.FullName)" }
     if (-not (Test-PdfPackageIntegrity -Path $pdf.FullName)) { throw "Final PDF is not readable: $($pdf.FullName)" }
     $validation = Get-MetadataValue $file 'validation' $null
@@ -73,7 +91,12 @@ if ($files.Count -eq 0) { throw 'Manifest contains no final delivery files.' }
     $finalPdfSha256 = Get-FileSha256Hex -Path $pdf.FullName
     $brandStage = Get-MetadataValue $manifest 'brandStageArtifacts' $null
     $brandFiles = @((Get-MetadataValue $brandStage 'files' @()))
-    $chainRecord = @($brandFiles)
+    # Multi-deck manifests carry one receipt per deck; bind to THIS file's
+    # receipt instead of failing on the whole-collection count. The path is
+    # relayed through a plain local: inside a Where-Object scriptblock the
+    # automatic $input (pipeline enumerator) shadows the outer assignment.
+    $inputKey = $input
+    $chainRecord = @($brandFiles | Where-Object { [string](Get-MetadataValue $_ 'file' '') -eq $inputKey })
     if ($chainRecord.Count -ne 1) { throw "Final PPTX receipt is missing or ambiguous ($($chainRecord.Count) of $($brandFiles.Count))." }
     if ([string](Get-MetadataValue $chainRecord[0] 'file' '') -ine $input) {
         throw 'The full-chain receipt belongs to a different source presentation.'

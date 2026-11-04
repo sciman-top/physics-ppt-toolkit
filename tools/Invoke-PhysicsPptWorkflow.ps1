@@ -561,8 +561,13 @@ function Get-PostPackagingFailureAssessment {
         if (-not [string]::IsNullOrWhiteSpace([string]$manifestDeliveryDir)) {
             $manifestDeliveryDir = Split-Path -Parent ([string]$manifestDeliveryDir)
             $expectedDeliveryFiles = @($receipt.files | Where-Object { $_.kind -eq 'Final' } | ForEach-Object { [IO.Path]::GetFileName($_.new) })
-            foreach ($deliveryItem in @(Get-ChildItem -LiteralPath $manifestDeliveryDir -File -ErrorAction SilentlyContinue)) {
-                if ($deliveryItem.Name -like '*.cache.json') {
+            foreach ($deliveryItem in @(Get-ChildItem -LiteralPath $manifestDeliveryDir -ErrorAction SilentlyContinue)) {
+                if ($deliveryItem.PSIsContainer) {
+                    # Subdirectories (e.g. a _backup_originals residue from a
+                    # locked backup move) violate the 01_交付物 layout as much
+                    # as stray files do; the file-only probe missed them.
+                    $failureList.Add("FullChain delivery directory contains an unexpected subdirectory: $($deliveryItem.Name)") | Out-Null
+                } elseif ($deliveryItem.Name -like '*.cache.json') {
                     $failureList.Add("FullChain delivery directory contains a normalization cache: $($deliveryItem.Name)") | Out-Null
                 } elseif ($deliveryItem.Name -notin $expectedDeliveryFiles) {
                     $failureList.Add("FullChain delivery directory contains a non-final artifact: $($deliveryItem.Name)") | Out-Null
@@ -1965,6 +1970,7 @@ function Complete-FinalDeliveryPackaging {
     if ($null -eq $chain) { $receipt.note = 'no brand/highlight stage receipt; layout unchanged'; return [pscustomobject]@{ Manifest = $Manifest; Receipt = [pscustomobject]$receipt } }
     $moves = New-Object System.Collections.Generic.List[object]
     $planned = New-Object System.Collections.Generic.List[object]
+    $deliveryDirs = New-Object System.Collections.Generic.List[string]
     try {
         foreach ($record in @((Get-ObjectPropertyValue -Object $chain -PropertyName 'files' -DefaultValue @()))) {
             if ([string](Get-ObjectPropertyValue -Object $record -PropertyName 'status' -DefaultValue '') -ne 'Completed') { continue }
@@ -1980,6 +1986,7 @@ function Complete-FinalDeliveryPackaging {
             $stageDir = Join-Path (Split-Path -Parent $deliveryDir) '02_阶段副本'
             if (-not (Test-Path -LiteralPath $stageDir)) { New-Item -ItemType Directory -Path $stageDir -Force | Out-Null }
             $receipt.stageDir = $stageDir
+            if (-not $deliveryDirs.Contains($deliveryDir)) { $deliveryDirs.Add($deliveryDir) }
             $sourceBase = [System.IO.Path]::GetFileNameWithoutExtension($inputPath)
             $extension = [System.IO.Path]::GetExtension($finalPptx)
             $sameNamePptx = Join-Path $deliveryDir ($sourceBase + $extension)
@@ -1992,7 +1999,6 @@ function Complete-FinalDeliveryPackaging {
             if ([string]::IsNullOrWhiteSpace($recordPdf) -or [string]::IsNullOrWhiteSpace($pdfHash) -or -not (Test-Path -LiteralPath $recordPdf -PathType Leaf)) { throw "Final-chain PDF receipt is incomplete: $recordPdf" }
             if ($recordPdf -ine $samePdf) { throw "Final-chain PDF is not the same-stem delivery PDF: $recordPdf expected $samePdf" }
             if (-not (Test-PdfFileSignature -Path $recordPdf) -or (Get-FileSha256OrNull -Path $recordPdf) -cne $pdfHash) { throw "Final-chain PDF bytes do not match its receipt: $recordPdf" }
-            $finalRecord = @($record)
             $stagePaths = @()
             foreach ($name in @('normalizedPptx', 'pdf')) {
                 $stagePaths += [string](Get-ObjectPropertyValue -Object $manifestFile -PropertyName $name -DefaultValue '')
@@ -2013,14 +2019,24 @@ function Complete-FinalDeliveryPackaging {
             $planned.Add([pscustomobject]@{ old = $finalPptx; new = $sameNamePptx; kind = 'Final' }) | Out-Null
             $receipt.renamedFinal = $sameNamePptx
         }
-        foreach ($report in @(Get-ChildItem -LiteralPath $deliveryDir -File -Filter 'physics-ppt-normalize-report.csv' -ErrorAction SilentlyContinue)) {
-            $reportTarget = Join-Path (Split-Path -Parent $deliveryDir) ('00_检查报告/' + $report.Name)
-            if (-not (Test-Path -LiteralPath $reportTarget) -or
-                (Get-FileSha256OrNull -Path $reportTarget) -eq (Get-FileSha256OrNull -Path $report.FullName)) {
-                $planned.Add([pscustomobject]@{ old = $report.FullName; new = $reportTarget; kind = 'Report' }) | Out-Null
+        # Scan every delivery directory this batch produced (multi-deck runs
+        # have one per deck); a loop variable must not leak across decks.
+        foreach ($scanDir in @($deliveryDirs.ToArray())) {
+            foreach ($report in @(Get-ChildItem -LiteralPath $scanDir -File -Filter 'physics-ppt-normalize-report.csv' -ErrorAction SilentlyContinue)) {
+                $reportTarget = Join-Path (Split-Path -Parent $scanDir) ('00_检查报告/' + $report.Name)
+                if (-not (Test-Path -LiteralPath $reportTarget) -or
+                    (Get-FileSha256OrNull -Path $reportTarget) -eq (Get-FileSha256OrNull -Path $report.FullName)) {
+                    $planned.Add([pscustomobject]@{ old = $report.FullName; new = $reportTarget; kind = 'Report' }) | Out-Null
+                }
             }
         }
-        foreach ($plan in $planned) {
+        # Two decks sharing one source basename would fight for the same final
+        # filename; fail before any move with the collision named, instead of a
+        # generic "target exists" after partial planning.
+        $finalCollisions = @(@($planned.ToArray() | Where-Object { $_.kind -eq 'Final' } | Group-Object -Property new | Where-Object { $_.Count -gt 1 }))
+        if ($finalCollisions.Count -gt 0) {
+            throw ("Two decks deliver the same final filename; rename the source files or deliver them separately: " + (@($finalCollisions | ForEach-Object { [string]$_.Name }) -join '; '))
+        }        foreach ($plan in $planned) {
             if (Test-Path -LiteralPath $plan.new) {
                 $sameEvidence = $plan.kind -eq 'Report' -and
                     (Get-FileSha256OrNull -Path $plan.new) -eq (Get-FileSha256OrNull -Path $plan.old)
@@ -2091,6 +2107,13 @@ function Complete-FinalDeliveryPackaging {
                 if ($move.state -eq 'Moved' -and (Test-Path -LiteralPath $move.temporary)) { Move-Item -LiteralPath $move.temporary -Destination $move.old; $move.state = 'Restored' }
                 elseif ($move.state -eq 'Committed' -and (Test-Path -LiteralPath $move.new) -and -not (Test-Path -LiteralPath $move.old)) { Move-Item -LiteralPath $move.new -Destination $move.old; $move.state = 'Restored' }
             } catch { Write-Warning "Could not restore $($move.old): $($_.Exception.Message)" }
+        }
+        # Honest receipt: any state the restore pass could not bring back to
+        # the pre-packaging layout (including a stranded .pending-* temp) is
+        # reported as unrestored rather than silently claimed clean.
+        foreach ($move in @($moves.ToArray())) {
+            if ($move.state -eq 'Restored') { continue }
+            if ((Test-Path -LiteralPath $move.temporary) -or (Test-Path -LiteralPath $move.new)) { $receipt.restored = $false; break }
         }
         $receipt.files = @($moves.ToArray())
     }
@@ -2987,7 +3010,12 @@ $aiVisualReviewGate = Get-ObjectPropertyValue -Object $manifest -PropertyName 'a
 $invariantDeliveryBlocked = [bool]((Get-ObjectPropertyValue -Object $manifest -PropertyName 'invariantGate' -DefaultValue $null).status -eq 'Blocked')
 $aiDeliveryBlocked = [bool](Get-ObjectPropertyValue -Object $aiVisualReviewGate -PropertyName 'deliveryBlocked' -DefaultValue $false)
 $aiVisualReviewStatus = [string](Get-ObjectPropertyValue -Object $aiVisualReviewGate -PropertyName 'status' -DefaultValue 'NotPrepared')
-$deliveryAssessment = Get-DeliveryGateAssessment -Manifest $manifest -Mode $Mode -IncludeReviewArtifacts ([bool]$IncludeReviewArtifacts) -IncludeVisualAudit ([bool]$IncludeVisualAudit)
+# The production final gate runs the post-packaging assessment, not just the
+# pre-packaging delivery gate: it re-derives Get-DeliveryGateAssessment AND
+# additionally proves the committed layout (packaging receipt applied, delivery
+# directory cleanliness, per-move Committed state). Keeping the fixture-only
+# call surface here without the production wiring left those checks unenforced.
+$deliveryAssessment = Get-PostPackagingFailureAssessment -Manifest $manifest -Mode $Mode -IncludeReviewArtifacts ([bool]$IncludeReviewArtifacts) -IncludeVisualAudit ([bool]$IncludeVisualAudit)
 $manifest | Add-Member -NotePropertyName deliveryFailures -NotePropertyValue $deliveryAssessment.blocked -Force
 $manifest | Add-Member -NotePropertyName deliveryReviews -NotePropertyValue $deliveryAssessment.review -Force
 $deliveryStatus = if ($invariantDeliveryBlocked) {
@@ -3022,7 +3050,11 @@ $blockReason = if ($invariantDeliveryBlocked) {
         "Required delivery artifact validation failed: {0}" -f (($deliveryAssessment.blocked) -join '; ')
     }
 }
-    Write-WorkflowFailureReceipt -Path $workflowFailurePath -Phase 'FinalDeliveryGate'
+    # Carry the concrete blockReason into the failure receipt's error field;
+    # without it the receipt fell back to the generic "stopped before
+    # producing final receipts" wording.
+    $gateFailure = [System.Management.Automation.ErrorRecord]::new([System.Exception]::new($blockReason), 'FinalDeliveryGateBlocked', [System.Management.Automation.ErrorCategory]::InvalidOperation, $null)
+    Write-WorkflowFailureReceipt -Path $workflowFailurePath -Phase 'FinalDeliveryGate' -ErrorRecord $gateFailure
     throw "$blockReason Keep the generated files for investigation; do not deliver the normalized PPTX."
 }
 

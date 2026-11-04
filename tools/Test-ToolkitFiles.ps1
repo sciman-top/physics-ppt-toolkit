@@ -350,6 +350,10 @@ if (-not $?) { throw 'Formula OLE visual adjudication fixture test failed.' }
 if (-not $?) { throw 'FormulaOfficeMathValidator fault-injection test failed.' }
 & (Join-Path $root 'tools\Test-PageTypeClassification.ps1')
 if (-not $?) { throw 'Page-type classification probe failed.' }
+# Registering a fixture in $required only proves the file exists; it must run
+# here like every other fixture, or regressions in the tool stay gate-green.
+& (Join-Path $root 'tools\Test-PhysicsPptManualReview.ps1')
+if (-not $?) { throw 'Manual-review receipt fixture test failed.' }
 $validPptxIntegrity = Test-PptxPackageIntegrity -Path (Join-Path $root 'examples\fixtures\minimal-physics-sample.pptx')
 if (-not $validPptxIntegrity) { throw 'Valid PPTX fixture failed package integrity validation.' }
 $invalidPptxPath = Join-Path ([System.IO.Path]::GetTempPath()) ('physics-ppt-invalid-' + [Guid]::NewGuid().ToString('N') + '.pptx')
@@ -492,17 +496,32 @@ foreach ($rule in $formulaWhitelist) {
 }
 
 # Strong layout constraint for reports/: the root may only contain versioned
-# delivery directories (<deck>_v<N>) and _archive. Anything else (run_*,
-# ad-hoc names, legacy dotted variants) fails the minimum gate. A _v<N> suffix
-# directly attached to an ASCII word (normalized_v1, brand_v2, __pptx_v1) is
-# the legacy dotted-naming fingerprint and is rejected as well.
+# delivery directories (<deck>_v<N>) and _archive, plus the known ad-hoc
+# run_* scratch family. The legacy dotted-naming fingerprint is judged by the
+# STAGE vocabulary attached before the _v<N> suffix (normalized_v1, brand_v2,
+# __pptx_v1) — NOT by "an ASCII letter anywhere before _v<N>": that older rule
+# also rejected legitimate ASCII-stem decks (Review_v1) that the versioned
+# delivery root itself creates, permanently reddening the gate for legal
+# main-chain output.
 $reportsRoot = Join-Path $root 'reports'
 if (Test-Path -LiteralPath $reportsRoot) {
     $layoutViolations = @()
     foreach ($entry in @(Get-ChildItem -LiteralPath $reportsRoot -Force)) {
         if (-not $entry.PSIsContainer) { continue }
         if ($entry.Name -eq '_archive') { continue }
-        if ($entry.Name -match '^.+?_v(\d+)$' -and $entry.Name -notmatch '^.+[A-Za-z]_v(\d+)$') { continue }
+        if ($entry.Name -match '_v(\d+)$') {
+            if ($entry.Name -match '(^|[^A-Za-z0-9])(normalized|brand|callout|highlight|pptx)_v\d+$') {
+                # Stage-suffix vocabulary directly before _v<N>: the legacy
+                # dotted-naming fingerprint (normalized_v1, brand_v2, __pptx_v1).
+                $layoutViolations += $entry.Name
+            } elseif ($entry.Name -like 'run_*') {
+                # Reserved ad-hoc scratch prefix stays rejected even with a
+                # version-looking suffix.
+                $layoutViolations += $entry.Name
+            }
+            continue
+        }
+        # Anything without the versioned suffix is ad-hoc (run_* and friends).
         $layoutViolations += $entry.Name
     }
     if ($layoutViolations.Count -gt 0) {
@@ -554,7 +573,7 @@ foreach ($file in $psFiles) {
     }
 
     $content = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8
-    if ($content -match '\[[^\]]+\]\s*\$[A-Za-z_][A-Za-z0-9_]*\s*=\s*\(Join-Path\s+\$PSScriptRoot') {
+    if ($content -match '\[[^\]]+\]\s*\$[A-Za-z_][A-Za-z0-9_]*\s*=\s*\(?\s*Join-Path\s+\$PSScriptRoot') {
         throw "PowerShell parameter defaults must not depend on PSScriptRoot; resolve after param binding: $($file.Name)"
     }
     if ($content -match '\}function\s+[A-Za-z_][A-Za-z0-9_-]*') {
@@ -566,7 +585,7 @@ foreach ($file in $psFiles) {
     if ($content -match 'ExtractToDirectory\s*\(') {
         throw "PPTX extraction must use Expand-PptxPackageSafely: $($file.Name)"
     }
-    if ($file.Name -ne 'PhysicsPpt.Common.ps1' -and $content -match 'Marshal\]::ReleaseComObject') {
+    if ($file.Name -ne 'PhysicsPpt.Common.ps1' -and $content -match 'Marshal\]::(Final)?ReleaseComObject') {
         throw "COM cleanup must use Release-ComObjectSafe: $($file.Name)"
     }
 }
@@ -614,6 +633,22 @@ $vbaCommonPath = Join-Path $root 'vba\PhysicsPptCommon.bas'
 $vbaContent = Get-Content -LiteralPath $vbaCommonPath -Raw -Encoding UTF8
 if ($vbaContent -notmatch '(?m)^Public\s+Const\s+NORMALIZE_SLIDE_BACKGROUND\s+As\s+Boolean\s*=\s*False\s*$') {
     throw 'VBA fallback must preserve slide backgrounds by default.'
+}
+# Same safety-switch family as NORMALIZE_SLIDE_BACKGROUND: table styling is
+# report-only in the mainline, so flipping the VBA fallback on silently
+# diverges the offline behavior and must redden the gate too.
+if ($vbaContent -notmatch '(?m)^Public\s+Const\s+NORMALIZE_TABLE_STYLE\s+As\s+Boolean\s*=\s*False\s*$') {
+    throw 'VBA fallback must keep table styling report-only by default (NORMALIZE_TABLE_STYLE = False).'
+}
+# Video-slide keywords: the VBA IsVideoSlide fallback hardcodes its matches as
+# string literals; every configured keyword must exist there, or the offline
+# path silently classifies video slides differently from the mainline.
+$vbaNormalizeContent = Get-Content -LiteralPath (Join-Path $root 'vba\PhysicsPptNormalize.bas') -Raw -Encoding UTF8
+foreach ($videoKeyword in @($config.rules.videoSlideKeywords)) {
+    if ($null -eq $videoKeyword -or [string]::IsNullOrWhiteSpace([string]$videoKeyword)) { continue }
+    if ($vbaNormalizeContent -notmatch ('"' + [regex]::Escape([string]$videoKeyword) + '"')) {
+        throw ("JSON <-> VBA mismatch: rules.videoSlideKeywords entry '{0}' has no matching string literal in PhysicsPptNormalize.bas IsVideoSlide." -f $videoKeyword)
+    }
 }
 
 # Mapping: VBA constant -> JSON path -> expected value
