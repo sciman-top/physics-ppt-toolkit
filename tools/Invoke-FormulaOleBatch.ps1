@@ -597,9 +597,25 @@ try {
                 $sameNamePptx = [System.IO.Path]::ChangeExtension($pdfFullPath, [System.IO.Path]::GetExtension($outputPptx))
                 $sameNameExisted = Test-Path -LiteralPath $sameNamePptx
                 $sameNameHash = if ($sameNameExisted) { Get-FileSha256 -Path $sameNamePptx } else { '' }
-                Invoke-WithComRetry -MaxRetries 3 -DelayMs 1200 -Action {
-                    $presentation.ExportAsFixedFormat($pdfFullPath, 2, 0, 0, 0, 0, 0, 0) | Out-Null
-                }.GetNewClosure()
+                $directExportOk = $false
+                try {
+                    Invoke-WithComRetry -MaxRetries 3 -DelayMs 1200 -Action {
+                        $presentation.ExportAsFixedFormat($pdfFullPath, 2, 0, 0, 0, 0, 0, 0) | Out-Null
+                    }.GetNewClosure()
+                    $directExportOk = $true
+                } catch {
+                    # 2026-11-04: the host's ExportAsFixedFormat COM binding
+                    # broke (even the 2-arg form fails with an int→Object
+                    # binder error) right after an Office automation update;
+                    # the visual audit tool survives via its SaveAs fallback.
+                    # Mirror that proven fallback instead of hard-failing.
+                    Write-Host "[final-pdf] ExportAsFixedFormat rejected, falling back to SaveAs PDF: $($_.Exception.Message)"
+                }
+                if (-not $directExportOk) {
+                    Invoke-WithComRetry -MaxRetries 3 -DelayMs 1200 -Action {
+                        $presentation.SaveAs($pdfFullPath, 32) | Out-Null
+                    }.GetNewClosure()
+                }
                 $pdfHeader = if (Test-Path -LiteralPath $pdfFullPath -PathType Leaf) { $bytes = [IO.File]::ReadAllBytes($pdfFullPath); if ($bytes.Length -ge 5) { [Text.Encoding]::ASCII.GetString($bytes, 0, 5) } else { '' } } else { '' }
                 if ($pdfHeader -cne '%PDF-') { throw "PowerPoint did not create a valid final PDF: $finalPdfPath" }
                 if ((Test-Path -LiteralPath $sameNamePptx) -and ((-not $sameNameExisted) -or (Get-FileSha256 -Path $sameNamePptx) -cne $sameNameHash)) {
