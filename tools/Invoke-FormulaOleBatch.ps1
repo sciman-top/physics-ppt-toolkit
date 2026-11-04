@@ -258,8 +258,16 @@ function Repair-FormulaOmmlOverflowSizes {
     }
     $rewroteAny = $false
     try {
+        # Measurements carry the COM presentation-order slide index, while
+        # slideN.xml numbering is creation order; resolve through the sldId
+        # map (the same rule the apply chain uses) instead of assuming the
+        # two agree on reordered decks.
+        $partByPresentationOrder = Get-PresentationOrderSlidePartMap -Zip $zip
         foreach ($slideNumber in @($bySlide.Keys | Sort-Object)) {
-            $partName = 'ppt/slides/slide{0}.xml' -f $slideNumber
+            if (-not $partByPresentationOrder.ContainsKey([int]$slideNumber)) {
+                throw ("Presentation-order slide part not found for size fit: slideIndex={0}" -f $slideNumber)
+            }
+            $partName = [string]$partByPresentationOrder[[int]$slideNumber]
             $doc = New-Object System.Xml.XmlDocument
             $doc.PreserveWhitespace = $false
             $doc.LoadXml((Read-ZipEntryText -Zip $zip -EntryName $partName))
@@ -268,11 +276,18 @@ function Repair-FormulaOmmlOverflowSizes {
             $ns.AddNamespace('a', $script:NsDrawingMain)
             $changed = $false
             foreach ($item in $bySlide[$slideNumber]) {
-                $target = $null
-                foreach ($spNode in @($doc.SelectNodes('//p:sp', $ns))) {
-                    $cNvPr = $spNode.SelectSingleNode('./p:nvSpPr/p:cNvPr', $ns)
-                    if ($null -ne $cNvPr -and [string]$cNvPr.GetAttribute('name') -eq [string]$item.Name) { $target = $spNode; break }
+                # Name matching must stay unambiguous: two same-name
+                # FormulaOmml shapes on one slide would make every
+                # measurement row shrink the document-order first shape
+                # twice, so refuse instead of guessing.
+                $candidates = @(@($doc.SelectNodes('//p:sp', $ns)) | Where-Object {
+                    $cNvPr = $_.SelectSingleNode('./p:nvSpPr/p:cNvPr', $ns)
+                    $null -ne $cNvPr -and [string]$cNvPr.GetAttribute('name') -eq [string]$item.Name
+                })
+                if ($candidates.Count -gt 1) {
+                    throw ("FormulaOmml size fit found {1} same-name shapes; refusing ambiguous shrink: slide={0} name={2}" -f $slideNumber, $candidates.Count, $item.Name)
                 }
+                $target = if ($candidates.Count -eq 1) { $candidates[0] } else { $null }
                 if ($null -eq $target) {
                     throw ("FormulaOmml shape not found for size fit: slide={0} name={1}" -f $slideNumber, $item.Name)
                 }
@@ -429,6 +444,10 @@ function Invoke-BatchStep {
 $inputSha256 = Get-FileSha256 -Path $inputFullPath
 $goldSetSha256 = Get-FileSha256 -Path $goldSetPath
 $completedManifestWritten = $false
+# Pre-declared so the catch-side partial-output cleanup can reference them
+# even when the batch failed before the delivery steps assigned them.
+$outputPptx = $null
+$finalPdfPath = $null
 try {
     # --- step 1: carrier inventory ---
     $inventoryDir = Join-Path $reportDir 'inventory'
@@ -489,14 +508,21 @@ try {
     Invoke-BatchStep -StepName 'size-fit' -Inputs @($outputPptx) -Outputs @($outputPptx, $sizeFitReport) -Action {
         $fitRows = New-Object System.Collections.Generic.List[object]
         $sizeFitTolerancePt = 2.0
-        $stillOverflow = @()
+        # Tracks whether the latest PowerPoint measurement saw no overflow.
+        # A repair round that cannot shrink anything (e.g. every overflowing
+        # shape is Unfittable below the 8pt floor) breaks the loop with the
+        # overflow still in place; the post-loop gate must fail the batch in
+        # that case instead of shipping clipped formulas (16.3 slide17).
+        $measurementsClean = $false
         foreach ($iteration in 1..2) {
             $measurements = Measure-FormulaOmmlRenderBounds -PptxPath $outputPptx
-            if (@($measurements).Count -eq 0) { break }
+            if (@($measurements).Count -eq 0) { $measurementsClean = $true; break }
             $unmeasured = @($measurements | Where-Object { [double]$_.TextBoundHeightPt -lt 0 })
             if (@($unmeasured).Count -gt 0) {
                 throw ("FormulaOmml shapes could not be measured in PowerPoint: {0}" -f (($unmeasured | ForEach-Object { 'slide={0} {1}' -f $_.Slide, $_.Name }) -join '; '))
             }
+            $overflowNow = @($measurements | Where-Object { [double]$_.TextBoundHeightPt -gt ([double]$_.BoxHeightPt + $sizeFitTolerancePt) })
+            if ($overflowNow.Count -eq 0) { $measurementsClean = $true; break }
             foreach ($m in @($measurements | Where-Object { [double]$_.TextBoundHeightPt -le ([double]$_.BoxHeightPt + $sizeFitTolerancePt) })) {
                 $fitRows.Add([pscustomobject]@{
                     Slide = [int]$m.Slide
@@ -511,14 +537,17 @@ try {
             }
             $rewrote = Repair-FormulaOmmlOverflowSizes -Measurements $measurements -TolerancePt $sizeFitTolerancePt -PptxPath $outputPptx -ReportRows $fitRows -Iteration $iteration
             if (-not $rewrote) { break }
-            if ($iteration -eq 2) {
-                $finalMeasurements = Measure-FormulaOmmlRenderBounds -PptxPath $outputPptx
-                $stillOverflow = @($finalMeasurements | Where-Object { [double]$_.TextBoundHeightPt -gt ([double]$_.BoxHeightPt + $sizeFitTolerancePt) })
-            }
         }
         Write-Utf8BomCsv -InputObject $fitRows.ToArray() -Path $sizeFitReport
-        if (@($stillOverflow).Count -gt 0) {
-            throw ("FormulaOmml shapes still overflow their box after size fit: {0}" -f (($stillOverflow | ForEach-Object { 'slide={0} {1} (bound {2:N1}pt > box {3:N1}pt)' -f $_.Slide, $_.Name, $_.TextBoundHeightPt, $_.BoxHeightPt }) -join '; '))
+        if (-not $measurementsClean) {
+            # The loop exited with a known-overflow state: the repair ran out
+            # of moves (Unfittable rows) or iterations. Re-measure so the
+            # failure names the shapes that would still render clipped.
+            $finalMeasurements = Measure-FormulaOmmlRenderBounds -PptxPath $outputPptx
+            $stillOverflow = @($finalMeasurements | Where-Object { [double]$_.TextBoundHeightPt -gt ([double]$_.BoxHeightPt + $sizeFitTolerancePt) })
+            if (@($stillOverflow).Count -gt 0) {
+                throw ("FormulaOmml shapes still overflow their box after size fit: {0}" -f (($stillOverflow | ForEach-Object { 'slide={0} {1} (bound {2:N1}pt > box {3:N1}pt)' -f $_.Slide, $_.Name, $_.TextBoundHeightPt, $_.BoxHeightPt }) -join '; '))
+            }
         }
     }
 
@@ -550,6 +579,9 @@ try {
         # before the next retry, and the finally block only handles the last
         # attempt's state.
         $attempts = 0
+        # $true until an attempt proves the target was absent before it ran;
+        # early COM failures must never delete a pre-existing file.
+        $pdfExistedBeforeAttempt = $true
         while ($true) {
             $attempts++
             $powerPoint = $null
@@ -560,7 +592,8 @@ try {
                     $powerPoint.Presentations.Open([System.IO.Path]::GetFullPath($outputPptx), $true, $false, $false)
                 }.GetNewClosure()
                 $pdfFullPath = [System.IO.Path]::GetFullPath($finalPdfPath)
-                if (Test-Path -LiteralPath $pdfFullPath) { throw "Final PDF target already exists; refusing to overwrite stale evidence: $pdfFullPath" }
+                $pdfExistedBeforeAttempt = Test-Path -LiteralPath $pdfFullPath -PathType Leaf
+                if ($pdfExistedBeforeAttempt) { throw "Final PDF target already exists; refusing to overwrite stale evidence: $pdfFullPath" }
                 $sameNamePptx = [System.IO.Path]::ChangeExtension($pdfFullPath, [System.IO.Path]::GetExtension($outputPptx))
                 $sameNameExisted = Test-Path -LiteralPath $sameNamePptx
                 $sameNameHash = if ($sameNameExisted) { Get-FileSha256 -Path $sameNamePptx } else { '' }
@@ -583,6 +616,15 @@ try {
                     try { Stop-PowerPointApplicationIfIdle -Application $powerPoint | Out-Null } catch { }
                     Release-ComObjectSafe $powerPoint
                     $powerPoint = $null
+                }
+                # A failed attempt can leave a half-written (or header-invalid)
+                # PDF behind; the next attempt would refuse its own stale
+                # artifact ("already exists"), so remove only what this
+                # attempt created. Pre-existing targets are never touched.
+                if (-not $pdfExistedBeforeAttempt) {
+                    try { Remove-Item -LiteralPath $pdfFullPath -Force -ErrorAction Stop } catch {
+                        Write-Warning ("Failed to remove the partial final PDF; the next attempt will refuse it: {0}" -f $_.Exception.Message)
+                    }
                 }
                 if ($attempts -ge 4 -or -not (Test-IsRetryablePresentationFailure -Category (Get-ComFailureCategory -ErrorRecord $_) -Message $_.Exception.Message)) { throw }
                 Write-Host "[final-pdf] COM attempt $attempts failed transiently, retrying: $(Format-ComFailureDetails -ErrorRecord $_)"
@@ -628,7 +670,7 @@ try {
     if ($replacedCount -eq 0) {
         $batchStatus = 'Failed'
         $writeBackAllowed = $false
-        $batchNote = 'Nothing was replaced; treat this delivery as inert and investigate the mapping/apply reports.'
+        $batchNote = 'Nothing was replaced; the batch outputs were removed per the failed-batch contract. Investigate the mapping/apply reports before rerunning.'
     } elseif ($refusedCount -gt 0) {
         $batchStatus = 'Degraded'
         $batchNote = 'Some mapping rows were refused; see formula-ole-apply-report.csv for the per-row reasons before accepting this delivery.'
@@ -683,11 +725,33 @@ try {
         Write-Output ("Batch {0}: {1}" -f $batchStatus, $deliveryFullPath)
     }
     Write-Output ("Output: {0} (replaced={1}; refused={2})" -f $outputPptx, $manifest.applySummary.replaced, $manifest.applySummary.refused)
-    if ($batchStatus -eq 'Failed') { throw "Formula migration batch failed: $batchNote" }
+    if ($batchStatus -eq 'Failed') {
+        # Failed-batch contract (AGENTS.md D): no deliverable survives a
+        # failed batch. Reports/manifest keep the evidence; outputs are
+        # removed so a rerun or -Resume (whose step receipts now miss their
+        # outputs) starts from the source PPTX again.
+        foreach ($staleOutput in @($outputPptx, $finalPdfPath)) {
+            if (Test-Path -LiteralPath $staleOutput) {
+                try { Remove-Item -LiteralPath $staleOutput -Force -ErrorAction Stop } catch {
+                    Write-Warning ("Failed to remove the failed-batch output: {0}" -f $_.Exception.Message)
+                }
+            }
+        }
+        throw "Formula migration batch failed: $batchNote"
+    }
 } catch {
     # A failure after the Passed manifest was written (e.g. a reporting crash)
     # must not clobber the completed batch record with a Failed status.
     if (-not $completedManifestWritten) {
+        # An incomplete batch must not leave half-built deliverables behind
+        # either; the apply step's output is removed with the same contract.
+        foreach ($partialOutput in @($outputPptx, $finalPdfPath)) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$partialOutput) -and (Test-Path -LiteralPath $partialOutput)) {
+                try { Remove-Item -LiteralPath $partialOutput -Force -ErrorAction Stop } catch {
+                    Write-Warning ("Failed to remove the partial batch output: {0}" -f $_.Exception.Message)
+                }
+            }
+        }
         $manifest = [ordered]@{
             schemaVersion = 1
             generatedAt = Get-Date -Format 'yyyy-MM-dd hh:mm:ss'
