@@ -147,6 +147,8 @@ $summary = Join-Path (Split-Path -Parent $manifestPath) 'summary.md'
 if (Test-Path -LiteralPath $summary -PathType Leaf) {
     $text = Get-Content -LiteralPath $summary -Raw -Encoding UTF8
     $text = [regex]::Replace($text, '(?m)^- 交付状态：.*$', "- 交付状态：$($manifest.deliveryStatus)")
-    [IO.File]::WriteAllText($summary, $text, (New-Object System.Text.UTF8Encoding($false)))
+    # Keep the BOM: Write-Summary emits UTF-8 with BOM and the toolkit's
+    # human-readable artifacts stay BOM-carried for Excel/Notepad parity.
+    [IO.File]::WriteAllText($summary, $text, (New-Object System.Text.UTF8Encoding($true)))
 }
 Write-Output $evidencePath
