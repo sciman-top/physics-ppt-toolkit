@@ -3,7 +3,7 @@
   Fixture tests for invariant comparison and host-AI visual-review gates.
 
 .DESCRIPTION
-  Uses JSON-only temporary fixtures. It never starts PowerPoint and never creates or edits a PPTX.
+  Uses temporary fixtures. It never starts PowerPoint or modifies a source PPTX.
 #>
 [CmdletBinding()]
 param()
@@ -96,70 +96,179 @@ try {
         if ((Get-ObjectPropertyValue $propertyObject 'effectiveMode' 'Unknown') -ne 'ReportOnly') { throw 'Workflow metadata lost a dictionary property before JSON serialization.' }
         if ((Get-ObjectPropertyValue $propertyObject 'absent' 'fallback') -ne 'fallback') { throw 'Workflow metadata did not honor the missing-property default.' }
     }
-    $fullChainFunction = $workflowAst.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-FullChainDeliveryFailures' }, $true) | Select-Object -First 1
-    if ($null -eq $fullChainFunction) { throw 'FullChain artifact gate function is missing.' }
-    Invoke-Expression $fullChainFunction.Extent.Text
+    foreach ($requiredGateFunction in @('Test-PdfFileSignature', 'Test-PptxFileSignature', 'Test-PreparedManifestMatchesCurrent', 'Get-FullChainDeliveryFailures', 'Get-DeliveryGateAssessment', 'Get-PostPackagingFailureAssessment', 'Complete-FinalDeliveryPackaging', 'Write-WorkflowFailureReceipt', 'Read-JsonObject', 'Test-FinalVisualAuditEvidence', 'Open-GeneratedPptxResult')) {
+        $gateFunction = $workflowAst.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $requiredGateFunction }, $true) | Select-Object -First 1
+        if ($null -eq $gateFunction) { throw "Workflow gate function is missing: $requiredGateFunction" }
+        Invoke-Expression $gateFunction.Extent.Text
+    }
+    $finalAuditFunction = $workflowAst.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-FinalChainVisualAudit' }, $true) | Select-Object -First 1
+    Invoke-Expression $finalAuditFunction.Extent.Text
     $chainFixtureDir = Join-Path $testRoot 'full-chain'
     New-Item -ItemType Directory -Path $chainFixtureDir -Force | Out-Null
-    $chainFixturePaths = @{}
-    foreach ($artifactName in @('normalized', 'brand', 'highlight', 'final.pdf')) {
-        $artifactPath = Join-Path $chainFixtureDir ($artifactName + '.fixture')
-        [System.IO.File]::WriteAllText($artifactPath, "full-chain-$artifactName")
-        $chainFixturePaths[$artifactName] = $artifactPath
-    }
-    $normalizedHash = Get-FileSha256OrNull -Path $chainFixturePaths.normalized
-    $brandHash = Get-FileSha256OrNull -Path $chainFixturePaths.brand
-    $highlightHash = Get-FileSha256OrNull -Path $chainFixturePaths.highlight
-    $finalPdfHash = Get-FileSha256OrNull -Path $chainFixturePaths['final.pdf']
+    $chainDeliveryDir = Join-Path $chainFixtureDir '01_交付物'
+    $chainStageDir = Join-Path $chainFixtureDir '02_阶段副本'
+    New-Item -ItemType Directory -Path $chainDeliveryDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $chainStageDir -Force | Out-Null
     $chainInputPath = Join-Path $chainFixtureDir 'input.pptx'
-    $chainManifestFixture = [pscustomobject]@{
-        fullChainEnabled = $true
-        files = @([pscustomobject]@{
-            input = $chainInputPath; displayName = 'chain-fixture.pptx'; status = 'success'
-            normalizedPptx = $chainFixturePaths.normalized; normalizedPptxSha256 = $normalizedHash
-            pdf = $chainFixturePaths['final.pdf']; pdfSha256 = $finalPdfHash
-            validation = [pscustomobject]@{ expectedSlides = 2; pdfPageCount = 2; pdfPagesMatchExpected = $true }
-        })
-        brandStageArtifacts = [pscustomobject]@{
-            runBrand = $true; runHighlight = $true
+    Copy-Item -LiteralPath (Join-Path $toolRoot '..\examples\fixtures\minimal-physics-sample.pptx') -Destination $chainInputPath
+    $normalizedPath = Join-Path $chainDeliveryDir 'input.normalized.pptx'
+    $brandPath = Join-Path $chainDeliveryDir 'input.brand.pptx'
+    $calloutPath = Join-Path $chainDeliveryDir 'input.callout.pptx'
+    $finalPptxPath = Join-Path $chainDeliveryDir 'input.pptx'
+    $finalPdfPath = Join-Path $chainDeliveryDir 'input.pdf'
+    $normalizedPdfPath = Join-Path $chainDeliveryDir 'input.normalized.pdf'
+    $normalizeReportPath = Join-Path $chainDeliveryDir 'physics-ppt-normalize-report.csv'
+    Copy-Item -LiteralPath $chainInputPath -Destination $normalizedPath
+    Copy-Item -LiteralPath $chainInputPath -Destination $brandPath
+    Copy-Item -LiteralPath $chainInputPath -Destination $calloutPath
+    [System.IO.File]::WriteAllText($normalizeReportPath, 'file,status')
+    [System.IO.File]::WriteAllText((Join-Path $chainDeliveryDir 'input.normalized.pptx.cache.json'), '{"geometryRestore":"completed"}')
+    $reportTargetProbe = Join-Path $chainFixtureDir '00_检查报告\physics-ppt-normalize-report.csv'
+    New-Item -ItemType Directory -Path (Split-Path -Parent $reportTargetProbe) -Force | Out-Null
+    Copy-Item -LiteralPath $normalizeReportPath -Destination $reportTargetProbe
+    [System.IO.File]::WriteAllText($finalPdfPath, "%PDF-1.7`n1 0 obj<</Type/Page>>endobj`n%%EOF`n")
+    Copy-Item -LiteralPath $finalPdfPath -Destination $normalizedPdfPath
+    $initialManifestPdfPath = $normalizedPdfPath
+    $truncatedPdf = Join-Path $testRoot 'truncated.pdf'
+    [System.IO.File]::WriteAllText($truncatedPdf, '%PDF-1.7')
+    if (Test-PdfFileSignature -Path $truncatedPdf) { throw 'PDF integrity check accepted a truncated file.' }
+    $normalizedHash = Get-FileSha256OrNull -Path $normalizedPath
+    $brandHash = Get-FileSha256OrNull -Path $brandPath
+    $calloutHash = Get-FileSha256OrNull -Path $calloutPath
+    $finalPdfHash = Get-FileSha256OrNull -Path $finalPdfPath
+    function New-FullChainManifestProbe {
+        [pscustomobject]@{
             files = @([pscustomobject]@{
-                file = $chainInputPath; status = 'Completed'
-                brandSourcePptx = $chainFixturePaths.normalized; brandSourcePptxSha256 = $normalizedHash
-                brandPptx = $chainFixturePaths.brand; brandPptxSha256 = $brandHash
-                highlightSourcePptx = $chainFixturePaths.brand; highlightSourcePptxSha256 = $brandHash
-                highlightPptx = $chainFixturePaths.highlight; highlightPptxSha256 = $highlightHash
-                finalPptx = $chainFixturePaths.highlight; finalPptxSha256 = $highlightHash
-                finalPdf = $chainFixturePaths['final.pdf']; finalPdfSha256 = $finalPdfHash; finalPdfPageCount = 2
-            })
+                    input = $chainInputPath; inputRelativePath = 'input.pptx'; displayName = 'input.pptx'; status = 'success'; outputStem = 'input'
+                    inputSha256 = (Get-FileSha256OrNull -Path $chainInputPath); normalizedPptx = $normalizedPath; normalizedPptxSha256 = $normalizedHash
+                    pdf = $initialManifestPdfPath; pdfSha256 = Get-FileSha256OrNull -Path $initialManifestPdfPath
+                    validation = [pscustomobject]@{ expectedSlides = 2; pdfPageCount = 2; pdfPagesMatchExpected = $true }
+                })
+            brandStageArtifacts = [pscustomobject]@{
+                runBrand = $true; runHighlight = $true
+                files = @([pscustomobject]@{
+                        file = $chainInputPath; status = 'Completed'
+                        brandSourcePptx = $normalizedPath; brandSourcePptxSha256 = $normalizedHash
+                        brandPptx = $brandPath; brandPptxSha256 = $brandHash
+                        highlightSourcePptx = $brandPath; highlightSourcePptxSha256 = $brandHash
+                        highlightPptx = $calloutPath; highlightPptxSha256 = $calloutHash
+                        finalPptx = $calloutPath; finalPptxSha256 = $calloutHash
+                        finalPdf = $finalPdfPath; finalPdfSha256 = $finalPdfHash; finalPdfPageCount = 2
+                    })
+            }
+            finalVisualAuditArtifacts = @([pscustomobject]@{
+                    file = $chainInputPath; finalPptx = $calloutPath; finalPptxSha256 = $calloutHash; status = 'Completed'; ruleAuditEnabled = $true
+                    visualAuditStatus = 'Passed'; finalPageCount = 2; newErrorCount = 0; newWarningCount = 0
+                })
+            visualAuditArtifacts = @()
+            fullChainEnabled = $true
+            fullChainStatus = 'Completed'
         }
     }
-    foreach ($reviewStatus in @('NeedsReview', 'NeedsReviewNoNormalizedBaseline')) {
-        $chainManifestFixture | Add-Member -NotePropertyName finalVisualAuditArtifacts -NotePropertyValue @([pscustomobject]@{
-            file = $chainInputPath; finalPptx = $chainFixturePaths.highlight; status = 'Completed'
-            visualAuditStatus = $reviewStatus; finalPageCount = 2; newErrorCount = 0; newWarningCount = 0
-        }) -Force
-        if (@(Get-FullChainDeliveryFailures -Manifest $chainManifestFixture).Count -ne 0) {
-            throw "FullChain incorrectly failed on a review-only final visual audit status '$reviewStatus'."
-        }
+    $packedManifestProbe = New-FullChainManifestProbe
+    $packedManifestProbe | Add-Member -NotePropertyName deliveryPackaging -NotePropertyValue ([pscustomobject]@{ applied = $true; restored = $true; files = @() }) -Force
+    $packed = @(Complete-FinalDeliveryPackaging -Manifest $packedManifestProbe)
+    if ($packed.Count -ne 1 -or $null -eq $packed[0].Manifest -or $null -eq $packed[0].Receipt -or -not $packed[0].Receipt.applied) {
+        throw ('Packaging did not preserve the manifest and receipt in a single result. ' + $packed[0].Receipt.note)
     }
-    $chainManifestFixture.finalVisualAuditArtifacts[0].newWarningCount = 1
-    $reviewWarningFailures = @(Get-FullChainDeliveryFailures -Manifest $chainManifestFixture)
-    if (($reviewWarningFailures -join "`n") -notmatch 'final visual audit introduced 0 error\(s\) and 1 warning\(s\)') {
-        throw 'FullChain did not block a new final visual audit warning when the page also requires review.'
+    $packedManifest = $packed[0].Manifest
+    $packedManifest.files[0].pdf = $finalPdfPath
+    $packedManifest.files[0].pdfSha256 = Get-FileSha256OrNull -Path $finalPdfPath
+    $packedManifest | Add-Member -NotePropertyName deliveryPackaging -NotePropertyValue ([pscustomobject]@{ applied = $true; restored = $true; files = @($packed[0].Receipt.files) }) -Force
+    if (@((Get-ObjectPropertyValue -Object $packedManifest.brandStageArtifacts -PropertyName 'files' -DefaultValue @())).Count -ne 1) { throw 'Packaging lost the brand-stage receipt after moving files.' }
+    if (-not (Test-Path -LiteralPath $finalPptxPath) -or (Test-Path -LiteralPath $calloutPath)) { throw 'Packaging did not atomically publish the same-name final PPTX.' }
+    $packedAuditRoot = Join-Path $chainFixtureDir '17_全链最终审查\input'
+    New-Item -ItemType Directory -Path $packedAuditRoot -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $packedAuditRoot 'pptx-visual-audit-manifest.json'), ([ordered]@{ inputPath = $calloutPath } | ConvertTo-Json))
+    $calloutRestore = Join-Path $chainDeliveryDir 'input.callout.pptx'
+    Copy-Item -LiteralPath $finalPptxPath -Destination $calloutRestore
+    $auditRewriteManifest = New-FullChainManifestProbe
+    $auditRewriteManifest | Add-Member -NotePropertyName finalVisualAuditArtifacts -NotePropertyValue @([pscustomobject]@{ file = $chainInputPath; finalPptx = $calloutRestore; finalVisualAuditDir = $packedAuditRoot; status = 'Completed'; ruleAuditEnabled = $true }) -Force
+    $auditRewriteManifest.brandStageArtifacts.files[0].finalPptx = $calloutRestore
+    $auditRewriteManifest.brandStageArtifacts.files[0].highlightPptx = $calloutRestore; $auditRewriteManifest.brandStageArtifacts.files[0].highlightPptxSha256 = Get-FileSha256OrNull -Path $calloutRestore; $auditRewriteManifest.brandStageArtifacts.files[0].finalPptxSha256 = Get-FileSha256OrNull -Path $calloutRestore
+    Remove-Item -LiteralPath $finalPptxPath -Force
+    $auditRewriteResult = @(Complete-FinalDeliveryPackaging -Manifest $auditRewriteManifest)
+    $rewrittenAudit = Get-Content -LiteralPath (Join-Path $packedAuditRoot 'pptx-visual-audit-manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    if (-not $auditRewriteResult[0].Receipt.applied -or $rewrittenAudit.inputPath -ne $finalPptxPath) { throw 'Packaging did not rebind the final visual audit to the published PPTX.' }
+    if (-not (Test-Path -LiteralPath $brandPath) -and -not (Test-Path -LiteralPath (Join-Path $chainStageDir 'input.brand.pptx'))) { throw 'Packaging lost the brand evidence copy.' }
+    $finalFiles = @(Get-ChildItem -LiteralPath $chainDeliveryDir -File | ForEach-Object Name)
+    if (($finalFiles -join ',') -ne 'input.pdf,input.pptx') { throw "Packaging left non-final files in 01_交付物: $($finalFiles -join ', ')" }
+    if (Test-Path -LiteralPath $normalizeReportPath) { throw 'Packaging left the normalize report in 01_交付物.' }
+    $postPackagingGate = Get-PostPackagingFailureAssessment -Manifest $packedManifest -Mode 'NormalizeAndPdf' -IncludeReviewArtifacts $false -IncludeVisualAudit $true
+    $packGates = @(Get-FullChainDeliveryFailures -Manifest $packedManifest)
+    if ($packGates.Count -ne 0) { throw "Committed packaging failed the final gate: $($packGates -join '; ')" }
+    $postPackagingGate = Get-PostPackagingFailureAssessment -Manifest $packedManifest -Mode 'NormalizeAndPdf' -IncludeReviewArtifacts $false -IncludeVisualAudit $true
+    if (@($postPackagingGate.blocked).Count -ne 0) { throw "Post-packaging gate rejected a committed delivery: $(@($postPackagingGate.blocked) -join '; ')" }
+    $visualEvidenceManifest = [ordered]@{ inputPath = $finalPptxPath; inputSha256 = (Get-FileSha256OrNull -Path $finalPptxPath); outputDir = (Join-Path $chainStageDir 'audit-evidence') }
+    New-Item -ItemType Directory -Path $visualEvidenceManifest.outputDir -Force | Out-Null
+    $visualEvidenceCsv = Join-Path $visualEvidenceManifest.outputDir 'pptx-visual-audit.csv'
+    [IO.File]::WriteAllText($visualEvidenceCsv, 'probe')
+    if (-not (Test-FinalVisualAuditEvidence -AuditManifest $visualEvidenceManifest -FinalPptxPath $finalPptxPath -AuditOutputDir $visualEvidenceManifest.outputDir -AuditCsvPath $visualEvidenceCsv)) {
+        throw 'Final visual audit evidence did not bind the exact final PPTX and page audit directory.'
     }
-    $chainManifestFixture.finalVisualAuditArtifacts[0].visualAuditStatus = 'Passed'
-    $chainManifestFixture.finalVisualAuditArtifacts[0].newWarningCount = 0
-    if (@(Get-FullChainDeliveryFailures -Manifest $chainManifestFixture).Count -ne 0) { throw 'Complete FullChain artifacts were rejected by the delivery gate.' }
-    $chainManifestFixture.brandStageArtifacts.runHighlight = $false
-    $missingHighlightFailures = @(Get-FullChainDeliveryFailures -Manifest $chainManifestFixture)
-    if (($missingHighlightFailures -join "`n") -notmatch 'highlight-box stage was not enabled') { throw 'FullChain accepted a missing highlight-box stage.' }
-    $chainManifestFixture.brandStageArtifacts.runHighlight = $true
-    $chainManifestFixture.brandStageArtifacts.files[0].finalPdfPageCount = 1
-    $wrongPageCountFailures = @(Get-FullChainDeliveryFailures -Manifest $chainManifestFixture)
-    if (($wrongPageCountFailures -join "`n") -notmatch 'final-chain PDF page count is missing or mismatched') { throw 'FullChain accepted a final PDF with the wrong page count.' }
-    [System.IO.File]::AppendAllText($chainFixturePaths.highlight, 'tampered')
-    $changedArtifactFailures = @(Get-FullChainDeliveryFailures -Manifest $chainManifestFixture)
-    if (($changedArtifactFailures -join "`n") -notmatch 'FullChain highlight-box PPTX hash is missing or changed') { throw 'FullChain accepted a stage artifact whose bytes changed after the receipt was written.' }
+    $visualEvidenceManifest.inputSha256 = 'a' * 64
+    if (Test-FinalVisualAuditEvidence -AuditManifest $visualEvidenceManifest -FinalPptxPath $finalPptxPath -AuditOutputDir $visualEvidenceManifest.outputDir -AuditCsvPath $visualEvidenceCsv) {
+        throw 'Final visual audit evidence accepted a stale source hash.'
+    }
+    $noRuleAudit = $packedManifest | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+    $noRuleAudit.finalVisualAuditArtifacts[0].ruleAuditEnabled = $false
+    if ((@(Get-FullChainDeliveryFailures -Manifest $noRuleAudit) -join "`n") -notmatch 'rule audit baseline') {
+        throw 'FullChain accepted final page images without a rule-audit baseline.'
+    }
+    $noFinalAuditHash = $packedManifest | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+    $noFinalAuditHash.finalVisualAuditArtifacts[0].finalPptxSha256 = ''
+    if ((@(Get-FullChainDeliveryFailures -Manifest $noFinalAuditHash) -join "`n") -notmatch 'source hash is missing or changed') {
+        throw 'FullChain accepted final visual audit evidence without the audited PPTX hash.'
+    }
+    $stalePdfProbe = $packedManifest | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+    $stalePdf = Join-Path $chainStageDir 'stale-final.pdf'
+    $stalePdfProbe.brandStageArtifacts.files[0].finalPptx = $finalPptxPath
+    $stalePdfProbe.brandStageArtifacts.files[0].finalPdf = $stalePdf
+    $stalePdfProbe.files[0].pdf = $stalePdf
+    $stalePdfProbe.files[0].pdfSha256 = Get-FileSha256OrNull -Path $stalePdf
+    $stalePdfProbe.brandStageArtifacts.files[0].finalPdfSha256 = $stalePdfProbe.files[0].pdfSha256
+    if ((@(Get-FullChainDeliveryFailures -Manifest $stalePdfProbe) -join "`n") -notmatch 'same-stem delivery PDF') {
+        throw 'FullChain accepted a stage PDF as the final delivery PDF.'
+    }
+    $evidenceProbe = $packedManifest | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+    $evidenceProbe.files[0] | Add-Member -NotePropertyName status -NotePropertyValue 'failed' -Force
+    if (Test-PreparedManifestMatchesCurrent -Prepared $packedManifest -Current $evidenceProbe) {
+        throw 'Prepared AI evidence reuse ignored a failed delivery file state.'
+    }
+    $opened = New-Object System.Collections.Generic.List[string]
+    function Open-PathForReview { param([string]$Path) $script:openedProbePath = $Path }
+    Open-GeneratedPptxResult -Manifest $packedManifest -NormalizedDir $chainDeliveryDir -VisualFixDir $chainFixtureDir -OutputRoot $chainFixtureDir
+    if ($script:openedProbePath -ne $finalPptxPath) { throw "FullChain opened the wrong PPTX: $($script:openedProbePath)" }
+    $collisionRoot = Join-Path $testRoot 'full-chain-collision'
+    $collisionDelivery = Join-Path $collisionRoot '01_交付物'
+    $collisionStage = Join-Path $collisionRoot '02_阶段副本'
+    New-Item -ItemType Directory -Path $collisionDelivery,$collisionStage -Force | Out-Null
+    foreach ($collisionName in @('input.pptx', 'input.normalized.pptx', 'input.brand.pptx', 'input.callout.pptx')) { Copy-Item -LiteralPath $chainInputPath -Destination (Join-Path $collisionDelivery $collisionName) }
+    [System.IO.File]::WriteAllText((Join-Path $collisionDelivery 'input.pdf'), "%PDF-1.7`n1 0 obj<</Type/Page>>endobj`n%%EOF`n")
+    $collisionCallout = Join-Path $collisionDelivery 'input.callout.pptx'
+    $collisionPdf = Join-Path $collisionDelivery 'input.pdf'
+    $collisionManifest = New-FullChainManifestProbe
+    foreach ($property in @('input', 'normalizedPptx', 'pdf')) { $collisionManifest.files[0].$property = $collisionDelivery + '\input' + $(if ($property -eq 'input') { '.pptx' } elseif ($property -eq 'normalizedPptx') { '.normalized.pptx' } else { '.pdf' }) }
+    $collisionRecord = $collisionManifest.brandStageArtifacts.files[0]
+    $collisionRecord.brandSourcePptx = $collisionManifest.files[0].normalizedPptx
+    $collisionRecord.brandPptx = Join-Path $collisionDelivery 'input.brand.pptx'
+    $collisionRecord.highlightSourcePptx = $collisionRecord.brandPptx
+    $collisionRecord.highlightPptx = $collisionCallout
+    $collisionRecord.finalPptx = $collisionCallout
+    $collisionRecord.finalPdf = $collisionPdf
+    $collisionRecord.finalPdfSha256 = Get-FileSha256OrNull -Path $collisionPdf
+    $collisionStartHashes = @{}
+    foreach ($file in @(Get-ChildItem -LiteralPath $collisionDelivery -File)) { $collisionStartHashes[$file.Name] = Get-FileSha256OrNull -Path $file.FullName }
+    $collisionResult = @(Complete-FinalDeliveryPackaging -Manifest $collisionManifest)
+    if ($collisionResult[0].Receipt.applied -or -not $collisionResult[0].Receipt.restored) { throw 'Packaging treated an unknown final target as a committed delivery.' }
+    foreach ($file in @(Get-ChildItem -LiteralPath $collisionDelivery -File)) { if ($collisionStartHashes[$file.Name] -cne (Get-FileSha256OrNull -Path $file.FullName)) { throw "Packaging damaged collision evidence: $($file.Name)" } }
+    $truncatedPptx = Join-Path $testRoot 'truncated.pptx'
+    [System.IO.File]::WriteAllText($truncatedPptx, 'not a zip package')
+    if (Test-PptxFileSignature -Path $truncatedPptx) { throw 'PPTX integrity check accepted an unreadable package.' }
+    $failureReceipt = Join-Path $testRoot 'workflow-failure.json'
+    Write-WorkflowFailureReceipt -Path $failureReceipt -Phase 'Workflow' -ErrorRecord ([System.Management.Automation.ErrorRecord]::new([System.InvalidOperationException]::new('fixture workflow failure'), 'FixtureWorkflowFailure', [System.Management.Automation.ErrorCategory]::OperationStopped, $null))
+    $failureReceiptJson = Get-Content -LiteralPath $failureReceipt -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($failureReceiptJson.status -ne 'Failed' -or $failureReceiptJson.error -ne 'fixture workflow failure') { throw 'A workflow exception did not persist a truthful failure receipt.' }
     $beforePath = Join-Path $testRoot 'before.json'
     $afterPath = Join-Path $testRoot 'after.json'
     $blockedPath = Join-Path $testRoot 'blocked.json'

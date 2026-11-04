@@ -2742,12 +2742,13 @@ function Normalize-Presentation {
         if ($null -ne $cache -and $null -ne $cache.PSObject.Properties['expectedSlides']) {
             [void][int]::TryParse([string]$cache.expectedSlides, [ref]$cacheExpectedSlides)
         }
-        $cacheOutputReady = (Test-Path -LiteralPath $outFile) -and (Get-Item -LiteralPath $outFile).Length -gt 0
+        $cacheOutputReady = (Test-Path -LiteralPath $outFile -PathType Leaf) -and (Test-PptxPackageIntegrity -Path $outFile)
         if ($cacheOutputReady) {
             $cacheOutputReady = $null -ne $cache -and $null -ne $cache.PSObject.Properties['outputSha256'] -and
                 (Get-FileSha256Hex -Path $outFile) -ceq [string]$cache.outputSha256
         }
-        $cacheArtifactsReady = $NoPdf -or ((Test-Path -LiteralPath $pdfFile) -and ((Get-Item -LiteralPath $pdfFile).Length -gt 0))
+        $cacheArtifactsReady = $NoPdf -or ((Test-Path -LiteralPath $pdfFile -PathType Leaf) -and ((Get-Item -LiteralPath $pdfFile).Length -gt 0) -and
+            [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($pdfFile), 0, [Math]::Min(5, (Get-Item -LiteralPath $pdfFile).Length)) -ceq '%PDF-')
         if (-not $NoPdf -and $cacheArtifactsReady) {
             $cacheArtifactsReady = $null -ne $cache -and $null -ne $cache.PSObject.Properties['pdfSha256'] -and
                 (Get-FileSha256Hex -Path $pdfFile) -ceq [string]$cache.pdfSha256

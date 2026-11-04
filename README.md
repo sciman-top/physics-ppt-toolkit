@@ -82,12 +82,13 @@ cd .\physics-ppt-toolkit
   -OpenGeneratedPptx
 ```
 
-默认输出到版次化交付目录 `reports/<课件身份>_v<N>/`：每次运行自动原子认领下一个版次号，目录号最大的即最新交付，旧版目录保留作回滚对照。`reports/` 为版次化交付专用根（只允许 `<课件身份>_v<N>` 目录与 `_archive`，门禁强制检查）；需要自定义输出位置时用 `-OutputRoot` 显式指向 `reports/` 之外的目录。单个交付目录结构如下（节选）：
+默认输出到版次化交付目录 `reports/<课件身份>_v<N>/`：每次运行自动原子认领下一个版次号，目录号最大的即最新交付，旧版目录保留作回滚对照。`reports/` 为版次化交付专用根（只允许 `<课件身份>_v<N>` 目录与 `_archive`，门禁强制检查）；需要自定义输出位置时用 `-OutputRoot` 显式指向 `reports/` 之外的目录。默认规范化时 `01_交付物/` 含规范化副本和 PDF；全链只在其中保留与源件同名的最终 PPTX/PDF，规范化、品牌、规范化缓存及阶段 PDF 进入 `02_阶段副本/`，阶段目录不对外交付。单个交付目录结构如下（节选）：
 
 ```text
 reports/13.2内能（王耀强）_v12/
 ├─ 00_检查报告/
-├─ 01_交付物/   （规范化 PPTX 与同名导出 PDF 同目录）
+├─ 01_交付物/   （与源件同名的最终 PPTX/PDF；默认规范化为规范化副本）
+├─ 02_阶段副本/ （仅全链：规范化/品牌阶段副本，不对外交付）
 ├─ 03_原始备份/
 ├─ 16_不可变快照/
 ├─ summary.md
@@ -125,10 +126,16 @@ reports/13.2内能（王耀强）_v12/
 .\一键全链规范化并导出PDF.cmd "D:\课件\原始PPT"
 
 # -FullChain 只接受 NormalizeAndPdf / ForceRebuild；公式写回需另行请求。
-# -IncludeReviewArtifacts / -IncludeVisualAudit 的“规范化”图像和基线判断只代表规范化副本；最终 _callout 另见 17_全链最终审查。
+# -IncludeReviewArtifacts / -IncludeVisualAudit 的“规范化”图像和基线判断只代表规范化副本；全链最终 PPTX 的逐页证据另见 17_全链最终审查。
 # 全链审计对最终副本新增的裁切、越界、溢出或可读性警告阻断交付；仅视觉差异超阈值时列为待复核。
 # 最终人工确认仍打开全链 PPTX/PDF。
 # FullChain 与 -PrepareAiVisualReview/-AiVisualReviewResult 组合会被拒绝。
+
+# 受控放映验收：逐页进入 PowerPoint 放映视图，保留首末页 PNG 与播放收据；
+# 仅在全屏接管可见桌面可接受时加 -FullScreen。
+pwsh -NoProfile -File tools\Test-PhysicsPptPlayback.ps1 `
+  -InputPath .\reports\<课件身份>_v<N>\01_交付物\<课件身份>.pptx `
+  -EvidenceDir .\reports\<课件身份>_v<N>\18_受控播放验收
 
 # 深度视觉审查：需要逐页 PNG、自动确认和低风险修复副本时再开启
 .\tools\Invoke-PhysicsPptWorkflow.ps1 -InputPath "D:\课件\原始PPT" -Recurse -Mode NormalizeAndPdf -FullChain -IncludeReviewArtifacts -IncludeVisualAudit -ApplyVisualAuditFixes -ApplyFormulaOmmlWhitelist -FormulaOmmlVisualAudit

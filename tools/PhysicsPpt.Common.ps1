@@ -430,12 +430,27 @@ function New-PowerPointApplication {
     $application = New-Object -ComObject PowerPoint.Application
     $hasOpenDocuments = $true
     try { $hasOpenDocuments = ($application.Presentations.Count -gt 0 -or $application.ProtectedViewWindows.Count -gt 0) } catch { }
-    if (-not $hasOpenDocuments) { try {
-        $application.Visible = $(if ($Visible) { -1 } else { 0 })
-    } catch {
-        # A COM host may not expose Visible until its first call; keep going and
-        # let the caller report any later automation failure.
-    } }
+    if (-not $hasOpenDocuments) {
+        # PowerPoint's standard window layer may reject Visible=0 while it is
+        # held in another process context. Preserve the hidden-window contract
+        # on supported hosts; offscreen placement is a deterministic fallback
+        # for the same freshly activated automation instance.
+        try { $application.Visible = $(if ($Visible) { -1 } else { 0 }) } catch {
+            if (-not $Visible) {
+                try {
+                    $application.Visible = -1
+                    $application.WindowState = 2
+                    $application.Left = -32000
+                    $application.Top = -32000
+                } catch {
+                    # A host that exposes neither window state nor placement
+                    # still gets a reported downstream COM failure, never an
+                    # assertion that hidden operation succeeded.
+                    try { $application.DisplayAlerts = 1 } catch { }
+                }
+            }
+        }
+    }
     if (-not $Visible -and -not $hasOpenDocuments) {
         try { $application.DisplayAlerts = 1 } catch { }
     }
@@ -443,7 +458,7 @@ function New-PowerPointApplication {
 }
 
 function Stop-PowerPointApplicationIfIdle {
-    param($Application)
+    param($Application, [long]$ApplicationHandle = 0)
     if ($null -eq $Application) { return }
     # COM activation can return the user's running instance. Unknown counts
     # also fail closed; never close presentations owned by another caller.
@@ -945,6 +960,52 @@ function Get-FileSha256Hex {
         } finally { $stream.Dispose() }
     } finally {
         $sha.Dispose()
+    }
+}
+
+function Test-PdfPackageIntegrity {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    $length = (Get-Item -LiteralPath $Path).Length
+    if ($length -lt 20) { return $false }
+    $stream = $null
+    try {
+        $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+        $header = New-Object byte[] 5
+        $headerBytesRead = $stream.Read($header, 0, 5)
+        if ($headerBytesRead -ne 5 -or [Text.Encoding]::ASCII.GetString($header) -cne '%PDF-') { return $false }
+        $tailStart = [Math]::Max(0, $length - 2048)
+        $stream.Seek($tailStart, [IO.SeekOrigin]::Begin) | Out-Null
+        $tail = New-Object byte[] ($length - $tailStart)
+        $count = $stream.Read($tail, 0, $tail.Length)
+        return ([Text.Encoding]::ASCII.GetString($tail, 0, $count) -match '%%EOF')
+    } catch {
+        return $false
+    } finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+}
+
+function Test-PptxPackageIntegrity {
+    # An archive signature alone is not enough: inspect every slide part so a
+    # damaged ZIP cannot be reused from a normalization cache or receipt.
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $archive = $null
+    try {
+        $archive = [IO.Compression.ZipFile]::OpenRead($Path)
+        $requiredParts = @($archive.GetEntry('[Content_Types].xml'), $archive.GetEntry('ppt/presentation.xml'))
+        if (@($requiredParts | Where-Object { $null -eq $_ }).Count -gt 0) { return $false }
+        $slideEntries = @($archive.Entries | Where-Object { $_.FullName -match '^ppt/slides/slide\d+\.xml$' })
+        if ($slideEntries.Count -eq 0) { return $false }
+        foreach ($entry in $slideEntries) {
+        [xml]$document = Read-ZipEntryText -Zip $archive -EntryName $entry.FullName
+            if ($null -eq $document.DocumentElement) { return $false }
+        }
+        return $true
+    } catch {
+        return $false
+    } finally {
+        if ($null -ne $archive) { $archive.Dispose() }
     }
 }
 

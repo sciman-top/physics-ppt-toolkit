@@ -165,7 +165,7 @@ if ($FullChain) {
     $BrandRefresh = [System.Management.Automation.SwitchParameter]::Present
     $HighlightBox = [System.Management.Automation.SwitchParameter]::Present
     if ($PrepareAiVisualReview -or -not [string]::IsNullOrWhiteSpace($AiVisualReviewResult)) {
-        throw '-FullChain cannot use -PrepareAiVisualReview/-AiVisualReviewResult: the current AI packet reviews normalized pages, not the final brand/highlight copy. Review the final .callout PPTX or PDF directly.'
+        throw '-FullChain cannot use -PrepareAiVisualReview/-AiVisualReviewResult: the current AI packet reviews normalized pages, not the final brand/highlight copy. Review the final PPTX or PDF directly.'
     }
 }
 if (($BrandRefresh -or $HighlightBox -or $ApplyFormulaOmmlWhitelist) -and $Mode -eq 'CheckOnly') {
@@ -259,6 +259,18 @@ function Get-ObjectPropertyValue {
     return $property.Value
 }
 
+function Test-PdfFileSignature {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+    return (Test-PdfPackageIntegrity -Path $Path)
+}
+
+function Test-PptxFileSignature {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf) -or (Get-Item -LiteralPath $Path).Length -le 0) { return $false }
+    return (Test-PptxPackageIntegrity -Path $Path)
+}
+
 function Test-PreparedManifestMatchesCurrent {
     param($Prepared, $Current)
 
@@ -286,7 +298,7 @@ function Test-PreparedManifestMatchesCurrent {
         if ($matchingKey.Count -ne 1) { return $false }
         $preparedFile = $preparedByInput[$matchingKey[0]]
 
-        foreach ($propertyName in @('inputRelativePath', 'displayName', 'outputStem', 'inputSha256', 'normalizedPptx', 'pdf', 'pageImages', 'sourcePageImages')) {
+        foreach ($propertyName in @('inputRelativePath', 'displayName', 'outputStem', 'inputSha256', 'normalizedPptx', 'normalizedPptxSha256', 'pdf', 'pdfSha256', 'pageImages', 'sourcePageImages', 'status')) {
             $preparedValue = [string](Get-ObjectPropertyValue -Object $preparedFile -PropertyName $propertyName -DefaultValue '')
             $currentValue = [string](Get-ObjectPropertyValue -Object $currentFile -PropertyName $propertyName -DefaultValue '')
             if (-not [string]::Equals($preparedValue, $currentValue, [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
@@ -306,6 +318,10 @@ function Test-PreparedManifestMatchesCurrent {
     foreach ($propertyName in @('status', 'blockedCount')) {
         if ([string](Get-ObjectPropertyValue -Object $preparedInvariant -PropertyName $propertyName -DefaultValue '') -ne
             [string](Get-ObjectPropertyValue -Object $currentInvariant -PropertyName $propertyName -DefaultValue '')) { return $false }
+    }
+    foreach ($propertyName in @('fullChainEnabled', 'fullChainStatus', 'deliveryBlocked', 'deliveryStatus')) {
+        if ([string](Get-ObjectPropertyValue -Object $Prepared -PropertyName $propertyName -DefaultValue '') -ne
+            [string](Get-ObjectPropertyValue -Object $Current -PropertyName $propertyName -DefaultValue '')) { return $false }
     }
     return $true
 }
@@ -529,6 +545,77 @@ function Get-DeliveryGateAssessment {
     [pscustomobject]@{ blocked = @($blocked.ToArray() | Select-Object -Unique); review = @($review.ToArray() | Select-Object -Unique) }
 }
 
+function Get-PostPackagingFailureAssessment {
+    # Rebuild every receipt from the current manifest after files have moved.
+    # Pre-packaging verdicts intentionally are not reused.
+    param($Manifest, [string]$Mode, [bool]$IncludeReviewArtifacts, [bool]$IncludeVisualAudit)
+
+    $failureList = New-Object System.Collections.Generic.List[string]
+    foreach ($failure in @(Get-FullChainDeliveryFailures -Manifest $Manifest)) { $failureList.Add([string]$failure) | Out-Null }
+    $receipt = Get-ObjectPropertyValue -Object $Manifest -PropertyName 'deliveryPackaging' -DefaultValue $null
+    if ([bool](Get-ObjectPropertyValue -Object $Manifest -PropertyName 'fullChainEnabled' -DefaultValue $false)) {
+        if (-not [bool](Get-ObjectPropertyValue -Object $receipt -PropertyName 'applied' -DefaultValue $false)) {
+            $failureList.Add('FullChain did not commit the final delivery layout.') | Out-Null
+        }
+        $manifestDeliveryDir = Get-ObjectPropertyValue -Object @((Get-ObjectPropertyValue -Object $Manifest -PropertyName 'files' -DefaultValue @()) | Select-Object -First 1) -PropertyName 'pdf' -DefaultValue ''
+        if (-not [string]::IsNullOrWhiteSpace([string]$manifestDeliveryDir)) {
+            $manifestDeliveryDir = Split-Path -Parent ([string]$manifestDeliveryDir)
+            $expectedDeliveryFiles = @($receipt.files | Where-Object { $_.kind -eq 'Final' } | ForEach-Object { [IO.Path]::GetFileName($_.new) })
+            foreach ($deliveryItem in @(Get-ChildItem -LiteralPath $manifestDeliveryDir -File -ErrorAction SilentlyContinue)) {
+                if ($deliveryItem.Name -like '*.cache.json') {
+                    $failureList.Add("FullChain delivery directory contains a normalization cache: $($deliveryItem.Name)") | Out-Null
+                } elseif ($deliveryItem.Name -notin $expectedDeliveryFiles) {
+                    $failureList.Add("FullChain delivery directory contains a non-final artifact: $($deliveryItem.Name)") | Out-Null
+                }
+            }
+            if (@(Get-ChildItem -LiteralPath $manifestDeliveryDir -File -ErrorAction SilentlyContinue).Count -ne $expectedDeliveryFiles.Count) {
+                $failureList.Add('FullChain delivery directory does not match its committed final-file receipt.') | Out-Null
+            }
+        }
+        foreach ($file in @((Get-ObjectPropertyValue -Object $receipt -PropertyName 'files' -DefaultValue @()))) {
+            if ([string](Get-ObjectPropertyValue -Object $file -PropertyName 'state' -DefaultValue '') -ne 'Committed') {
+                $failureList.Add('FullChain has an uncommitted or unverified packaging move.') | Out-Null
+            }
+        }
+    }
+    $currentGate = Get-DeliveryGateAssessment -Manifest $Manifest -Mode $Mode -IncludeReviewArtifacts $IncludeReviewArtifacts -IncludeVisualAudit $IncludeVisualAudit
+    foreach ($failure in @($currentGate.blocked)) { $failureList.Add([string]$failure) | Out-Null }
+    return [pscustomobject]@{
+        blocked = @($failureList.ToArray() | Select-Object -Unique)
+        review = @($currentGate.review)
+    }
+}
+
+function Write-WorkflowFailureReceipt {
+    param([string]$Path, [string]$Phase, [System.Management.Automation.ErrorRecord]$ErrorRecord)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return }
+    try {
+        $parent = Split-Path -Parent $Path
+        if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+        $existing = $null
+        if (Test-Path -LiteralPath $Path) {
+            try { $existing = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json } catch { }
+        }
+        $errorMessage = if ($null -ne $ErrorRecord) { [string]$ErrorRecord.Exception.Message } else { '' }
+        $preservedPhase = ''
+        if ($null -ne $existing -and [string](Get-ObjectPropertyValue -Object $existing -PropertyName 'phase' -DefaultValue '') -in @('FinalPdfAndVisualAudit', 'BrandAndHighlight', 'FinalDeliveryGate')) {
+            $preservedPhase = [string](Get-ObjectPropertyValue -Object $existing -PropertyName 'phase' -DefaultValue '')
+        }
+        $receipt = [ordered]@{
+            schemaVersion = 1
+            generatedAt = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+            status = 'Failed'
+            phase = if ([string]::IsNullOrWhiteSpace($preservedPhase)) { $Phase } else { $preservedPhase }
+            deliveryStatus = 'BlockedWorkflowFailure'
+            error = if (-not [string]::IsNullOrWhiteSpace($preservedPhase) -and $null -ne $existing) { [string](Get-ObjectPropertyValue -Object $existing -PropertyName 'error' -DefaultValue 'Workflow failed.') } elseif (-not [string]::IsNullOrWhiteSpace($errorMessage)) { $errorMessage } else { 'Workflow stopped before producing final receipts.' }
+            previousError = if ([string]::IsNullOrWhiteSpace($preservedPhase)) { '' } else { [string](Get-ObjectPropertyValue -Object $existing -PropertyName 'error' -DefaultValue '') }
+            detail = if (-not [string]::IsNullOrWhiteSpace($errorMessage)) { $errorMessage } else { [string](Get-ObjectPropertyValue -Object $existing -PropertyName 'detail' -DefaultValue '') }
+            note = 'This run is not a successful delivery. Do not infer success from an older manifest in the same directory.'
+        }
+        [IO.File]::WriteAllText($Path, ($receipt | ConvertTo-Json -Depth 5), (New-Object System.Text.UTF8Encoding($false)))
+    } catch { }
+}
+
 function Read-JsonObject {
     param([string]$Path)
 
@@ -546,6 +633,9 @@ function Invoke-VisualConfirmationArtifact {
         [string]$BaselineVisualAuditDir
     )
 
+    if ([string]::IsNullOrWhiteSpace($VisualAuditDir)) {
+        throw 'Visual confirmation requires an explicit audit directory.'
+    }
     $confirmationCsv = if ([string]::IsNullOrWhiteSpace($VisualAuditDir)) { $null } else { Join-Path $VisualAuditDir 'pptx-visual-confirmation.csv' }
     $confirmationManifestPath = if ([string]::IsNullOrWhiteSpace($VisualAuditDir)) { $null } else { Join-Path $VisualAuditDir 'pptx-visual-confirmation-manifest.json' }
     $confirmationContactSheet = if ([string]::IsNullOrWhiteSpace($VisualAuditDir)) { $null } else { Join-Path $VisualAuditDir 'pptx-visual-confirmation.contact-sheet.png' }
@@ -988,11 +1078,26 @@ function Get-FullChainDeliveryFailures {
         if ([string]::IsNullOrWhiteSpace($highlightPath) -or $finalPptxPath -cne $highlightPath) {
             $failures.Add("${name}: final PPTX is not the highlight-box stage output.") | Out-Null
         }
+        $expectedFinalPresentation = Join-Path (Split-Path -Parent $finalPptxPath) ([System.IO.Path]::GetFileName($inputPath))
+        if ($finalPptxPath -cne $expectedFinalPresentation) {
+            $failures.Add("${name}: final PPTX is not the same-name delivery PPTX.") | Out-Null
+        }
+        if (-not (Test-PptxFileSignature -Path $finalPptxPath)) {
+            $failures.Add("${name}: final PPTX is not a readable presentation.") | Out-Null
+        }
 
         $finalPdfPath = [string](Get-ObjectPropertyValue -Object $record -PropertyName 'finalPdf' -DefaultValue '')
         $manifestPdfPath = [string](Get-ObjectPropertyValue -Object $file -PropertyName 'pdf' -DefaultValue '')
         if ([string]::IsNullOrWhiteSpace($finalPdfPath) -or $manifestPdfPath -cne $finalPdfPath) {
             $failures.Add("${name}: manifest PDF is not bound to the final-chain PDF.") | Out-Null
+        }
+        $inputStem = [System.IO.Path]::GetFileNameWithoutExtension($inputPath)
+        $expectedPdfPath = Join-Path (Split-Path -Parent $finalPdfPath) ($inputStem + '.pdf')
+        if ([string]::IsNullOrWhiteSpace($finalPdfPath) -or $finalPdfPath -ine $expectedPdfPath) {
+            $failures.Add("${name}: final-chain PDF is not the same-stem delivery PDF.") | Out-Null
+        }
+        if (-not (Test-PdfFileSignature -Path $finalPdfPath)) {
+            $failures.Add("${name}: final-chain PDF signature is missing or invalid.") | Out-Null
         }
         $manifestPdfHash = [string](Get-ObjectPropertyValue -Object $file -PropertyName 'pdfSha256' -DefaultValue '')
         $chainPdfHash = [string](Get-ObjectPropertyValue -Object $record -PropertyName 'finalPdfSha256' -DefaultValue '')
@@ -1020,12 +1125,19 @@ function Get-FullChainDeliveryFailures {
                 $failures.Add("${name}: final visual audit status is $finalVisualStatus.") | Out-Null
             }
             $auditStatus = [string](Get-ObjectPropertyValue -Object $finalVisual -PropertyName 'visualAuditStatus' -DefaultValue '')
-            if ($auditStatus -notin @('Passed', 'NeedsReview', 'NeedsReviewNoNormalizedBaseline', 'SkippedNoRuleAudit')) {
+            if ($auditStatus -notin @('Passed', 'NeedsReview', 'NeedsReviewNoNormalizedBaseline')) {
                 $failures.Add("${name}: final visual audit is $auditStatus.") | Out-Null
+            }
+            if (-not [bool](Get-ObjectPropertyValue -Object $finalVisual -PropertyName 'ruleAuditEnabled' -DefaultValue $false)) {
+                $failures.Add("${name}: final pages have not been checked against the rule audit baseline.") | Out-Null
             }
             $finalVisualPath = [string](Get-ObjectPropertyValue -Object $finalVisual -PropertyName 'finalPptx' -DefaultValue '')
             if ([string]::IsNullOrWhiteSpace($finalVisualPath) -or $finalVisualPath -cne $finalPptxPath) {
                 $failures.Add("${name}: final visual audit is not bound to the final PPTX.") | Out-Null
+            }
+            $finalVisualHash = [string](Get-ObjectPropertyValue -Object $finalVisual -PropertyName 'finalPptxSha256' -DefaultValue '')
+            if ([string]::IsNullOrWhiteSpace($finalVisualHash) -or $finalVisualHash -cne (Get-FileSha256OrNull -Path $finalPptxPath)) {
+                $failures.Add("${name}: final visual audit source hash is missing or changed.") | Out-Null
             }
             $pages = Get-ObjectPropertyValue -Object $finalVisual -PropertyName 'finalPageCount' -DefaultValue 0
             if ($null -eq $expectedSlides -or [int]$pages -ne [int]$expectedSlides) {
@@ -1065,7 +1177,7 @@ function Write-Summary {
     }
 
     $reviewItems = @(Get-ReviewSlides -Rows $Rows)
-    $manifestFiles = @($Manifest.files)
+    $manifestFiles = @((Get-ObjectPropertyValue -Object $Manifest -PropertyName 'files' -DefaultValue @()))
     $visualAuditItems = @()
     if ($null -ne $Manifest -and ($Manifest.PSObject.Properties.Name -contains 'visualAuditArtifacts')) {
         $visualAuditItems = @($Manifest.visualAuditArtifacts)
@@ -1123,7 +1235,8 @@ function Write-Summary {
     $beforeAfterSheetCount = if ($IncludeReviewArtifacts) { @($manifestFiles | Where-Object { -not [string]::IsNullOrWhiteSpace($_.beforeAfterSheet) -and (Test-Path -LiteralPath $_.beforeAfterSheet) }).Count } else { 0 }
     $reviewPagePackageCount = if ($IncludeReviewArtifacts) { @($manifestFiles | Where-Object { -not [string]::IsNullOrWhiteSpace($_.reviewPagePackage) -and (Test-Path -LiteralPath $_.reviewPagePackage) }).Count } else { 0 }
     $reviewIndexCount = if ($IncludeReviewArtifacts) { @($manifestFiles | Where-Object { -not [string]::IsNullOrWhiteSpace($_.reviewIndex) -and (Test-Path -LiteralPath $_.reviewIndex) }).Count } else { 0 }
-        $formulaReviewIndex = if (-not [string]::IsNullOrWhiteSpace($Manifest.formulaReviewIndex) -and (Test-Path -LiteralPath $Manifest.formulaReviewIndex)) { $Manifest.formulaReviewIndex } else { $null }
+        $formulaReviewIndexValue = [string](Get-ObjectPropertyValue -Object $Manifest -PropertyName 'formulaReviewIndex' -DefaultValue '')
+        $formulaReviewIndex = if (-not [string]::IsNullOrWhiteSpace($formulaReviewIndexValue) -and (Test-Path -LiteralPath $formulaReviewIndexValue)) { $formulaReviewIndexValue } else { $null }
     $formulaReviewCount = if ($null -ne $formulaReviewIndex) { @((Import-Csv -LiteralPath $formulaReviewIndex -Encoding UTF8)).Count } else { 0 }
     $formulaWhitelistSuggestionArtifacts = Get-ObjectPropertyValue -Object $Manifest -PropertyName 'formulaWhitelistSuggestionArtifacts' -DefaultValue $null
     $formulaWhitelistSuggestionStatus = Get-ObjectPropertyValue -Object $formulaWhitelistSuggestionArtifacts -PropertyName 'status' -DefaultValue ''
@@ -1176,7 +1289,7 @@ function Write-Summary {
     if ($fullChainEnabled) {
         $fullChainFailures = @((Get-ObjectPropertyValue -Object $Manifest -PropertyName 'fullChainFailures' -DefaultValue @()))
         $lines.Add("- 全链一键状态：$fullChainStatus；失败项：$($fullChainFailures.Count)")
-        $lines.Add('- 全链定义：规范化 → 品牌刷新 → 强调框统一 → 从最终强调框副本导出 PDF')
+        $lines.Add('- 全链定义：规范化 → 品牌刷新 → 强调框统一 → 从最终强调框副本导出并验证 PDF')
         $finalVisualItems = @((Get-ObjectPropertyValue -Object $Manifest -PropertyName 'finalVisualAuditArtifacts' -DefaultValue @()))
         if ($finalVisualItems.Count -gt 0) {
             $finalRenderedCount = @($finalVisualItems | Where-Object { [string](Get-ObjectPropertyValue -Object $_ -PropertyName 'status' -DefaultValue '') -eq 'Completed' }).Count
@@ -1189,10 +1302,10 @@ function Write-Summary {
             $finalNewErrorCount = Get-VisualArtifactCountSum -Items $finalVisualItems -PropertyName 'newErrorCount'
             $finalNewWarningCount = Get-VisualArtifactCountSum -Items $finalVisualItems -PropertyName 'newWarningCount'
             $lines.Add("- 全链最终逐页渲染：$finalRenderedCount / $($finalVisualItems.Count)；规则审计且相对规范化无新增问题：$finalRuleAuditedCount / $($finalVisualItems.Count)；待人工复核：$finalReviewCount；新增错误/警告：$finalNewErrorCount / $finalNewWarningCount")
-            if ($finalRuleAuditedCount -eq 0) {
-                $lines.Add('- 全链视觉验收：最终页面图已渲染并做边界/溢出检查；启用 `-IncludeVisualAudit` 可对最终副本做基线差异门禁')
+            if ($finalRuleAuditedCount -ne $finalVisualItems.Count) {
+                $lines.Add('- 全链视觉验收：未完成全部最终副本的规则审计')
             } else {
-                $lines.Add('- 全链视觉验收：最终 `.callout` 副本已完成渲染、边界/溢出规则审计和规范化基线差异门禁')
+                $lines.Add('- 全链视觉验收：最终交付 PPTX 已完成渲染、边界规则审计和规范化基线差异门禁')
             }
         } else {
             $lines.Add('- 全链视觉验收：需检查最终 PPTX/PDF')
@@ -1223,7 +1336,7 @@ function Write-Summary {
     }
     $finalVisualItemsForStructure = @((Get-ObjectPropertyValue -Object $Manifest -PropertyName 'finalVisualAuditArtifacts' -DefaultValue @()))
     if ($finalVisualItemsForStructure.Count -gt 0) {
-        $lines.Add('- `17_全链最终审查/`：直接从最终 `_callout` 副本导出的逐页 PNG；启用深度审查时包含规则审计与规范化基线差异确认')
+        $lines.Add('- `17_全链最终审查/`：从全链最终 PPTX 副本导出的逐页 PNG；启用深度审查时包含规则审计与规范化基线差异确认')
     }
     if ($null -ne $formulaOmmlArtifacts) {
         $candidateStatus = Get-ObjectPropertyValue -Object $formulaOmmlArtifacts -PropertyName 'candidateStatus' -DefaultValue ''
@@ -1338,7 +1451,7 @@ function Write-Summary {
     $lines.Add('## 输出结构')
     $lines.Add('')
     $lines.Add('- `00_检查报告/`：检查报告与规范化报告')
-    $lines.Add('- `01_交付物/`：正式交付物——与源件同名的最终 PPTX 和 PDF（唯一对外 PPTX）')
+    $lines.Add('- `01_交付物/`：正式交付物——仅与源件同名的最终 PPTX 和 PDF（唯一对外 PPTX）')
     if (-not $exportsPdf) {
         $lines.Add('  （当前模式不导出 PDF，目录内仅包含 PPTX/PPTM）')
     }
@@ -1364,8 +1477,10 @@ function Write-Summary {
         $lines.Add('- `12_视觉修复/`：仅包含规则可确定的低风险修复副本，不覆盖规范化 PPTX')
         $lines.Add('- `13_视觉修复审查/`：对视觉修复副本再次导出的审查报告和自动确认门禁')
     }
-    if ($null -ne $Manifest -and ($Manifest.PSObject.Properties.Name -contains 'brandStageArtifacts') -and $null -ne $Manifest.brandStageArtifacts) {
-        $chainCompleted = @($Manifest.brandStageArtifacts.files | Where-Object { [string]$_.status -eq 'Completed' }).Count
+    $brandStageArtifacts = Get-ObjectPropertyValue -Object $Manifest -PropertyName 'brandStageArtifacts' -DefaultValue $null
+    if ($null -ne $brandStageArtifacts) {
+        $chainFiles = @((Get-ObjectPropertyValue -Object $brandStageArtifacts -PropertyName 'files' -DefaultValue @()))
+        $chainCompleted = @($chainFiles | Where-Object { [string](Get-ObjectPropertyValue -Object $_ -PropertyName 'status' -DefaultValue '') -eq 'Completed' }).Count
         $lines.Add("- 品牌链阶段副本（规范化→品牌→强调框）：$chainCompleted 份，存放在 ``02_阶段副本/``（哈希与回溯用，不对外交付）；正式交付物为 01_交付物 内与源件同名的 PPTX/PDF")
     }
     if ($null -ne $formulaOmmlArtifacts) {
@@ -1428,9 +1543,9 @@ function Open-GeneratedPptxResult {
     }
 
     $fixedOutputs = @()
-    if ($null -ne $Manifest -and ($Manifest.PSObject.Properties.Name -contains 'visualAuditArtifacts')) {
+    if ($null -ne $Manifest) {
         $fixedOutputs = @(
-            @($Manifest.visualAuditArtifacts) |
+            @((Get-ObjectPropertyValue -Object $Manifest -PropertyName 'visualAuditArtifacts' -DefaultValue @())) |
                 Where-Object {
                     $fixed = Get-ObjectPropertyValue -Object $_ -PropertyName 'fixedPptx' -DefaultValue ''
                     $fixedGate = Get-ObjectPropertyValue -Object $_ -PropertyName 'fixedVisualConfirmationGateStatus' -DefaultValue ''
@@ -1449,10 +1564,32 @@ function Open-GeneratedPptxResult {
         return
     }
 
+    if ([bool](Get-ObjectPropertyValue -Object $Manifest -PropertyName 'fullChainEnabled' -DefaultValue $false) -and
+        [string](Get-ObjectPropertyValue -Object $Manifest -PropertyName 'fullChainStatus' -DefaultValue '') -eq 'Completed') {
+        $finalOutputs = @(
+            @((Get-ObjectPropertyValue -Object (Get-ObjectPropertyValue -Object $Manifest -PropertyName 'brandStageArtifacts' -DefaultValue $null) -PropertyName 'files' -DefaultValue @())) |
+                Where-Object {
+                    $finalPath = [string](Get-ObjectPropertyValue -Object $_ -PropertyName 'finalPptx' -DefaultValue '')
+                    [string](Get-ObjectPropertyValue -Object $_ -PropertyName 'status' -DefaultValue '') -eq 'Completed' -and
+                    -not [string]::IsNullOrWhiteSpace($finalPath) -and (Test-Path -LiteralPath $finalPath)
+                } |
+                ForEach-Object { [string](Get-ObjectPropertyValue -Object $_ -PropertyName 'finalPptx' -DefaultValue '') } |
+                Select-Object -Unique
+        )
+        if ($finalOutputs.Count -eq 1) {
+            Open-PathForReview -Path $finalOutputs[0]
+            return
+        }
+    }
+
     $outputs = @(
-        @($Manifest.files) |
-            Where-Object { -not [string]::IsNullOrWhiteSpace($_.normalizedPptx) -and (Test-Path -LiteralPath $_.normalizedPptx) } |
-            Select-Object -ExpandProperty normalizedPptx -Unique
+        @((Get-ObjectPropertyValue -Object $Manifest -PropertyName 'files' -DefaultValue @())) |
+            Where-Object {
+                $normalizedOutput = [string](Get-ObjectPropertyValue -Object $_ -PropertyName 'normalizedPptx' -DefaultValue '')
+                -not [string]::IsNullOrWhiteSpace($normalizedOutput) -and (Test-Path -LiteralPath $normalizedOutput)
+            } |
+            ForEach-Object { [string](Get-ObjectPropertyValue -Object $_ -PropertyName 'normalizedPptx' -DefaultValue '') } |
+            Select-Object -Unique
     )
 
     if ($outputs.Count -eq 1) {
@@ -1536,7 +1673,7 @@ function Invoke-VisualAuditArtifacts {
         $inputName = Split-Path $file.input -Leaf
         $baselinePptx = [string]$file.input
         $sourcePptx = [string]$file.normalizedPptx
-        $safeName = [string]$file.outputStem
+        $safeName = [string](Get-ObjectPropertyValue -Object $file -PropertyName 'outputStem' -DefaultValue '')
         $baselineAuditDir = Join-Path $baselineAuditRoot $safeName
         $baselineAuditManifestPath = Join-Path $baselineAuditDir 'pptx-visual-audit-manifest.json'
         $baselineAuditStatus = 'SkippedNoInputPptx'
@@ -1766,9 +1903,9 @@ function Invoke-BrandStageArtifacts {
 }
 
 function Export-FinalChainPdf {
-    # Export the PDF of the last chain copy from a fresh hidden PowerPoint
-    # instance. Mirrors Normalize's Export-PresentationPdf (ppSaveAsPDF) with
-    # the workflow-level COM lifecycle (retry on open, full release on exit).
+    # Export the PDF of the final style copy from a fresh hidden PowerPoint
+    # instance. The explicit export interface avoids filename-dependent SaveAs
+    # behavior and leaves the opened presentation read-only.
     param(
         [string]$PptxPath,
         [string]$PdfPath,
@@ -1779,14 +1916,29 @@ function Export-FinalChainPdf {
     try {
         $application = New-PowerPointApplication
         $pptxFullPath = [System.IO.Path]::GetFullPath($PptxPath)
+        $pdfFullPath = [System.IO.Path]::GetFullPath($PdfPath)
+        if (Test-Path -LiteralPath $pdfFullPath) { throw "Final PDF target already exists; refusing to overwrite stale or unknown evidence: $pdfFullPath" }
+        $sameNamePresentation = [System.IO.Path]::ChangeExtension($pdfFullPath, [System.IO.Path]::GetExtension($pptxFullPath))
+        $sameNamePresentationExisted = Test-Path -LiteralPath $sameNamePresentation
+        $sameNamePresentationHash = if ($sameNamePresentationExisted) { Get-FileSha256OrNull -Path $sameNamePresentation } else { '' }
         $presentation = Invoke-WithComRetry -MaxRetries 3 -DelayMs 800 -Action {
             $application.Presentations.Open($pptxFullPath, $true, $false, $false)
         }.GetNewClosure()
-        $pdfFormat = 32 # ppSaveAsPDF
-        Invoke-WithComRetry -MaxRetries 3 -DelayMs 800 -Action {
-            $presentation.SaveAs([System.IO.Path]::GetFullPath($PdfPath), $pdfFormat)
-        }.GetNewClosure()
-        if (-not (Test-Path -LiteralPath $PdfPath) -or (Get-Item -LiteralPath $PdfPath).Length -le 0) {
+        try {
+            $presentation.ExportAsFixedFormat($pdfFullPath, 2, 0, 0, 0, 0, 0, 0) | Out-Null # ppFixedFormatTypePDF, intent 0
+        } catch {
+            $fallbackError = $_.Exception.Message
+            if (Test-Path -LiteralPath $pdfFullPath) { Remove-Item -LiteralPath $pdfFullPath -Force }
+            $pdfFormat = 32 # ppSaveAsPDF fallback for hosts without fixed-format export
+            Invoke-WithComRetry -MaxRetries 3 -DelayMs 800 -Action { $presentation.SaveAs($pdfFullPath, $pdfFormat) }.GetNewClosure()
+            if ((Test-Path -LiteralPath $sameNamePresentation) -and -not $sameNamePresentationExisted) {
+                throw "PowerPoint SaveAs produced a presentation instead of a PDF. Fixed-format export error: $fallbackError"
+            }
+            if ($sameNamePresentationExisted -and (Get-FileSha256OrNull -Path $sameNamePresentation) -cne $sameNamePresentationHash) {
+                throw "PowerPoint SaveAs changed a same-name presentation while exporting PDF. Fixed-format export error: $fallbackError"
+            }
+        }
+        if (-not (Test-Path -LiteralPath $pdfFullPath) -or (Get-Item -LiteralPath $pdfFullPath).Length -le 0 -or -not (Test-PdfFileSignature -Path $pdfFullPath)) {
             throw "PowerPoint did not create a non-empty final-chain PDF: $PdfPath"
         }
         Write-Host "  final PDF -> $(Split-Path -Leaf $PdfPath)"
@@ -1804,92 +1956,150 @@ function Export-FinalChainPdf {
         [GC]::WaitForPendingFinalizers()
     }
 }
-
 function Complete-FinalDeliveryPackaging {
-    # Post-gate delivery layout (2026-10-29 convention, executing the
-    # 2026-09-17 same-name deliverable rule): 01_交付物 carries exactly one
-    # final PPTX named after the source file plus its same-name PDF; the
-    # normalized/brand stage copies (and their stage PDFs and the normalize
-    # probe cache) move to 02_阶段副本 so the folder a user opens shows the
-    # one file to deliver. Runs after every gate, before the manifest write;
-    # manifest strings are rewritten through the JSON roundtrip so the
-    # receipt checks and the written manifest reference the final locations.
-    # A failure here degrades to the stage-suffixed layout instead of
-    # throwing: all gates already passed and every file is present on disk.
+    # The in-memory object is authoritative: post-move checks must not rely on
+    # JSON re-projection or re-serialize its numeric/bounds fields.
     param($Manifest)
-
-    $receipt = [ordered]@{
-        applied = $false
-        stageDir = ''
-        renamedFinal = ''
-        movedCount = 0
-        note = ''
-    }
+    $receipt = [ordered]@{ applied = $false; stageDir = ''; renamedFinal = ''; movedCount = 0; note = ''; files = @(); restored = $true }
     $chain = Get-ObjectPropertyValue -Object $Manifest -PropertyName 'brandStageArtifacts' -DefaultValue $null
-    if ($null -eq $chain) {
-        $receipt.note = 'no brand/highlight stage receipt; layout unchanged'
-        return [pscustomobject]$receipt
-    }
-    $pathMap = [ordered]@{}
+    if ($null -eq $chain) { $receipt.note = 'no brand/highlight stage receipt; layout unchanged'; return [pscustomobject]@{ Manifest = $Manifest; Receipt = [pscustomobject]$receipt } }
+    $moves = New-Object System.Collections.Generic.List[object]
+    $planned = New-Object System.Collections.Generic.List[object]
     try {
         foreach ($record in @((Get-ObjectPropertyValue -Object $chain -PropertyName 'files' -DefaultValue @()))) {
             if ([string](Get-ObjectPropertyValue -Object $record -PropertyName 'status' -DefaultValue '') -ne 'Completed') { continue }
+            $inputPath = [string](Get-ObjectPropertyValue -Object $record -PropertyName 'file' -DefaultValue '')
+            $sourcePath = [string](Get-ObjectPropertyValue -Object $record -PropertyName 'brandSourcePptx' -DefaultValue '')
+            $manifestFile = @((Get-ObjectPropertyValue -Object $Manifest -PropertyName 'files' -DefaultValue @()) | Where-Object {
+                        [string](Get-ObjectPropertyValue -Object $_ -PropertyName 'input' -DefaultValue '') -eq $inputPath
+                    }) | Select-Object -First 1
+            $normalizedPath = [string](Get-ObjectPropertyValue -Object $manifestFile -PropertyName 'normalizedPptx' -DefaultValue '')
             $finalPptx = [string](Get-ObjectPropertyValue -Object $record -PropertyName 'finalPptx' -DefaultValue '')
-            if ([string]::IsNullOrWhiteSpace($finalPptx) -or -not (Test-Path -LiteralPath $finalPptx)) { continue }
+            if (-not (Test-Path -LiteralPath $finalPptx -PathType Leaf)) { throw "Final-chain PPTX is missing: $finalPptx" }
             $deliveryDir = Split-Path -Parent $finalPptx
             $stageDir = Join-Path (Split-Path -Parent $deliveryDir) '02_阶段副本'
             if (-not (Test-Path -LiteralPath $stageDir)) { New-Item -ItemType Directory -Path $stageDir -Force | Out-Null }
             $receipt.stageDir = $stageDir
-            $sourceBase = [System.IO.Path]::GetFileNameWithoutExtension([string](Get-ObjectPropertyValue -Object $record -PropertyName 'file' -DefaultValue ''))
-            if ([string]::IsNullOrWhiteSpace($sourceBase)) { continue }
-            # Stage copies by name pattern: every stage-suffixed artifact of
-            # this file moves; the callout copy renames to the source name.
-            foreach ($stageFile in @(Get-ChildItem -LiteralPath $deliveryDir -File | Where-Object {
-                        $_.Name -like "$sourceBase.normalized.*" -or $_.Name -like "$sourceBase.brand.*"
-                    })) {
-                $target = Join-Path $stageDir $stageFile.Name
-                $attempt = 0
-                while ($true) {
-                    $attempt++
-                    try { Move-Item -LiteralPath $stageFile.FullName -Destination $target -Force; break }
-                    catch {
-                        if ($attempt -ge 3) { throw }
-                        Start-Sleep -Seconds (2 * $attempt)
+            $sourceBase = [System.IO.Path]::GetFileNameWithoutExtension($inputPath)
+            $extension = [System.IO.Path]::GetExtension($finalPptx)
+            $sameNamePptx = Join-Path $deliveryDir ($sourceBase + $extension)
+            if ($sameNamePptx -ieq $finalPptx) { throw "Final-chain PPTX is not a distinct stage copy: $finalPptx" }
+            if (Test-Path -LiteralPath $sameNamePptx) { throw "Final delivery target already exists; refusing to overwrite evidence: $sameNamePptx" }
+            $recordPdf = [string](Get-ObjectPropertyValue -Object $record -PropertyName 'finalPdf' -DefaultValue '')
+            $pdfHash = [string](Get-ObjectPropertyValue -Object $record -PropertyName 'finalPdfSha256' -DefaultValue '')
+            $samePdf = Join-Path $deliveryDir ($sourceBase + '.pdf')
+            $originalNormalizedPdf = [string](Get-ObjectPropertyValue -Object $manifestFile -PropertyName 'pdf' -DefaultValue '')
+            if ([string]::IsNullOrWhiteSpace($recordPdf) -or [string]::IsNullOrWhiteSpace($pdfHash) -or -not (Test-Path -LiteralPath $recordPdf -PathType Leaf)) { throw "Final-chain PDF receipt is incomplete: $recordPdf" }
+            if ($recordPdf -ine $samePdf) { throw "Final-chain PDF is not the same-stem delivery PDF: $recordPdf expected $samePdf" }
+            if (-not (Test-PdfFileSignature -Path $recordPdf) -or (Get-FileSha256OrNull -Path $recordPdf) -cne $pdfHash) { throw "Final-chain PDF bytes do not match its receipt: $recordPdf" }
+            $finalRecord = @($record)
+            $stagePaths = @()
+            foreach ($name in @('normalizedPptx', 'pdf')) {
+                $stagePaths += [string](Get-ObjectPropertyValue -Object $manifestFile -PropertyName $name -DefaultValue '')
+            }
+            $stagePaths += Join-Path $deliveryDir ([IO.Path]::GetFileName($normalizedPath) + '.cache.json')
+            if (-not [string]::IsNullOrWhiteSpace($originalNormalizedPdf) -and $originalNormalizedPdf -ine $recordPdf) {
+                $stagePaths += $originalNormalizedPdf
+            }
+            foreach ($name in @('brandSourcePptx', 'brandPptx', 'highlightSourcePptx', 'highlightPptx')) {
+                $stagePaths += [string](Get-ObjectPropertyValue -Object $record -PropertyName $name -DefaultValue '')
+            }
+            foreach ($stagePath in @($stagePaths | Select-Object -Unique)) {
+                if ([string]::IsNullOrWhiteSpace($stagePath) -or $stagePath -eq $finalPptx -or $stagePath -eq $recordPdf) { continue }
+                if (-not (Test-Path -LiteralPath $stagePath -PathType Leaf)) { continue }
+                $stageSource = Get-Item -LiteralPath $stagePath
+                $planned.Add([pscustomobject]@{ old = $stageSource.FullName; new = (Join-Path $stageDir $stageSource.Name); kind = 'Stage' }) | Out-Null
+            }
+            $planned.Add([pscustomobject]@{ old = $finalPptx; new = $sameNamePptx; kind = 'Final' }) | Out-Null
+            $receipt.renamedFinal = $sameNamePptx
+        }
+        foreach ($report in @(Get-ChildItem -LiteralPath $deliveryDir -File -Filter 'physics-ppt-normalize-report.csv' -ErrorAction SilentlyContinue)) {
+            $reportTarget = Join-Path (Split-Path -Parent $deliveryDir) ('00_检查报告/' + $report.Name)
+            if (-not (Test-Path -LiteralPath $reportTarget) -or
+                (Get-FileSha256OrNull -Path $reportTarget) -eq (Get-FileSha256OrNull -Path $report.FullName)) {
+                $planned.Add([pscustomobject]@{ old = $report.FullName; new = $reportTarget; kind = 'Report' }) | Out-Null
+            }
+        }
+        foreach ($plan in $planned) {
+            if (Test-Path -LiteralPath $plan.new) {
+                $sameEvidence = $plan.kind -eq 'Report' -and
+                    (Get-FileSha256OrNull -Path $plan.new) -eq (Get-FileSha256OrNull -Path $plan.old)
+                if (-not $sameEvidence) { throw "Target exists; refusing to overwrite evidence: $($plan.new)" }
+            }
+        }
+        foreach ($plan in $planned) {
+            Write-Verbose "Packaging move: $($plan.old) -> $($plan.new) [$($plan.kind)]"
+            $parentDir = Split-Path -Parent $plan.new
+            if (-not (Test-Path -LiteralPath $parentDir)) { New-Item -ItemType Directory -Path $parentDir -Force | Out-Null }
+            $temporary = Join-Path $parentDir ('.' + (Split-Path -Leaf $plan.new) + '.pending-' + [Guid]::NewGuid().ToString('N'))
+            $moves.Add([pscustomobject]@{ old = $plan.old; temporary = $temporary; new = $plan.new; state = 'Moving'; kind = $plan.kind }) | Out-Null
+            Move-Item -LiteralPath $plan.old -Destination $temporary -ErrorAction Stop
+            $moves[-1].state = 'Moved'
+            $receipt.movedCount++
+        }
+        foreach ($move in $moves) { Move-Item -LiteralPath $move.temporary -Destination $move.new -Force -ErrorAction Stop; $move.state = 'Committed' }
+        $Manifest | Add-Member -NotePropertyName packagingReceipt -NotePropertyValue ([pscustomobject]@{ applied = $true; note = 'Final delivery layout committed after all gates.' }) -Force
+        foreach ($movedFinal in @($moves.ToArray() | Where-Object { $_.kind -eq 'Final' })) {
+            $deliveryRoot = Split-Path -Parent (Split-Path -Parent $movedFinal.new)
+            $auditRoot = Join-Path -Path $deliveryRoot -ChildPath '17_全链最终审查'
+            foreach ($auditManifestItem in @(Get-ChildItem -LiteralPath $auditRoot -Filter 'pptx-visual-audit-manifest.json' -File -Recurse -ErrorAction SilentlyContinue)) {
+                $auditManifest = Get-Content -LiteralPath $auditManifestItem.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
+                if ([string]$auditManifest.inputPath -eq $movedFinal.old) {
+                    $auditManifest.inputPath = $movedFinal.new
+                    [IO.File]::WriteAllText($auditManifestItem.FullName, ($auditManifest | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding($false)))
+                }
+            }
+        }
+        foreach ($movedFile in @($moves.ToArray())) {
+            foreach ($file in @((Get-ObjectPropertyValue -Object $Manifest -PropertyName 'files' -DefaultValue @()))) {
+                if ([string](Get-ObjectPropertyValue -Object $file -PropertyName 'normalizedPptx' -DefaultValue '') -eq $movedFile.old) {
+                    $file | Add-Member -NotePropertyName normalizedPptx -NotePropertyValue $movedFile.new -Force
+                }
+                if ([string](Get-ObjectPropertyValue -Object $file -PropertyName 'pdf' -DefaultValue '') -eq $movedFile.old) {
+                    $file | Add-Member -NotePropertyName pdf -NotePropertyValue $movedFile.new -Force
+                }
+            }
+            foreach ($record in @((Get-ObjectPropertyValue -Object (Get-ObjectPropertyValue -Object $Manifest -PropertyName 'brandStageArtifacts' -DefaultValue $null) -PropertyName 'files' -DefaultValue @()))) {
+                foreach ($name in @('brandSourcePptx', 'brandPptx', 'highlightSourcePptx', 'highlightPptx', 'finalPptx')) {
+                    if ([string](Get-ObjectPropertyValue -Object $record -PropertyName $name -DefaultValue '') -eq $movedFile.old) {
+                        $record | Add-Member -NotePropertyName $name -NotePropertyValue $movedFile.new -Force
                     }
                 }
-                $pathMap[$stageFile.FullName] = $target
-                $receipt.movedCount++
             }
-            $sameNamePptx = Join-Path $deliveryDir ("$sourceBase" + [System.IO.Path]::GetExtension($finalPptx))
-            if ($sameNamePptx -ne $finalPptx) {
-                if (Test-Path -LiteralPath $sameNamePptx) { Remove-Item -LiteralPath $sameNamePptx -Force }
-                Rename-Item -LiteralPath $finalPptx -NewName ([System.IO.Path]::GetFileName($sameNamePptx))
-                $pathMap[$finalPptx] = $sameNamePptx
-                $receipt.renamedFinal = $sameNamePptx
+            foreach ($visual in @((Get-ObjectPropertyValue -Object $Manifest -PropertyName 'finalVisualAuditArtifacts' -DefaultValue @()))) {
+                if ([string](Get-ObjectPropertyValue -Object $visual -PropertyName 'finalPptx' -DefaultValue '') -eq $movedFile.old) {
+                    $visual | Add-Member -NotePropertyName finalPptx -NotePropertyValue $movedFile.new -Force
+                    $auditDir = [string](Get-ObjectPropertyValue -Object $visual -PropertyName 'finalVisualAuditDir' -DefaultValue '')
+                    $auditManifestPath = if ([string]::IsNullOrWhiteSpace($auditDir)) { '' } else { Join-Path $auditDir 'pptx-visual-audit-manifest.json' }
+                    if (-not [string]::IsNullOrWhiteSpace($auditManifestPath) -and (Test-Path -LiteralPath $auditManifestPath -PathType Leaf)) {
+                        $auditRecord = Get-Content -LiteralPath $auditManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+                        if ([string](Get-ObjectPropertyValue -Object $auditRecord -PropertyName 'inputPath' -DefaultValue '') -eq $movedFile.old) {
+                            $auditRecord | Add-Member -NotePropertyName inputPath -NotePropertyValue $movedFile.new -Force
+                            [IO.File]::WriteAllText($auditManifestPath, ($auditRecord | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding($false)))
+                        }
+                    }
+                }
             }
         }
-        if ($pathMap.Count -gt 0) {
-            # Patch every manifest string through the JSON roundtrip (the same
-            # serializer the manifest write uses). JSON escapes backslashes,
-            # so both ends of each replacement are escaped the same way; the
-            # longest old paths replace first to avoid prefix collisions.
-            $manifestJson = $Manifest | ConvertTo-Json -Depth 8
-            foreach ($oldPath in @($pathMap.Keys | Sort-Object { $_.Length } -Descending)) {
-                $manifestJson = $manifestJson.Replace($oldPath.Replace('\', '\\'), $pathMap[$oldPath].Replace('\', '\\'))
-            }
-            $Manifest = $manifestJson | ConvertFrom-Json
-            $receipt.applied = $true
-        }
+        $receipt.applied = $true
+        $receipt.note = 'Final delivery layout committed after all gates.'
+        $receipt.files = @($moves.ToArray())
     } catch {
-        $receipt.note = "packaging degraded to stage-suffixed layout: $($_.Exception.Message)"
+        $receipt.note = $_.Exception.Message
+        foreach ($move in @($moves | Sort-Object { $_.old.Length } -Descending)) {
+            try {
+                if ($move.state -eq 'Moved' -and (Test-Path -LiteralPath $move.temporary)) { Move-Item -LiteralPath $move.temporary -Destination $move.old; $move.state = 'Restored' }
+                elseif ($move.state -eq 'Committed' -and (Test-Path -LiteralPath $move.new) -and -not (Test-Path -LiteralPath $move.old)) { Move-Item -LiteralPath $move.new -Destination $move.old; $move.state = 'Restored' }
+            } catch { Write-Warning "Could not restore $($move.old): $($_.Exception.Message)" }
+        }
+        $receipt.files = @($moves.ToArray())
     }
-    return [pscustomobject]@{ Manifest = $Manifest; Receipt = $receipt }
+    return [pscustomobject]@{ Manifest = $Manifest; Receipt = [pscustomobject]$receipt }
 }
 
 function Invoke-FinalChainVisualAudit {
     <#  The pre-chain visual audit deliberately covers the normalized copy.
-        After branding and highlight styling, that evidence no longer proves
-        the actual deliverable is visually sound. Audit the final .callout
+        Audit the final style
         copy against the normalized audit so newly introduced clipping,
         overflow, or unreadable text blocks the chain.
 
@@ -1914,6 +2124,7 @@ function Invoke-FinalChainVisualAudit {
             finalVisualAuditDir = $null
             finalVisualAuditCsv = $null
             finalVisualAuditContactSheet = $null
+            finalPptxSha256 = ''
             finalPageCount = 0
             status = 'SkippedNoFinalPptx'
             error = ''
@@ -1924,6 +2135,7 @@ function Invoke-FinalChainVisualAudit {
             visualConfirmationGateStatus = 'Skipped'
             newErrorCount = 0
             newWarningCount = 0
+            ruleAuditEnabled = $false
         }
         $chainFile = @((Get-ObjectPropertyValue -Object (Get-ObjectPropertyValue -Object $Manifest -PropertyName 'brandStageArtifacts' -DefaultValue $null) -PropertyName 'files' -DefaultValue @()) | Where-Object {
             [string](Get-ObjectPropertyValue -Object $_ -PropertyName 'file' -DefaultValue '') -eq [string]$file.input
@@ -1937,10 +2149,11 @@ function Invoke-FinalChainVisualAudit {
             continue
         }
         $safeName = [string]$file.outputStem
-        $finalAuditDir = Join-Path $auditRoot $safeName
+        $finalAuditDir = Join-Path -Path $auditRoot -ChildPath $safeName
         $finalAuditCsv = Join-Path $finalAuditDir 'pptx-visual-audit.csv'
         $finalAuditManifestPath = Join-Path $finalAuditDir 'pptx-visual-audit-manifest.json'
         $finalContactSheet = Join-Path $finalAuditDir 'pptx-visual-audit.contact-sheet.png'
+        [IO.Directory]::CreateDirectory($finalAuditDir) | Out-Null
         $record.finalVisualAuditDir = $finalAuditDir
         $record.finalVisualAuditCsv = $finalAuditCsv
         $record.finalVisualAuditContactSheet = $finalContactSheet
@@ -1950,8 +2163,30 @@ function Invoke-FinalChainVisualAudit {
         $normalizedAuditDir = [string](Get-ObjectPropertyValue -Object $visualArtifact -PropertyName 'visualAuditDir' -DefaultValue '')
         try {
             if ($RunRuleAudit) {
-                & (Join-Path $PSScriptRoot 'Export-PptxVisualAudit.ps1') -InputPath $record.finalPptx -OutputDir $finalAuditDir -ContactSheet | Out-Host
-                $finalAuditManifest = Read-JsonObject -Path $finalAuditManifestPath
+                if ([string]::IsNullOrWhiteSpace($safeName)) {
+                    throw "Final visual audit cannot determine the output stem for $($file.input)."
+                }
+                # A rule audit must bind page images to the exact final bytes.
+                # A prior page set is retained only when its manifest carries
+                # the matching source hash; otherwise it is regenerated.
+                $finalAuditManifest = Read-JsonObject -Path ([string]$finalAuditManifestPath)
+                $auditedPptx = [string](Get-ObjectPropertyValue -Object $finalAuditManifest -PropertyName 'inputPath' -DefaultValue '')
+                $auditedSha256 = [string](Get-ObjectPropertyValue -Object $finalAuditManifest -PropertyName 'inputSha256' -DefaultValue '')
+                $auditReusable = Test-FinalVisualAuditEvidence -AuditManifest $finalAuditManifest -FinalPptxPath $finalPptx -AuditOutputDir $finalAuditDir -AuditCsvPath $finalAuditCsv
+                if (-not $auditReusable) {
+                    & (Join-Path $PSScriptRoot 'Export-PptxVisualAudit.ps1') -InputPath ([string]$finalPptx) -OutputDir $finalAuditDir -ContactSheet | Out-Host
+                    $finalAuditManifest = Read-JsonObject -Path ([string]$finalAuditManifestPath)
+                    $auditedPptx = [string](Get-ObjectPropertyValue -Object $finalAuditManifest -PropertyName 'inputPath' -DefaultValue '')
+                    $auditedSha256 = [string](Get-ObjectPropertyValue -Object $finalAuditManifest -PropertyName 'inputSha256' -DefaultValue '')
+                }
+                if ($null -eq $finalAuditManifest -or [string]::IsNullOrWhiteSpace($auditedPptx) -or $auditedPptx -ine $finalPptx) {
+                    throw 'Final visual audit is not bound to the exact final PPTX bytes.'
+                }
+                $currentFinalHash = Get-FileSha256OrNull -Path ([string]$finalPptx)
+                if (-not [string]::IsNullOrWhiteSpace($auditedSha256) -and $auditedSha256 -cne $currentFinalHash) {
+                    throw 'Final visual audit input hash is inconsistent with the exact final PPTX bytes.'
+                }
+                $record.ruleAuditEnabled = $true
                 $record.finalPageCount = [int](Get-ObjectPropertyValue -Object $finalAuditManifest -PropertyName 'exportedSlideCount' -DefaultValue 0)
                 $record.visualAuditStatus = 'Completed'
                 $record.visualAuditErrorCount = [int](Get-ObjectPropertyValue -Object $finalAuditManifest -PropertyName 'errorCount' -DefaultValue 0)
@@ -1966,6 +2201,7 @@ function Invoke-FinalChainVisualAudit {
                 } else {
                     $record.visualAuditStatus = 'NeedsReviewNoNormalizedBaseline'
                 }
+                $record.finalPptxSha256 = $currentFinalHash
             } else {
                 & (Join-Path $PSScriptRoot 'Export-PptxVisualAudit.ps1') -InputPath $record.finalPptx -OutputDir $finalAuditDir -ContactSheet -NoPdf | Out-Host
                 $finalAuditManifest = Read-JsonObject -Path $finalAuditManifestPath
@@ -1985,6 +2221,30 @@ function Invoke-FinalChainVisualAudit {
         $items.Add([pscustomobject]$record) | Out-Null
     }
     return [pscustomobject]@{ files = @($items.ToArray()) }
+}
+
+function Test-FinalVisualAuditEvidence {
+    param(
+        $AuditManifest,
+        [string]$FinalPptxPath,
+        [string]$AuditOutputDir,
+        [string]$AuditCsvPath
+    )
+    if ([string]::IsNullOrWhiteSpace($FinalPptxPath) -or
+        [string]::IsNullOrWhiteSpace($AuditOutputDir) -or
+        [string]::IsNullOrWhiteSpace($AuditCsvPath)) {
+        return $false
+    }
+    if ($null -eq $AuditManifest -or -not (Test-Path -LiteralPath $AuditCsvPath -PathType Leaf)) {
+        return $false
+    }
+    $recordedPath = [string](Get-ObjectPropertyValue -Object $AuditManifest -PropertyName 'inputPath' -DefaultValue '')
+    $recordedHash = [string](Get-ObjectPropertyValue -Object $AuditManifest -PropertyName 'inputSha256' -DefaultValue '')
+    $recordedDir = [string](Get-ObjectPropertyValue -Object $AuditManifest -PropertyName 'outputDir' -DefaultValue '')
+    $currentHash = Get-FileSha256OrNull -Path $FinalPptxPath
+    return (-not [string]::IsNullOrWhiteSpace($recordedHash) -and
+        $recordedPath -ieq $FinalPptxPath -and $recordedHash -ceq $currentHash -and
+        $recordedDir -ieq $AuditOutputDir)
 }
 
 function Invoke-FormulaOmmlArtifacts {
@@ -2354,7 +2614,10 @@ function Invoke-InvariantGate {
     $blocked = @($itemArray | Where-Object { $_.status -ne 'Passed' }).Count
     return [pscustomobject]@{ enabled = $true; status = if ($blocked -eq 0) { 'Passed' } else { 'Blocked' }; root = $gateRoot; blockedCount = $blocked; files = $itemArray }
 }
-
+# Report failure receipts use the delivery report directory. A preflight
+# failure creates no version directory and therefore cannot claim a receipt.
+$workflowFailurePath = $null
+try {
 $root = Split-Path -Parent $PSScriptRoot
 $inputItem = Get-Item -LiteralPath $InputPath
 $inputFullPath = $inputItem.FullName
@@ -2447,6 +2710,10 @@ Assert-PowerPointAutomationReady
 foreach ($dir in $outputDirs) {
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
 }
+$workflowFailurePath = Join-Path $reportDir 'workflow-failure.json'
+if (Test-Path -LiteralPath $workflowFailurePath) {
+    Remove-Item -LiteralPath $workflowFailurePath -Force
+}
 
 $reportOnlyPath = Join-Path $reportDir 'physics-ppt-report-only.csv'
 $normalizeReportPath = Join-Path $normalizedDir 'physics-ppt-normalize-report.csv'
@@ -2510,6 +2777,25 @@ if ($Mode -eq 'CheckOnly') {
 
     if (Test-Path -LiteralPath $normalizeReportPath) {
         Copy-Item -LiteralPath $normalizeReportPath -Destination $finalReportPath -Force
+    }
+    if ($FullChain) {
+        $stageDir = Join-Path $OutputRoot '02_阶段副本'
+        if (-not (Test-Path -LiteralPath $stageDir)) { New-Item -ItemType Directory -Path $stageDir -Force | Out-Null }
+        foreach ($file in $files) {
+            $identity = $identityMap[$file.FullName]
+            $cachePath = Join-Path $normalizedDir ('{0}.normalized{1}.cache.json' -f $identity.safeStem, $file.Extension)
+            if (Test-Path -LiteralPath $cachePath -PathType Leaf) {
+                $cacheTarget = Join-Path $stageDir ([IO.Path]::GetFileName($cachePath))
+                if (Test-Path -LiteralPath $cacheTarget) {
+                    $cacheHash = Get-FileSha256OrNull -Path $cachePath
+                    if ($cacheHash -ne (Get-FileSha256OrNull -Path $cacheTarget)) {
+                        throw "Stage cache target already exists with different evidence: $cacheTarget"
+                    }
+                } else {
+                    Move-Item -LiteralPath $cachePath -Destination $cacheTarget
+                }
+            }
+        }
     }
 
     $sourceBackupDir = Join-Path $normalizedDir '_backup_originals'
@@ -2736,6 +3022,7 @@ $blockReason = if ($invariantDeliveryBlocked) {
         "Required delivery artifact validation failed: {0}" -f (($deliveryAssessment.blocked) -join '; ')
     }
 }
+    Write-WorkflowFailureReceipt -Path $workflowFailurePath -Phase 'FinalDeliveryGate'
     throw "$blockReason Keep the generated files for investigation; do not deliver the normalized PPTX."
 }
 
@@ -2765,4 +3052,8 @@ if ($OpenGeneratedPptx) {
 
 if ($OpenOutput) {
     Open-PathForReview -Path $OutputRoot
+}
+} catch {
+    if (-not [string]::IsNullOrWhiteSpace($workflowFailurePath)) { Write-WorkflowFailureReceipt -Path $workflowFailurePath -Phase 'Workflow' -ErrorRecord $_ }
+    throw
 }

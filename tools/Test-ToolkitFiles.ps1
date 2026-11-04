@@ -78,6 +78,8 @@ $required = @(
     'tools\Export-PptxAiReviewPacket.ps1',
     'tools\Import-PptxAiReviewResult.ps1',
     'tools\Test-PhysicsPptPolicy.ps1',
+    'tools\Test-PhysicsPptPlayback.ps1',
+    'tools\Test-PhysicsPptPlaybackShow.ps1',
     'tools\Test-PageTypeClassification.ps1',
     'tools\Apply-PptxBrandVisualRefresh.ps1',
     'tools\Apply-PptxHighlightBoxStyle.ps1',
@@ -130,7 +132,8 @@ $unregistered += @(Get-ChildItem -LiteralPath (Join-Path $root 'docs') -Filter '
 $unregistered += @(Get-ChildItem -LiteralPath $root -Filter '*.cmd' -File |
     ForEach-Object { $_.Name } |
     Where-Object { $_ -notin $required })
-$unregistered += @(Get-ChildItem -LiteralPath (Join-Path $root 'tools') -Recurse -File -Include '*.js', '*.py', '*.cs' |
+$unregistered += @(Get-ChildItem -LiteralPath (Join-Path $root 'tools') -Recurse -File |
+    Where-Object { $_.Extension -in @('.js', '.py', '.cs', '.csproj') } |
     Where-Object { $_.FullName -notmatch '\\vendor\\|\\obj\\|\\bin\\' } |
     ForEach-Object { $_.FullName.Substring($root.Length + 1) } |
     Where-Object { $_ -notin $required })
@@ -345,6 +348,15 @@ if (-not $?) { throw 'Formula OLE visual adjudication fixture test failed.' }
 if (-not $?) { throw 'FormulaOfficeMathValidator fault-injection test failed.' }
 & (Join-Path $root 'tools\Test-PageTypeClassification.ps1')
 if (-not $?) { throw 'Page-type classification probe failed.' }
+$validPptxIntegrity = Test-PptxPackageIntegrity -Path (Join-Path $root 'examples\fixtures\minimal-physics-sample.pptx')
+if (-not $validPptxIntegrity) { throw 'Valid PPTX fixture failed package integrity validation.' }
+$invalidPptxPath = Join-Path ([System.IO.Path]::GetTempPath()) ('physics-ppt-invalid-' + [Guid]::NewGuid().ToString('N') + '.pptx')
+[System.IO.File]::WriteAllBytes($invalidPptxPath, [byte[]]@(0x50, 0x4b))
+try {
+    if (Test-PptxPackageIntegrity -Path $invalidPptxPath) { throw 'Damaged PPTX package passed integrity validation.' }
+} finally {
+    if (Test-Path -LiteralPath $invalidPptxPath) { Remove-Item -LiteralPath $invalidPptxPath -Force }
+}
 
 $requiredFontFields = @('chinese', 'compactChinese', 'latin', 'math')
 foreach ($field in $requiredFontFields) {
@@ -734,6 +746,7 @@ try {
 $normalizeContent = Get-Content -LiteralPath (Join-Path $root 'tools\Normalize-PhysicsPpt.ps1') -Raw -Encoding UTF8
 if ($normalizeContent -match '&\s+powershell\.exe') { throw 'Parallel PowerShell workers must resolve the PS7-first host instead of hard-coding powershell.exe.' }
 if ($normalizeContent -notmatch 'Resolve-PowerShellHost') { throw 'Normalize script must use Resolve-PowerShellHost for child workers.' }
+if ($normalizeContent -notmatch 'Test-PptxPackageIntegrity') { throw 'Normalize cache must validate the complete PPTX package before reuse.' }
 
 foreach ($launcher in @('一键规范化并导出PDF.cmd', '一键全链规范化并导出PDF.cmd', '一键检查PPT.cmd', '一键规范化导出并转换可编辑公式.cmd')) {
     $launcherPath = Join-Path $root $launcher
@@ -749,22 +762,12 @@ foreach ($launcher in @('一键规范化并导出PDF.cmd', '一键全链规范�
         throw "Full-chain launcher must explicitly use -FullChain: $launcher"
     }
 }
-foreach ($automationScript in @(
-    'tools\Normalize-PhysicsPpt.ps1',
-    'tools\Invoke-PhysicsPptWorkflow.ps1',
-    'tools\PhysicsPpt.ReviewArtifacts.ps1',
-    'tools\Export-PptxInvariantSnapshot.ps1',
-    'tools\Export-PptxVisualAudit.ps1',
-    'tools\Apply-PptxVisualAuditFixes.ps1',
-    'tools\Apply-PptxHighlightBoxStyle.ps1',
-    'tools\Assert-Toolchain.ps1'
-)) {
-    $automationContent = Get-Content -LiteralPath (Join-Path $root $automationScript) -Raw -Encoding UTF8
-    if ($automationContent -match 'New-Object\s+-ComObject\s+PowerPoint\.Application') {
+foreach ($automationScript in @(Get-ChildItem -LiteralPath (Join-Path $root 'tools') -Filter '*.ps1' -Recurse -File | Where-Object { $_.FullName -notmatch '\\vendor\\' } | ForEach-Object FullName)) {
+    $automationContent = Get-Content -LiteralPath $automationScript -Raw -Encoding UTF8
+    if ($automationScript -notlike '*\PhysicsPpt.Common.ps1' -and $automationContent -match 'New-Object\s+-ComObject\s+PowerPoint\.Application') {
         throw "PowerPoint automation script must use New-PowerPointApplication: $automationScript"
     }
 }
-
 # Explicit output paths are supported by the standalone visual stages. They
 # must retain the same backup and failure-receipt guarantees as auto-versioned
 # delivery runs, otherwise a failed COM save can leave an untracked artifact.
@@ -776,6 +779,15 @@ foreach ($stageScript in @('tools\Apply-PptxBrandVisualRefresh.ps1', 'tools\Appl
     if ($stageContent -notmatch '(?s)\$backupDir.*?Copy-Item -LiteralPath \$PptxPath -Destination \(Join-Path \$backupDir') {
         throw "Explicit output path must copy the source into the original backup directory: $stageScript"
     }
+}
+$brandContent = Get-Content -LiteralPath (Join-Path $root 'tools\Apply-PptxBrandVisualRefresh.ps1') -Raw -Encoding UTF8
+if ($brandContent -notmatch '(?s)\$presentationToPublish\s*=.*?Copy-Item -LiteralPath \$PptxPath -Destination \$presentationToPublish.*?Presentations\.Open\(\$presentationToPublish.*?if \(-not \(Test-PptxPackageIntegrity -Path \$presentationToPublish\)\).*?Move-Item -LiteralPath \$presentationToPublish -Destination \$workingPptx') {
+    throw 'Brand refresh must write a verified temporary copy and publish it only on success.'
+}
+if ($brandContent -match '\.brand\.pdf|SaveAs\(\$pdfPath') { throw 'Brand refresh must not create a stage PDF that could be mistaken for final delivery.' }
+$workflowContent = Get-Content -LiteralPath (Join-Path $root 'tools\Invoke-PhysicsPptWorkflow.ps1') -Raw -Encoding UTF8
+if ($workflowContent -notmatch '(?s)try\s*\{\s*\$root\s*=\s*Split-Path -Parent \$PSScriptRoot.*?\}\s*catch\s*\{\s*if \(-not \[string\]::IsNullOrWhiteSpace\(\$workflowFailurePath\)\).*?Write-WorkflowFailureReceipt.*?throw\s*\}') {
+    throw 'Workflow must persist a failure receipt for failures after the report directory exists.'
 }
 $visualFixContent = Get-Content -LiteralPath (Join-Path $root 'tools\Apply-PptxVisualAuditFixes.ps1') -Raw -Encoding UTF8
 if ($visualFixContent -notmatch '(?s)Copy-Item -LiteralPath \$InputPath -Destination \$OutputPath.*?catch \{.*?Remove-Item -LiteralPath \$OutputPath') {

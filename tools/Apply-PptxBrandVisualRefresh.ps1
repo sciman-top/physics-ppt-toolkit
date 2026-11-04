@@ -92,7 +92,7 @@ if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
     if ($OutputPath -ieq $PptxPath -or [IO.Path]::GetExtension($OutputPath) -ine $sourceExtension) { throw 'Output must be a distinct path retaining the source format.' }
     $deliveryRoot = Split-Path -Parent (Split-Path -Parent $OutputPath)
     $deliveryDir = Split-Path -Parent $OutputPath
-    $pageImageDir = Join-Path $deliveryDir '页面图片'
+    $pageImageDir = Join-Path $deliveryRoot '04_品牌页面图片'
     $reportDir = Join-Path $deliveryRoot '00_检查报告'
     $backupDir = Join-Path $deliveryRoot '03_原始备份'
     foreach ($dir in @($deliveryDir, $pageImageDir, $reportDir, $backupDir)) {
@@ -100,11 +100,12 @@ if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
     }
     Copy-Item -LiteralPath $PptxPath -Destination (Join-Path $backupDir ([System.IO.Path]::GetFileName($PptxPath))) -Force
     $workingPptx = $OutputPath
-    Copy-Item -LiteralPath $PptxPath -Destination $workingPptx -Force
+    if (Test-Path -LiteralPath $workingPptx) { throw "OutputPath already exists; refusing to overwrite evidence: $workingPptx" }
+    $presentationToPublish = Join-Path $deliveryDir ('.' + (Split-Path -Leaf $OutputPath) + '.pending-' + [Guid]::NewGuid().ToString('N'))
 } else {
     $deliveryRoot = New-VersionedDeliveryRoot -Stem $stem -ReportsRoot $OutputRoot
     $deliveryDir = Join-Path $deliveryRoot '01_交付物'
-    $pageImageDir = Join-Path $deliveryDir '页面图片'
+    $pageImageDir = Join-Path $deliveryRoot '04_品牌页面图片'
     $reportDir = Join-Path $deliveryRoot '00_检查报告'
     $backupDir = Join-Path $deliveryRoot '03_原始备份'
     foreach ($dir in @($deliveryDir, $pageImageDir, $reportDir, $backupDir)) {
@@ -113,8 +114,10 @@ if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
     Copy-Item -LiteralPath $PptxPath -Destination (Join-Path $backupDir "$stem$sourceExtension") -Force
 
     $workingPptx = Join-Path $deliveryDir "$stem.brand$sourceExtension"
-    Copy-Item -LiteralPath $PptxPath -Destination $workingPptx -Force
+    $presentationToPublish = Join-Path $deliveryDir ('.' + $stem + '.brand.pending-' + [Guid]::NewGuid().ToString('N') + $sourceExtension)
 }
+if (Test-Path -LiteralPath $presentationToPublish) { throw "Brand staging path already exists; refusing to overwrite evidence: $presentationToPublish" }
+Copy-Item -LiteralPath $PptxPath -Destination $presentationToPublish
 
 # --- palette: named roles resolved to hex by Resolve-ColorSpecToRgbLong ----------
 # DividerRed/DividerBlue ARE the sanctioned config palette (emphasisRed /
@@ -787,7 +790,7 @@ $slideCount = 0
 $slideRecords = New-Object System.Collections.Generic.List[object]
 try {
     $presentation = Invoke-WithComRetry -Action {
-        $application.Presentations.Open($workingPptx, $false, $false, $false)
+        $application.Presentations.Open($presentationToPublish, $false, $false, $false)
     }
     $slideCount = $presentation.Slides.Count
     Write-Host "Opened $workingPptx with $slideCount slides."
@@ -844,19 +847,18 @@ try {
 
     Invoke-WithComRetry -Action { $presentation.Save() } | Out-Null
 
-    foreach ($record in $slideRecords) {
+    $renderedSlides = @($slideRecords | Where-Object { $_.Status -eq 'Ok' })
+    foreach ($record in $renderedSlides) {
         $pngPath = Join-Path $pageImageDir ('slide-{0:d2}.png' -f $record.Slide)
         Invoke-WithComRetry -Action {
             $presentation.Slides.Item($record.Slide).Export($pngPath, 'PNG', 1536, 864)
         }.GetNewClosure() | Out-Null
     }
 
-    $pdfPath = Join-Path $deliveryDir "$stem.brand.pdf"
-    Invoke-WithComRetry -Action { $presentation.SaveAs($pdfPath, 32) } | Out-Null  # ppSaveAsPDF
-    Write-Host "Exported PDF: $pdfPath"
+    # Brand is an intermediate style stage. Its PDF is neither the final
+    # highlighted deliverable nor needed to export the final copy later.
 } catch {
     $slideRecords.Add([pscustomobject]@{ Slide = 0; Role = '(presentation)'; Actions = $_.Exception.Message; Status = 'Failed' }) | Out-Null
-    if (Test-Path -LiteralPath $workingPptx) { Remove-Item -LiteralPath $workingPptx -Force -ErrorAction SilentlyContinue }
 } finally {
     if ($null -ne $presentation) {
         try { $presentation.Close() } catch { }
@@ -865,6 +867,27 @@ try {
     if ($null -ne $application) {
         try { Stop-PowerPointApplicationIfIdle -Application $application } catch { }
         Release-ComObjectSafe $application
+    }
+    $brandStageFailed = @($slideRecords | Where-Object { $_.Status -eq 'Failed' }).Count -gt 0
+    if ($brandStageFailed -and (Test-Path -LiteralPath $presentationToPublish)) {
+        # Keep failed work only in the explicit diagnostic copy while a
+        # downstream consumer can never mistake it for a completed stage.
+        $diagnosticCopy = Join-Path $reportDir ('brand-failed-' + [IO.Path]::GetFileName($presentationToPublish))
+        Move-Item -LiteralPath $presentationToPublish -Destination $diagnosticCopy -Force
+    } elseif ($brandStageFailed -and (Test-Path -LiteralPath $workingPptx) -and
+        (Get-FileSha256OrNull -Path $workingPptx) -eq (Get-FileSha256OrNull -Path $PptxPath)) {
+        # Explicit -OutputPath failed before a usable stage was published.
+        # Remove only the exact byte copy created by this invocation; no
+        # downstream consumer may mistake it for a completed brand stage.
+        Remove-Item -LiteralPath $workingPptx -Force
+    } elseif ((Test-Path -LiteralPath $presentationToPublish) -and $presentationToPublish -ne $workingPptx) {
+        if (Test-Path -LiteralPath $workingPptx) { throw "Brand output target already exists; refusing to overwrite evidence: $workingPptx" }
+        if (-not (Test-PptxPackageIntegrity -Path $presentationToPublish)) {
+            $diagnosticCopy = Join-Path $reportDir ('brand-failed-' + [IO.Path]::GetFileName($presentationToPublish))
+            Move-Item -LiteralPath $presentationToPublish -Destination $diagnosticCopy -Force
+            throw "Brand refresh produced an incomplete PPTX: $diagnosticCopy"
+        }
+        Move-Item -LiteralPath $presentationToPublish -Destination $workingPptx
     }
 }
 
@@ -900,7 +923,7 @@ $manifest = [pscustomobject]@{
     sourceSha256  = $inputHash
     output        = $workingPptx
     outputSha256  = $outputHash
-    pdf           = (Join-Path $deliveryDir "$stem.brand.pdf")
+    pdf           = $null
     deliveryRoot  = $deliveryRoot
     deliveryStatus = if (@($slideRecords | Where-Object { $_.Status -eq 'Failed' }).Count -gt 0) { 'Failed' } else { 'PendingManualVisualReview' }
     assets        = [pscustomobject]@{
@@ -927,7 +950,6 @@ $summaryLines = @(
     "- 生成时间：$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')",
     "- 输入：$PptxPath",
     "- 交付物：$workingPptx",
-    "- PDF：$(Join-Path $deliveryDir "$stem.brand.pdf")",
     "- 页面图片：$pageImageDir",
     "- 版本目录：$deliveryRoot（本次交付：$(Split-Path -Leaf $deliveryRoot)）",
     "- 页面角色：$($roleSummary -join '，')",
@@ -944,7 +966,7 @@ $summaryLines = @(
     '- 原空白页保持原样（不加背景、不加图标）',
     '',
     '## 复核方式',
-    '- 逐页 PNG（1536x864）+ PDF 已生成，需人工/视觉模型复核后才能标记交付状态',
+    '- 逐页 PNG（1536x864）已生成；品牌阶段不生成 PDF，正式 PDF 由全链最终副本导出',
     '- review-manifest.json 记录输入/输出 SHA256、素材指纹与每页动作清单',
     ''
 )

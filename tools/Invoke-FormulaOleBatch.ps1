@@ -189,8 +189,10 @@ function Measure-FormulaOmmlRenderBounds {
         $powerPoint = $null
         $presentation = $null
         try {
-            $powerPoint = New-Object -ComObject PowerPoint.Application
-            $presentation = $powerPoint.Presentations.Open($fullPath, $true, $false, $false)
+            $powerPoint = Invoke-WithComRetry -MaxRetries 3 -DelayMs 1200 -Action { New-PowerPointApplication }
+            $presentation = Invoke-WithComRetry -MaxRetries 3 -DelayMs 1200 -Action {
+                $powerPoint.Presentations.Open($fullPath, $true, $false, $false)
+            }.GetNewClosure()
             $rows = New-Object System.Collections.Generic.List[object]
             foreach ($slide in @($presentation.Slides)) {
                 foreach ($shape in @($slide.Shapes)) {
@@ -557,11 +559,18 @@ try {
                 $presentation = Invoke-WithComRetry -MaxRetries 3 -DelayMs 1200 -Action {
                     $powerPoint.Presentations.Open([System.IO.Path]::GetFullPath($outputPptx), $true, $false, $false)
                 }.GetNewClosure()
+                $pdfFullPath = [System.IO.Path]::GetFullPath($finalPdfPath)
+                if (Test-Path -LiteralPath $pdfFullPath) { throw "Final PDF target already exists; refusing to overwrite stale evidence: $pdfFullPath" }
+                $sameNamePptx = [System.IO.Path]::ChangeExtension($pdfFullPath, [System.IO.Path]::GetExtension($outputPptx))
+                $sameNameExisted = Test-Path -LiteralPath $sameNamePptx
+                $sameNameHash = if ($sameNameExisted) { Get-FileSha256 -Path $sameNamePptx } else { '' }
                 Invoke-WithComRetry -MaxRetries 3 -DelayMs 1200 -Action {
-                    $presentation.SaveAs([System.IO.Path]::GetFullPath($finalPdfPath), 32)  # ppSaveAsPDF
-                }.GetNewClosure() | Out-Null
-                if (-not (Test-Path -LiteralPath $finalPdfPath) -or (Get-Item -LiteralPath $finalPdfPath).Length -le 0) {
-                    throw "PowerPoint did not create a non-empty final PDF: $finalPdfPath"
+                    $presentation.ExportAsFixedFormat($pdfFullPath, 2, 0, 0, 0, 0, 0, 0) | Out-Null
+                }.GetNewClosure()
+                $pdfHeader = if (Test-Path -LiteralPath $pdfFullPath -PathType Leaf) { $bytes = [IO.File]::ReadAllBytes($pdfFullPath); if ($bytes.Length -ge 5) { [Text.Encoding]::ASCII.GetString($bytes, 0, 5) } else { '' } } else { '' }
+                if ($pdfHeader -cne '%PDF-') { throw "PowerPoint did not create a valid final PDF: $finalPdfPath" }
+                if ((Test-Path -LiteralPath $sameNamePptx) -and ((-not $sameNameExisted) -or (Get-FileSha256 -Path $sameNamePptx) -cne $sameNameHash)) {
+                    throw "Unexpected same-name presentation was created during PDF export: $sameNamePptx"
                 }
                 break
             } catch {
