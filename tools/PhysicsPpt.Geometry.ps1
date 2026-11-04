@@ -8,8 +8,9 @@
   geometry maps, and the post-save source-geometry restore. Works entirely on
   the PPTX package and never touches PowerPoint COM. Host contract for the
   dot-sourcing script: define Add-ReportRow and initialize
-  $script:IntentionalGeometryShapes plus $script:PresentationSlidePartMap
-  before these functions run; both state bags stay owned by
+  $script:IntentionalGeometryShapesByFile plus
+  $script:CurrentIntentionalGeometryScope and $script:PresentationSlidePartMap
+  before these functions run; all state bags stay owned by
   Normalize-PhysicsPpt.ps1. No top-level statements in this file.
 #>
 function Get-AutoSizeGeometryDrift {
@@ -20,13 +21,20 @@ function Get-AutoSizeGeometryDrift {
 }
 
 function Add-IntentionalGeometryChange {
+    param([int]$SlideNumber, [int]$ShapeId, [string]$Reason, [string]$ScopeKey)
+    if ($SlideNumber -le 0 -or $ShapeId -le 0) { return }
+    # Bookkeeping is scoped per source file: a serialized multi-file batch
+    # must not let deck A's intentional keys suppress deck B's deferred
+    # restore for same part-name|id collisions, nor leak into its verify.
+    if ([string]::IsNullOrWhiteSpace($ScopeKey)) { $ScopeKey = $script:CurrentIntentionalGeometryScope }
+    if ([string]::IsNullOrWhiteSpace($ScopeKey)) {
+        throw "Add-IntentionalGeometryChange: no intentional-geometry scope is active; refusing to book a change that could leak into another deck's restore."
+    }
     # Keyed by PHYSICAL slide part name + shapeId so the XML geometry
     # restore pass (which iterates physical part names) agrees on the key
     # domain. $SlideNumber arrives as the COM presentation order and is
     # translated through the sldIdLst map; the creation-order slideN.xml
     # number drifts from the presentation order after reorders/deletes.
-    param([int]$SlideNumber, [int]$ShapeId, [string]$Reason)
-    if ($SlideNumber -le 0 -or $ShapeId -le 0) { return }
     $partName = $null
     if ($null -ne $script:PresentationSlidePartMap -and $script:PresentationSlidePartMap.ContainsKey([int]$SlideNumber)) {
         $partName = [string]$script:PresentationSlidePartMap[[int]$SlideNumber]
@@ -38,7 +46,7 @@ function Add-IntentionalGeometryChange {
         # before the caller moves the shape instead of writing a dead key.
         throw "Add-IntentionalGeometryChange: no slide part map entry for presentation slide $SlideNumber; refusing to book an unverifiable intentional geometry change (shape $ShapeId, reason '$Reason')."
     }
-    $script:IntentionalGeometryShapes["$partName|$ShapeId"] = $Reason
+    $script:IntentionalGeometryShapesByFile[$ScopeKey]["$partName|$ShapeId"] = $Reason
 }
 
 function Get-GeometrySlideXmlNames {
@@ -183,14 +191,16 @@ function Restore-SourceShapeGeometry {
     param(
         [string]$SourcePath,
         [string]$OutputPath,
-        [string]$FileName
+        [string]$FileName,
+        [string]$IntentionalScopeKey = '',
+        $PartMap = $null
     )
     $sourceMap = Get-SourceShapeGeometryMap -SourcePath $SourcePath
     if ($sourceMap.Count -eq 0) { return 0 }
     $attempts = 84
     for ($attempt = 1; $attempt -le $attempts; $attempt++) {
         try {
-            return Restore-SourceShapeGeometryOnce -OutputPath $OutputPath -FileName $FileName -SourceMap $sourceMap
+            return Restore-SourceShapeGeometryOnce -OutputPath $OutputPath -FileName $FileName -SourceMap $sourceMap -IntentionalScopeKey $IntentionalScopeKey -PartMap $PartMap -SourceFilePath $SourcePath
         } catch {
             if ($attempt -ge $attempts) { throw }
             if (-not (Test-GeometryRestoreLockConflict -Exception $_.Exception)) { throw }
@@ -204,18 +214,30 @@ function Restore-SourceShapeGeometryOnce {
     param(
         [string]$OutputPath,
         [string]$FileName,
-        $SourceMap
+        $SourceMap,
+        [string]$IntentionalScopeKey = '',
+        $PartMap = $null,
+        [string]$SourceFilePath = ''
     )
     $sourceMap = $SourceMap
     if ($sourceMap.Count -eq 0) { return 0 }
     # Report rows use presentation order everywhere else in the evidence CSV;
-    # translate physical part names back through the host-owned map so the
-    # page numbers stay comparable for reordered decks.
+    # translate physical part names back through the PER-FILE map captured at
+    # enqueue time (the host-level map is overwritten by every later file in
+    # a serialized batch, so deferred heals would report the wrong pages).
     $partToPresentationOrder = @{}
-    if ($null -ne $script:PresentationSlidePartMap) {
-        foreach ($order in @($script:PresentationSlidePartMap.Keys)) {
-            $partToPresentationOrder[[string]$script:PresentationSlidePartMap[$order]] = [int]$order
+    if ($null -ne $PartMap) {
+        foreach ($order in @($PartMap.Keys)) {
+            $partToPresentationOrder[[string]$PartMap[$order]] = [int]$order
         }
+    }
+    # Intentional-change keys are scoped to the file that booked them; a
+    # serialized batch must not let deck A's keys suppress deck B's restore.
+    $intentionalKeys = @()
+    if (-not [string]::IsNullOrWhiteSpace($IntentionalScopeKey) -and
+        $null -ne $script:IntentionalGeometryShapesByFile -and
+        $script:IntentionalGeometryShapesByFile.ContainsKey($IntentionalScopeKey)) {
+        $intentionalKeys = @($script:IntentionalGeometryShapesByFile[$IntentionalScopeKey].Keys)
     }
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $zip = $null
@@ -238,7 +260,7 @@ function Restore-SourceShapeGeometryOnce {
                 if (-not $sourceMap.ContainsKey($key)) { continue }
                 $sourceGeometry = $sourceMap[$key]
                 if ($null -eq $sourceGeometry) { continue }
-                if ($script:IntentionalGeometryShapes.ContainsKey($key)) { continue }
+                if ($intentionalKeys -contains $key) { continue }
                 $off = $shape.Xfrm.SelectSingleNode('./*[local-name()="off"]')
                 $ext = $shape.Xfrm.SelectSingleNode('./*[local-name()="ext"]')
                 if ($null -eq $off -or $null -eq $ext) { continue }
@@ -253,7 +275,7 @@ function Restore-SourceShapeGeometryOnce {
                 $ext.SetAttribute('cy', $sourceGeometry.Cy)
                 $after = '{0}|{1}|{2}|{3}' -f $sourceGeometry.X, $sourceGeometry.Y, $sourceGeometry.Cx, $sourceGeometry.Cy
                 $reportSlideNumber = if ($partToPresentationOrder.ContainsKey($entryName)) { $partToPresentationOrder[$entryName] } else { $slideNumber }
-                Add-ReportRow -File $FileName -SlideNumber $reportSlideNumber -ShapeName "shapeId=$($shape.ShapeId)" `
+                Add-ReportRow -File $FileName -FilePath $SourceFilePath -SlideNumber $reportSlideNumber -ShapeName "shapeId=$($shape.ShapeId)" `
                     -Issue 'AutoSizeDeferredReflowHealed' `
                     -Details 'PowerPoint re-grew the AutoSize bounds during SaveAs layout; the saved slide XML was restored to the exact source xfrm values.' `
                     -RuleId 'SAFETY.GEOMETRY.AUTOSIZE' -Property 'xfrm/off/ext' -Before $before -After $after `
@@ -281,11 +303,14 @@ function Restore-SourceShapeGeometryOnce {
                 } finally {
                     $stream.Dispose()
                 }
-                $entry.Delete()
-                $newEntry = $zip.CreateEntry($entryName)
-                $entryStream = $newEntry.Open()
+                # Overwrite the existing entry in place (Update mode replaces
+                # the content when the stream is disposed): the Delete->Create
+                # dance left a window where a mid-write failure stranded the
+                # package without its slide part.
+                $entryStream = $entry.Open()
                 try {
                     $entryStream.Write($xmlBytes, 0, $xmlBytes.Length)
+                    $entryStream.SetLength($xmlBytes.Length)
                 } finally {
                     $entryStream.Dispose()
                 }
@@ -304,7 +329,7 @@ function Restore-SourceShapeGeometryOnce {
         $verifyDoc = $null
         $map2 = Get-SourceShapeGeometryMap -SourcePath $OutputPath
         foreach ($key in @($sourceMap.Keys)) {
-            if ($script:IntentionalGeometryShapes.ContainsKey($key)) { continue }
+            if ($intentionalKeys -contains $key) { continue }
             $expected = $sourceMap[$key]
             if ($null -eq $expected -or -not $map2.ContainsKey($key) -or $null -eq $map2[$key]) { continue }
             $actual = $map2[$key]

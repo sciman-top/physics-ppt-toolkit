@@ -67,7 +67,13 @@ param(
     [int]$FileRetryDelayMs = 2000,
 
     [ValidateRange(1, 8)]
-    [int]$DegreeOfParallelism = 1
+    [int]$DegreeOfParallelism = 1,
+
+    # Set by the parallel parent to the batch-level safe stem it already
+    # computed. Without it a child whose RootPath is a single file derives a
+    # different output stem than the sequential path, so serial and parallel
+    # runs would fight over differently named outputs and never share caches.
+    [string]$SafeNameOverride = ''
 )
 
 Set-StrictMode -Version Latest
@@ -291,12 +297,15 @@ $script:DisableAdvanceOnClick = [bool](Get-ConfigValue 'rules' 'disableAdvanceOn
 # large batches do not re-enumerate every installed family per file.
 $script:ConfiguredFontCheckCache = $null
 # Shapes whose geometry this run is allowed to change on purpose (width
-# expansion / answer alignment when config enables them), keyed
-# '<slideNumber>|<shapeId>'. Everything else is restored to the source xfrm
-# after SaveAs: PowerPoint re-runs AutoSize layout asynchronously and can
-# re-grow COM-restored bounds before the package is serialized, so the
-# file-level restore is the only deterministic conservation point.
-$script:IntentionalGeometryShapes = @{}
+# expansion / answer alignment when config enables them), bucketed per source
+# file and keyed '<physical part name>|<shapeId>'. Everything else is restored
+# to the source xfrm after SaveAs: PowerPoint re-runs AutoSize layout
+# asynchronously and can re-grow COM-restored bounds before the package is
+# serialized, so the file-level restore is the only deterministic conservation
+# point. Per-file bucketing keeps a serialized batch from letting deck A's
+# keys suppress deck B's restore on same part-name|id collisions.
+$script:IntentionalGeometryShapesByFile = @{}
+$script:CurrentIntentionalGeometryScope = ''
 $script:PresentationSlidePartMap = @{}
 # Per-file restore requests, executed after PowerPoint quits (the SaveAs
 # target stays locked by the PowerPoint process until then).
@@ -349,6 +358,26 @@ function Add-ReportRow {
         RiskLevel = $RiskLevel
         Result = $Result
     }) | Out-Null
+}
+
+# Single source of truth for "this report row means the file failed": the
+# sequential cache-blessing decision and the parallel parent's per-file
+# verdict MUST agree, or the same run reports success in one mode and failure
+# in the other.
+$script:FileFailureShapedIssues = @(
+    'PdfExportFailed', 'ImagesExportFailed', 'ImageExportCountMismatch',
+    'SlidePngExportFailed', 'ShapeEnumerationCorrupted',
+    'PowerPointBusyOrRejectedCall', 'FileInUseOrSharingViolation',
+    'PowerPointComNotRegistered', 'FileNotFoundOrUnavailable',
+    'PowerPointComFailure', 'UnhandledFailure'
+)
+function Test-FileFailureShapedRow {
+    param($Row)
+    if ($null -eq $Row) { return $false }
+    if ([string]$Row.Result -eq 'Failed') { return $true }
+    $issue = [string]$Row.Issue
+    if ($issue -in $script:FileFailureShapedIssues) { return $true }
+    return ($issue -match '(?i)(Failed|Failure)$')
 }
 
 function Get-NormalizeSignature {
@@ -1767,8 +1796,12 @@ function Set-AutoSizeTextFontSafely {
                 }
             }
             if (-not $fittedKept) {
+                # A failed size rollback must not be reported as a clean skip:
+                # the output would keep the fitted size while the evidence CSV
+                # claims everything was restored.
+                $rollbackFailure = ''
                 if ($null -ne $fittedSize) {
-                    try { $textRange.Font.Size = $authorSize } catch { }
+                    try { $textRange.Font.Size = $authorSize } catch { $rollbackFailure = " Author size rollback failed and the fitted size ({0} pt) remains in the output: {1}" -f $fittedSize, $_.Exception.Message }
                 }
                 & $setFontFamily '' '' -Rollback
                 $Shape.Left = [single]$left
@@ -1777,9 +1810,9 @@ function Set-AutoSizeTextFontSafely {
                 $Shape.Height = [single]$height
                 Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
                     -Issue 'TextStyleSkippedContentFitRisk' `
-                    -Details ("Target font {0}/{1} produced text bounds {2} against protected shape {3:N1}x{4:N1}; original bounds were {5}. Font and geometry were rolled back." -f $latinTarget, $script:Style.FontChinese, $targetBoundsText, $width, $height, $beforeBoundsText) `
+                    -Details ("Target font {0}/{1} produced text bounds {2} against protected shape {3:N1}x{4:N1}; original bounds were {5}. Font and geometry were rolled back.{6}" -f $latinTarget, $script:Style.FontChinese, $targetBoundsText, $width, $height, $beforeBoundsText, $rollbackFailure) `
                     -RuleId 'SAFETY.GEOMETRY.AUTOSIZE' -Property 'FontName/NameFarEast' -Before $beforeSummary -After $beforeSummary `
-                    -RiskLevel 'R0' -Result 'Skipped'
+                    -RiskLevel 'R0' -Result $(if ([string]::IsNullOrWhiteSpace($rollbackFailure)) { 'Skipped' } else { 'Failed' })
                 return
             }
             $fittedDrift = Get-AutoSizeGeometryDrift -Shape $Shape -Left $left -Top $top -Width $width -Height $height
@@ -1927,7 +1960,10 @@ function Set-SectionTitleTextStyle {
         # bold or color states (mixed runs report -2 / empty), rewriting would
         # flatten a deliberate emphasis pattern, so only the uniform case is
         # normalized.
-        $mixedEmphasis = ($beforeBold -eq [string]$script:MsoMixed) -or [string]::IsNullOrEmpty($beforeColor)
+        # Mixed color runs report the msoColorMixed sentinel (-2147483648),
+        # not an empty string — the same read pattern at Set-TextRangeStyle
+        # checks for it explicitly (16.1 slide14 flattening incident).
+        $mixedEmphasis = ($beforeBold -eq [string]$script:MsoMixed) -or [string]::IsNullOrEmpty($beforeColor) -or ([double]$beforeColor -eq $script:MsoColorMixed)
         if ($mixedEmphasis) {
             Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $Shape.Name -Issue 'SectionTitleStyleSkippedMixedEmphasis' -Details 'Section title mixes bold/color emphasis; the author pattern is preserved.' `
                 -RuleId 'STYLE.SECTION_TITLE.EMPHASIS' -Property 'Bold/Color' -Before ("$beforeBold|$beforeColor") -RiskLevel 'R0' -Result 'Skipped'
@@ -2661,7 +2697,10 @@ function Normalize-Presentation {
     # Report rows appended after this point belong to this file; the failure
     # re-check below scans only that slice instead of every accumulated row.
     $fileRowStartIndex = $script:ReportRows.Count
-    $safeName = Get-RelativePathSafeStem -RootPath $InputPath -TargetPath $File.FullName
+    # Intentional-geometry bookkeeping is scoped to this source file so the
+    # deferred restore only honors keys booked during THIS deck's COM pass.
+    $script:CurrentIntentionalGeometryScope = $File.FullName
+    $safeName = if (-not [string]::IsNullOrWhiteSpace($SafeNameOverride)) { $SafeNameOverride } else { Get-RelativePathSafeStem -RootPath $InputPath -TargetPath $File.FullName }
     $outFile = Join-Path $OutputDir ($safeName + '.normalized' + $File.Extension)
     $pdfFile = Join-Path $OutputDir ($safeName + '.normalized.pdf')
     $cachePath = $outFile + '.cache.json'
@@ -2701,8 +2740,13 @@ function Normalize-Presentation {
         if ($null -ne $cache -and $null -ne $cache.PSObject.Properties['geometryRestore']) {
             $cacheGeometryRestored = [string]$cache.geometryRestore -eq 'completed'
         }
+        # Identity rests on content, not location: signature covers source +
+        # config/script revision, outputSha256/pdfSha256/pageHashes cover the
+        # artifacts themselves. The old outputPath equality made parallel runs
+        # permanently miss (every worker dir name is a new GUID), forcing a
+        # full PowerPoint pass on each rerun.
         if ($null -ne $cache -and $cacheOutputReady -and [string]$cache.signature -eq $signature.Signature -and
-            [string]$cache.outputPath -eq $outFile -and $cacheArtifactsReady -and $cacheGeometryRestored) {
+            $cacheArtifactsReady -and $cacheGeometryRestored) {
             Write-Verbose "Skip (up-to-date): $($File.Name)"
             Add-ReportRow -File $File.Name -FilePath $File.FullName -SlideNumber 0 -ShapeName '(presentation)' -Issue 'SkippedUpToDate' -Details $outFile
             return
@@ -2845,7 +2889,7 @@ function Normalize-Presentation {
             $fileFailureIssues = @(
                 for ($rowIndex = $fileRowStartIndex; $rowIndex -lt $script:ReportRows.Count; $rowIndex++) {
                     $sliceRow = $script:ReportRows[$rowIndex]
-                    if ($sliceRow.FilePath -eq $File.FullName -and $sliceRow.Issue -in @('PdfExportFailed', 'ImagesExportFailed', 'ImageExportCountMismatch', 'SlidePngExportFailed', 'ShapeEnumerationCorrupted')) { $sliceRow }
+                    if ($sliceRow.FilePath -eq $File.FullName -and (Test-FileFailureShapedRow $sliceRow)) { $sliceRow }
                 }
             )
             $cacheImageDir = if ([string]::IsNullOrWhiteSpace($ImageOutputDir)) { '' } else { Join-Path $ImageOutputDir $safeName }
@@ -2882,10 +2926,15 @@ function Normalize-Presentation {
     # SaveAs target locked until the application quits, so the restore cannot
     # touch the package while COM work is still in flight. Register and defer.
     if (-not $ReportOnly -and (Test-Path -LiteralPath $outFile)) {
+        # ScopeKey + SlidePartMap snapshot pin the deferred restore to THIS
+        # file: the host-level part map is overwritten by every later file in
+        # a serialized batch, and the intentional-geometry keys are per-deck.
         $script:PendingGeometryRestores.Add([pscustomobject]@{
             SourcePath = $File.FullName
             OutputPath = $outFile
             FileName = $File.Name
+            ScopeKey = $File.FullName
+            SlidePartMap = $script:PresentationSlidePartMap.Clone()
         }) | Out-Null
     }
 }
@@ -2923,7 +2972,8 @@ if ($DegreeOfParallelism -gt 1 -and $files.Count -gt 1) {
 
     function Start-NextJob {
         param([System.IO.FileInfo]$FileItem)
-        $workerName = '{0}_{1}' -f (Get-RelativePathSafeStem -RootPath $InputPath -TargetPath $FileItem.FullName), ([Guid]::NewGuid().ToString('N'))
+        $childSafeName = Get-RelativePathSafeStem -RootPath $InputPath -TargetPath $FileItem.FullName
+        $workerName = '{0}_{1}' -f $childSafeName, ([Guid]::NewGuid().ToString('N'))
         $workerOutputDir = Join-Path $parallelTempRoot $workerName
         New-Item -ItemType Directory -Path $workerOutputDir -Force | Out-Null
         $childArgs = @(
@@ -2931,7 +2981,10 @@ if ($DegreeOfParallelism -gt 1 -and $files.Count -gt 1) {
             '-File', $scriptPath,
             '-InputPath', $FileItem.FullName,
             '-OutputDir', $workerOutputDir,
-            '-DegreeOfParallelism', '1'
+            '-DegreeOfParallelism', '1',
+            # Same output stem as the sequential path: serial/parallel caches
+            # and outputs stay interchangeable instead of forking by name.
+            '-SafeNameOverride', $childSafeName
         )
         if ($ReportOnly)    { $childArgs += '-ReportOnly' }
         if ($NoBackup)      { $childArgs += '-NoBackup' }
@@ -3000,18 +3053,11 @@ if ($DegreeOfParallelism -gt 1 -and $files.Count -gt 1) {
         }
 
         # The child normalizer records per-file failures in its report but does
-        # not exit non-zero unless -FailOnError is supplied.  Treat explicit
-        # Failed results and failure-shaped issue IDs as a failed file so the
-        # parent summary cannot report a false success.
-        $childFailureRows = @($childRows | Where-Object {
-            ([string]$_.Result -eq 'Failed') -or
-            ([string]$_.Issue -match '(?i)(Failed|Failure)$') -or
-            ([string]$_.Issue -in @(
-                'PowerPointBusyOrRejectedCall', 'FileInUseOrSharingViolation',
-                'PowerPointComNotRegistered', 'FileNotFoundOrUnavailable',
-                'PowerPointComFailure', 'UnhandledFailure'
-            ))
-        })
+        # not exit non-zero unless -FailOnError is supplied.  The verdict uses
+        # the SAME failure-shape predicate as the sequential cache decision so
+        # a given report cannot mean success in one mode and failure in the
+        # other; the parent summary cannot report a false success.
+        $childFailureRows = @($childRows | Where-Object { Test-FileFailureShapedRow $_ })
 
         $workerBackupDir = Join-Path $WorkerOutputDir '_backup_originals'
         if (Test-Path -LiteralPath $workerBackupDir) {
@@ -3193,7 +3239,7 @@ $sw.Stop()
 foreach ($pending in $script:PendingGeometryRestores.ToArray()) {
     $pendingCachePath = "$($pending.OutputPath).cache.json"
     try {
-        $healedCount = Restore-SourceShapeGeometry -SourcePath $pending.SourcePath -OutputPath $pending.OutputPath -FileName $pending.FileName
+        $healedCount = Restore-SourceShapeGeometry -SourcePath $pending.SourcePath -OutputPath $pending.OutputPath -FileName $pending.FileName -IntentionalScopeKey $pending.ScopeKey -PartMap $pending.SlidePartMap
         if ($healedCount -gt 0) {
             Add-ReportRow -File $pending.FileName -FilePath $pending.SourcePath -SlideNumber 0 -ShapeName '(presentation)' -Issue 'GeometryConservedByXmlRestore' -Details "$healedCount shape(s) re-grown by deferred AutoSize layout at SaveAs were restored to the source geometry."
         }
