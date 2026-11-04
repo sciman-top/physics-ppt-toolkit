@@ -134,9 +134,11 @@ if (-not (Test-Path -LiteralPath $sourcePptx -PathType Leaf) -or ((Get-FileSha25
     # by the manifest basename and exact SHA-256; a same-name file is never
     # accepted on name alone.
     $searchRoot = Split-Path -Parent $PSScriptRoot
-    $matches = @(Get-ChildItem -LiteralPath (Join-Path $searchRoot 'reports') -Recurse -File -Filter ([IO.Path]::GetFileName($manifestInputPath)) -ErrorAction SilentlyContinue | Where-Object { (Get-FileSha256Hex -Path $_.FullName).ToLowerInvariant() -eq $expectedInputSha } | Sort-Object FullName)
-    if ($matches.Count -eq 0) { throw "GoldSet source PPTX is missing or hash-mismatched, and no exact-hash report backup was found: $manifestInputPath" }
-    $sourcePptx = $matches[0].FullName
+    # Not named $matches: that is a read-only automatic variable populated by
+    # -match, and shadowing it here would poison any later regex in this file.
+    $hashMatches = @(Get-ChildItem -LiteralPath (Join-Path $searchRoot 'reports') -Recurse -File -Filter ([IO.Path]::GetFileName($manifestInputPath)) -ErrorAction SilentlyContinue | Where-Object { (Get-FileSha256Hex -Path $_.FullName).ToLowerInvariant() -eq $expectedInputSha } | Sort-Object FullName)
+    if ($hashMatches.Count -eq 0) { throw "GoldSet source PPTX is missing or hash-mismatched, and no exact-hash report backup was found: $manifestInputPath" }
+    $sourcePptx = $hashMatches[0].FullName
 }
 
 $records = New-Object System.Collections.Generic.List[object]

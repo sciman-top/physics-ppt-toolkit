@@ -117,14 +117,20 @@ function Get-NormalizedFormulaText {
 
 function Get-PhysicsTokenRole {
     # Single source of truth for formula token classification (tokenizer §4.1
-    # roles). Export-FormulaOmmlCandidates.ps1 keeps a same-name wrapper in
-    # its own file because the toolkit gate extracts and executes the parser
-    # from there; the unit and operator tables below must not be forked.
+    # roles). The parser's Get-FormulaTokenRole wrapper (PhysicsPpt.Formula.ps1)
+    # and the toolkit gate both delegate here; the unit and operator tables
+    # below must not be forked.
     param([string]$Token)
     if ($Token -cmatch '^[0-9]+(?:\.[0-9]+)?$') { return 'Number' }
     if ($Token -cmatch '^[\u3400-\u9FFF]$') { return 'Chinese' }
     if ($Token -cmatch '^[A-Za-z]+$' -or $Token -cmatch '^[\u0370-\u03FF]$') {
-        if ($Token -in @('J', 'kg', 'Pa', 'N', 'W', 'Hz', '℃')) { return 'Unit' }
+        # Unit table is evidence-based and deliberately minimal: a token here
+        # renders upright everywhere, so it must never collide with a quantity
+        # symbol in the in-registry whitelist targets. Excluded by evidence:
+        # 'V' (volume in ρ=m/V), 's' (path in v=s/t), 't' (time in t=W/P),
+        # 'g' (gravity in G=mg), 'm' (mass everywhere), 'cm' (the c·m product
+        # in Q=cmΔt), 'F'/'S' (force/area in p=F/S).
+        if ($Token -in @('J', 'kg', 'Pa', 'N', 'W', 'Hz', '℃', 'Ω', 'A')) { return 'Unit' }
         return 'Variable'
     }
     if ($Token -in @('+', '-', '−', '×', '·', '⋅', '∙', '*', '=', ',', '.', '(', ')', '<', '>', '≤', '≥', '\/')) { return 'Operator' }

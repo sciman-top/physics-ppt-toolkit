@@ -669,9 +669,18 @@ try {
             }
             if (@($targets).Count -gt 1) {
                 $extraIds = @()
+                $unresolvedExtra = $false
                 for ($t = 1; $t -lt @($targets).Count; $t++) {
                     $extraId = [int]$targets[$t].ShapeId
-                    if ($extraId -gt 0) { $extraIds += [string]$extraId }
+                    if ($extraId -gt 0) { $extraIds += [string]$extraId } else { $unresolvedExtra = $true }
+                }
+                # An extra member whose cNvPr id could not be resolved may be
+                # silently animated (the spid check below cannot see it);
+                # deleting it risks a dangling timing spid (PowerPoint repair
+                # dialog), so the merged row is refused outright.
+                if ($unresolvedExtra) {
+                    Add-ReportRow -Rows $reportRows -File $inputFileName -Slide $slideNo -Shape $name -Issue 'OleTimingDangling' -Details ("merged target cNvPr id could not be resolved; cannot prove it is unanimated; conversion skipped: {0}" -f $rowLabel)
+                    continue
                 }
                 if (@($extraIds | Where-Object { $timingSpids -contains $_ }).Count -gt 0) {
                     Add-ReportRow -Rows $reportRows -File $inputFileName -Slide $slideNo -Shape $name -Issue 'OleTimingDangling' -Details ("merged targets carry animated spids ({0}); conversion skipped: {1}" -f ($extraIds -join ','), $rowLabel)

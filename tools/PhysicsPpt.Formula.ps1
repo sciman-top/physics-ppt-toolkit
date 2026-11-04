@@ -214,12 +214,16 @@ function Parse-FormulaSequence {
             }
             # Denominator = the juxtaposed run after '/': implicit multiplication
             # stays inside it (Q/mΔt), an explicit operator ends it so the chain
-            # continues at the outer level (J/(kg·℃)×50kg×20℃).
+            # continues at the outer level (J/(kg·℃)×50kg×20℃). The linear
+            # slash escape '\/' is an explicit operator too: ending the
+            # fraction there lets the sequence level resume as ordinary
+            # division (W/t\/s) instead of hitting the atom parser's
+            # forbidden-token throw.
             $denominatorItems = New-Object System.Collections.Generic.List[object]
             do {
                 $denominatorItems.Add((Parse-FormulaAtom -Tokens $Tokens -Index $Index)) | Out-Null
             } while ($Index.Value -lt $Tokens.Count -and
-                ( [string]$Tokens[$Index.Value].Text -notin @('=', ')', '×', '·', '⋅', '∙', '*', '+', '-', '−', '<', '>', '≤', '≥') ))
+                ( [string]$Tokens[$Index.Value].Text -notin @('=', ')', '×', '·', '⋅', '∙', '*', '+', '-', '−', '<', '>', '≤', '≥', '\/') ))
             $right = if ($denominatorItems.Count -eq 1) { $denominatorItems[0] } else { [pscustomobject]@{ Kind = 'Sequence'; Items = @($denominatorItems.ToArray()) } }
             $left = if ($items.Count -eq 1) { $items[0] } else { [pscustomobject]@{ Kind = 'Sequence'; Items = @($items.ToArray()) } }
             # The fraction rejoins the current sequence instead of returning, so
