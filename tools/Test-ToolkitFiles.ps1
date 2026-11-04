@@ -77,6 +77,8 @@ $required = @(
     'tools\Compare-PptxInvariantSnapshot.ps1',
     'tools\Export-PptxAiReviewPacket.ps1',
     'tools\Import-PptxAiReviewResult.ps1',
+    'tools\Record-PhysicsPptManualReview.ps1',
+    'tools\Test-PhysicsPptManualReview.ps1',
     'tools\Test-PhysicsPptPolicy.ps1',
     'tools\Test-PhysicsPptPlayback.ps1',
     'tools\Test-PhysicsPptPlaybackShow.ps1',
@@ -788,6 +790,10 @@ if ($brandContent -match '\.brand\.pdf|SaveAs\(\$pdfPath') { throw 'Brand refres
 $workflowContent = Get-Content -LiteralPath (Join-Path $root 'tools\Invoke-PhysicsPptWorkflow.ps1') -Raw -Encoding UTF8
 if ($workflowContent -notmatch '(?s)try\s*\{\s*\$root\s*=\s*Split-Path -Parent \$PSScriptRoot.*?\}\s*catch\s*\{\s*if \(-not \[string\]::IsNullOrWhiteSpace\(\$workflowFailurePath\)\).*?Write-WorkflowFailureReceipt.*?throw\s*\}') {
     throw 'Workflow must persist a failure receipt for failures after the report directory exists.'
+}
+$manualReviewContent = Get-Content -LiteralPath (Join-Path $root 'tools\Record-PhysicsPptManualReview.ps1') -Raw -Encoding UTF8
+if ($manualReviewContent -notmatch 'Source = ''UserConfirmedBothFormats''') {
+    throw 'Human final review must be recorded separately from automatic page-pair evidence.'
 }
 $visualFixContent = Get-Content -LiteralPath (Join-Path $root 'tools\Apply-PptxVisualAuditFixes.ps1') -Raw -Encoding UTF8
 if ($visualFixContent -notmatch '(?s)Copy-Item -LiteralPath \$InputPath -Destination \$OutputPath.*?catch \{.*?Remove-Item -LiteralPath \$OutputPath') {
