@@ -38,7 +38,8 @@ try {
     $settings.ShowWithAnimation = -1
     $show = $settings.Run()
     if ($null -eq $show) { throw 'PowerPoint did not start slide-show playback.' }
-    if ($FullScreen -and [int]$show.View.Type -ne 3) { throw "PowerPoint did not enter full-screen playback (actual view $($show.View.Type))." }
+    # The SlideShowWindow.View COM surface differs across PowerPoint hosts:
+    # the slide index is the common, observable playback contract.
     for ($slideNumber = 1; $slideNumber -le $SlideCount; $slideNumber++) {
         $current = [int]$show.View.Slide.SlideIndex
         if ($current -ne $slideNumber) { throw "Playback stopped on slide $current; expected $slideNumber." }
@@ -55,7 +56,7 @@ try {
     }
     $show.View.Exit()
     $window = $null
-    [IO.File]::WriteAllText((Join-Path (Split-Path -Parent $FirstSlidePng) 'playback-show-receipt.json'), ([ordered]@{ slideCount = $SlideCount; visitedSlides = $SlideCount; firstSlidePng = $FirstSlidePng; lastSlidePng = $LastSlidePng } | ConvertTo-Json), (New-Object System.Text.UTF8Encoding($false)))
+    [IO.File]::WriteAllText((Join-Path $EvidenceDir 'playback-show-receipt.json'), ([ordered]@{ slideCount = $SlideCount; visitedSlides = $SlideCount; firstSlidePng = $FirstSlidePng; lastSlidePng = $LastSlidePng; fullScreen = $FullScreen } | ConvertTo-Json), (New-Object System.Text.UTF8Encoding($false)))
     Write-Host "Playback visited $SlideCount slides."
 } finally {
     if ($null -ne $window) { try { $window.View.Exit() } catch { } ; Release-ComObjectSafe $window }

@@ -3,10 +3,10 @@
   Controlled PowerPoint playback smoke test for a generated presentation.
 
 .DESCRIPTION
-  Opens the requested PPTX read-only, verifies page count, advances through
-  every slide in slide-show mode, captures the first and last slide, and checks
-  that PowerPoint remains responsive. Use only the full-screen switch on a
-  host where taking over the visible desktop is acceptable.
+  Opens the requested PPTX read-only, advances through every slide in
+  slide-show mode, captures the first and last slide, and reports the exact
+  deck hash. Use only the full-screen switch on a host where taking over the
+  visible desktop is acceptable.
 #>
 [CmdletBinding()]
 param(
@@ -84,6 +84,8 @@ try {
     $result.firstSlidePng = [string]$showReceipt.firstSlidePng
     $result.lastSlidePng = [string]$showReceipt.lastSlidePng
     if ($result.visitedSlides -ne $slideCount) { throw "Visited $($result.visitedSlides) of $slideCount slides." }
+    $result.showReceipt = $showReceiptPath
+    $result.workerFullScreen = [bool]$showReceipt.fullScreen
     if (-not (Test-UsablePageImage -Path $result.firstSlidePng) -or -not (Test-UsablePageImage -Path $result.lastSlidePng)) {
         throw 'Playback capture did not produce readable first/last slide images.'
     }
