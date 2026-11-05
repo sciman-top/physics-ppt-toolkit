@@ -228,13 +228,18 @@ if (-not $ValidateOnly) {
     $deliveryStatus = if ($invariantBlocked) { 'BlockedInvariantGate' } elseif ($gate.deliveryBlocked) { 'BlockedAiVisualReview' } elseif ($artifactBlocked) { 'BlockedDeliveryArtifacts' } elseif ($resultStatus -eq 'Passed' -and $artifactReviews.Count -eq 0) { 'Ready' } else { 'Pending' }
     $manifest | Add-Member -NotePropertyName deliveryBlocked -NotePropertyValue $deliveryBlocked -Force
     $manifest | Add-Member -NotePropertyName deliveryStatus -NotePropertyValue $deliveryStatus -Force
-    $manifest | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath $manifestFullPath -Encoding UTF8
+    # The workflow writes this manifest BOM-carried (Write-Utf8BomText);
+    # Set-Content -Encoding UTF8 is BOM-less on pwsh7 and BOM-carried on 5.1,
+    # flipping the file's encoding mid-lifecycle depending on the host.
+    Write-Utf8BomText -Text ($manifest | ConvertTo-Json -Depth 16) -Path $manifestFullPath
     $summaryPath = Join-Path (Split-Path -Parent $manifestFullPath) 'summary.md'
     if (Test-Path -LiteralPath $summaryPath) {
         $summary = Get-Content -LiteralPath $summaryPath -Raw -Encoding UTF8
         $summary = [regex]::Replace($summary, '(?m)^- 宿主 AI 视觉门禁：.*$', "- 宿主 AI 视觉门禁：$resultStatus")
         $summary = [regex]::Replace($summary, '(?m)^- 交付状态：.*$', "- 交付状态：$deliveryStatus")
-        [System.IO.File]::WriteAllText($summaryPath, $summary, (New-Object System.Text.UTF8Encoding -ArgumentList $false))
+        # Human-readable summary stays BOM-carried (Write-Summary emits BOM;
+        # the 9fb174d convention — this tool is the same file's other writer).
+        [System.IO.File]::WriteAllText($summaryPath, $summary, (New-Object System.Text.UTF8Encoding -ArgumentList $true))
     }
 }
 

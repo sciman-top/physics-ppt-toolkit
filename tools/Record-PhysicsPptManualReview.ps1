@@ -62,6 +62,13 @@ foreach ($deliveryDir in $expectedNamesByDir.Keys) {
     if (@($deliveryFiles | Where-Object { $_.Name -notin $expectedNames }).Count -gt 0) {
         throw 'Final delivery directory contains files other than the final same-name PPTX and PDF.'
     }
+    # Subdirectories (e.g. a _backup_originals residue from a locked backup
+    # move) violate the 01_交付物 layout as much as stray files do — the same
+    # dimension the workflow's post-packaging gate checks.
+    $deliverySubdirs = @(Get-ChildItem -LiteralPath $deliveryDir -Directory -ErrorAction SilentlyContinue)
+    if ($deliverySubdirs.Count -gt 0) {
+        throw ("Final delivery directory contains unexpected subdirectories: {0}" -f (($deliverySubdirs | ForEach-Object { $_.Name }) -join ', '))
+    }
 }
 $reviews = New-Object System.Collections.Generic.List[object]
 foreach ($file in $files) {
@@ -142,7 +149,10 @@ if ($Decision -eq 'Rejected') {
     $manifest | Add-Member -NotePropertyName deliveryBlocked -NotePropertyValue $false -Force
     $manifest | Add-Member -NotePropertyName deliveryStatus -NotePropertyValue 'Ready' -Force
 }
-[IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 16), (New-Object System.Text.UTF8Encoding($false)))
+# Keep the BOM: the workflow writes this manifest via Write-Utf8BomText, so
+# rewriting it BOM-less here flipped the file's encoding mid-lifecycle (BOM-
+# less reads on 5.1/legacy editors would misrender the Chinese deck names).
+[IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 16), (New-Object System.Text.UTF8Encoding($true)))
 $summary = Join-Path (Split-Path -Parent $manifestPath) 'summary.md'
 if (Test-Path -LiteralPath $summary -PathType Leaf) {
     $text = Get-Content -LiteralPath $summary -Raw -Encoding UTF8
