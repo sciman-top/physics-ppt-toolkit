@@ -861,6 +861,17 @@ function Get-ManifestRelativePathOrThrow {
     return ($parts -join '/')
 }
 
+function Test-StageWordVersionSuffixName {
+    # Shared reports/ layout predicate: a stage word directly before _v<N>
+    # (normalized_v1, brand_v2, __pptx_v1) is the legacy dotted-naming
+    # fingerprint the layout gate rejects. Delivery-root naming applies the
+    # same rule at creation time, so a bad input stem fails here with the
+    # remedy named instead of silently producing a directory the gate later
+    # flags (a directory input named "PPTX" used to yield PPTX_v1).
+    param([Parameter(Mandatory = $true)][string]$Name)
+    return ($Name -match '(^|[^A-Za-z0-9])(normalized|brand|callout|highlight|pptx)_v\d+$')
+}
+
 function New-VersionedDeliveryRoot {
     # Atomic claim of <root>/<stem>_v<N>: the highest _vN is the newest
     # generation, and the directory creation itself is the claim under normal
@@ -875,6 +886,9 @@ function New-VersionedDeliveryRoot {
     if ([string]::IsNullOrWhiteSpace($Stem)) {
         if ($null -eq $InputItem) { throw 'New-VersionedDeliveryRoot requires -InputItem or -Stem.' }
         $Stem = if ($InputItem.PSIsContainer) { $InputItem.Name } else { [System.IO.Path]::GetFileNameWithoutExtension($InputItem.Name) }
+    }
+    if (Test-StageWordVersionSuffixName -Name ('{0}_v1' -f $Stem)) {
+        throw ("Delivery stem '{0}' would produce a versioned directory the reports/ layout gate rejects (stage word directly before _v<N>). Run the workflow per deck file, or pass -OutputRoot outside reports/." -f $Stem)
     }
     if ([string]::IsNullOrWhiteSpace($ReportsRoot)) { $ReportsRoot = Join-Path (Split-Path -Parent $PSScriptRoot) 'reports' }
     if (-not (Test-Path -LiteralPath $ReportsRoot)) { New-Item -ItemType Directory -Path $ReportsRoot -Force | Out-Null }

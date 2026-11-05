@@ -234,6 +234,10 @@ function Set-HighlightBoxStyle {
     $isConclusion = $Class -eq 'Conclusion'
     $targetFill = if ($isConclusion) { $rgbConclusionFill } else { $rgbChipFill }
     $before = Get-ShapeStyleSnapshot -Shape $Shape
+    # Script scope on purpose: the retry wrapper invokes its action block in a
+    # child scope, so a function-local flag set inside the block would never
+    # surface here (and -Scope N is call-depth fragile).
+    $script:radiusRestoredForTextFit = $false
     try {
         $slideWidth = 960.0
         try {
@@ -258,6 +262,25 @@ function Set-HighlightBoxStyle {
                 $Shape.AutoShapeType = $script:MsoShapeRoundedRectangle
             }
             if ($Shape.Adjustments.Count -ge 1) { $Shape.Adjustments.Item(1) = $CornerRadiusAdj }
+            # The standard radius can push borderline author text past its wrap
+            # threshold: a roundRect's preset text rectangle insets by the
+            # corner radius, and a two-character inherited-size label (视频)
+            # measured ~0.3pt of slack — adj 0.08958 kept it on one line while
+            # adj 0.1 wrapped it, overflowing the box (17.1 slides 14/20).
+            # PowerPoint-measure the live layout and restore the author radius
+            # when the standard one breaks the text fit; text integrity beats
+            # the cosmetic radius standard, and the restore is idempotent
+            # (a re-run re-wraps, re-detects, and re-restores the same value).
+            $radiusRestoredForTextFit = $false
+            if ($before.CornerAdj -gt 0 -and [Math]::Abs([double]$before.CornerAdj - $CornerRadiusAdj) -gt 0.001) {
+                $fitProbe = $Shape.TextFrame.TextRange
+                $boundHeight = [double]$fitProbe.BoundHeight
+                $frameTextHeight = [double]$Shape.Height - [double]$Shape.TextFrame.MarginTop - [double]$Shape.TextFrame.MarginBottom
+                if ($boundHeight -gt $frameTextHeight + 1.0) {
+                    $Shape.Adjustments.Item(1) = $before.CornerAdj
+                    $script:radiusRestoredForTextFit = $true
+                }
+            }
             $Shape.Fill.ForeColor.RGB = $targetFill
             $Shape.Line.Visible = $script:MsoTrue
             $Shape.Line.ForeColor.RGB = $rgbBorder
@@ -337,6 +360,9 @@ function Set-HighlightBoxStyle {
         $details = if ($frameMotion -gt 0.1) {
             'Frame expanded symmetrically for 36pt conclusion text; top/height preserved.'
         } else { '' }
+        if ($script:radiusRestoredForTextFit) {
+            $details = ($details + ' Author corner radius restored: standard radius wrapped the text beyond the frame (COM-measured).').Trim()
+        }
         Add-ReportRow -SlideNumber $SlideNumber -ShapeName $ShapeName -Class $Class -Before $before -After $after -Result 'Changed' -Details $details
     } else {
         $script:counters.AlreadyApplied++

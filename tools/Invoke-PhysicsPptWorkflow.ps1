@@ -2126,14 +2126,17 @@ function Invoke-FinalChainVisualAudit {
         copy against the normalized audit so newly introduced clipping,
         overflow, or unreadable text blocks the chain.
 
-        A full-chain run without -IncludeVisualAudit still gets final page
-        images and PNG inspection, but no rule-based baseline adjudication.
-        That keeps the normal three-stage command reasonably fast while the
-        explicit deep-audit switch owns the stricter visual gate. #>
+        The final audit ALWAYS runs the rule audit and binds its page images
+        to the exact final PPTX bytes: Get-FullChainDeliveryFailures rejects
+        final pages without a rule-audit baseline, so a light path that only
+        renders pages would fail every delivery. What -IncludeVisualAudit
+        controls is whether the NORMALIZED baseline exists to adjudicate
+        against: without it the status is NeedsReviewNoNormalizedBaseline
+        (gate-accepted, flagged for review); with it, new-error/warning
+        comparison blocks the chain. #>
     param(
         $Manifest,
-        [string]$OutputRoot,
-        [bool]$RunRuleAudit
+        [string]$OutputRoot
     )
     $items = New-Object System.Collections.Generic.List[object]
     $auditRoot = Join-Path $OutputRoot '17_全链最终审查'
@@ -2185,51 +2188,45 @@ function Invoke-FinalChainVisualAudit {
         }) | Select-Object -First 1
         $normalizedAuditDir = [string](Get-ObjectPropertyValue -Object $visualArtifact -PropertyName 'visualAuditDir' -DefaultValue '')
         try {
-            if ($RunRuleAudit) {
-                if ([string]::IsNullOrWhiteSpace($safeName)) {
-                    throw "Final visual audit cannot determine the output stem for $($file.input)."
-                }
-                # A rule audit must bind page images to the exact final bytes.
-                # A prior page set is retained only when its manifest carries
-                # the matching source hash; otherwise it is regenerated.
+            if ([string]::IsNullOrWhiteSpace($safeName)) {
+                throw "Final visual audit cannot determine the output stem for $($file.input)."
+            }
+            # A rule audit must bind page images to the exact final bytes.
+            # A prior page set is retained only when its manifest carries
+            # the matching source hash; otherwise it is regenerated.
+            $finalAuditManifest = Read-JsonObject -Path ([string]$finalAuditManifestPath)
+            $auditedPptx = [string](Get-ObjectPropertyValue -Object $finalAuditManifest -PropertyName 'inputPath' -DefaultValue '')
+            $auditedSha256 = [string](Get-ObjectPropertyValue -Object $finalAuditManifest -PropertyName 'inputSha256' -DefaultValue '')
+            $auditReusable = Test-FinalVisualAuditEvidence -AuditManifest $finalAuditManifest -FinalPptxPath $finalPptx -AuditOutputDir $finalAuditDir -AuditCsvPath $finalAuditCsv
+            if (-not $auditReusable) {
+                & (Join-Path $PSScriptRoot 'Export-PptxVisualAudit.ps1') -InputPath ([string]$finalPptx) -OutputDir $finalAuditDir -ContactSheet | Out-Host
                 $finalAuditManifest = Read-JsonObject -Path ([string]$finalAuditManifestPath)
                 $auditedPptx = [string](Get-ObjectPropertyValue -Object $finalAuditManifest -PropertyName 'inputPath' -DefaultValue '')
                 $auditedSha256 = [string](Get-ObjectPropertyValue -Object $finalAuditManifest -PropertyName 'inputSha256' -DefaultValue '')
-                $auditReusable = Test-FinalVisualAuditEvidence -AuditManifest $finalAuditManifest -FinalPptxPath $finalPptx -AuditOutputDir $finalAuditDir -AuditCsvPath $finalAuditCsv
-                if (-not $auditReusable) {
-                    & (Join-Path $PSScriptRoot 'Export-PptxVisualAudit.ps1') -InputPath ([string]$finalPptx) -OutputDir $finalAuditDir -ContactSheet | Out-Host
-                    $finalAuditManifest = Read-JsonObject -Path ([string]$finalAuditManifestPath)
-                    $auditedPptx = [string](Get-ObjectPropertyValue -Object $finalAuditManifest -PropertyName 'inputPath' -DefaultValue '')
-                    $auditedSha256 = [string](Get-ObjectPropertyValue -Object $finalAuditManifest -PropertyName 'inputSha256' -DefaultValue '')
-                }
-                if ($null -eq $finalAuditManifest -or [string]::IsNullOrWhiteSpace($auditedPptx) -or $auditedPptx -ine $finalPptx) {
-                    throw 'Final visual audit is not bound to the exact final PPTX bytes.'
-                }
-                $currentFinalHash = Get-FileSha256OrNull -Path ([string]$finalPptx)
-                if (-not [string]::IsNullOrWhiteSpace($auditedSha256) -and $auditedSha256 -cne $currentFinalHash) {
-                    throw 'Final visual audit input hash is inconsistent with the exact final PPTX bytes.'
-                }
-                $record.ruleAuditEnabled = $true
-                $record.finalPageCount = [int](Get-ObjectPropertyValue -Object $finalAuditManifest -PropertyName 'exportedSlideCount' -DefaultValue 0)
-                $record.visualAuditStatus = 'Completed'
-                $record.visualAuditErrorCount = [int](Get-ObjectPropertyValue -Object $finalAuditManifest -PropertyName 'errorCount' -DefaultValue 0)
-                $record.visualAuditWarningCount = [int](Get-ObjectPropertyValue -Object $finalAuditManifest -PropertyName 'warningCount' -DefaultValue 0)
-                if (-not [string]::IsNullOrWhiteSpace($normalizedAuditDir) -and (Test-Path -LiteralPath $normalizedAuditDir)) {
-                    $confirmation = Invoke-VisualConfirmationArtifact -VisualAuditDir $finalAuditDir -BaselineVisualAuditDir $normalizedAuditDir
-                    $record.visualConfirmationCsv = $confirmation.csv
-                    $record.visualConfirmationGateStatus = $confirmation.gateStatus
-                    $record.visualAuditStatus = if ($confirmation.gateStatus -eq 'Passed') { 'Passed' } else { $confirmation.status }
-                    $record.newErrorCount = [int]$confirmation.newErrorCount
-                    $record.newWarningCount = [int]$confirmation.newWarningCount
-                } else {
-                    $record.visualAuditStatus = 'NeedsReviewNoNormalizedBaseline'
-                }
-                $record.finalPptxSha256 = $currentFinalHash
-            } else {
-                & (Join-Path $PSScriptRoot 'Export-PptxVisualAudit.ps1') -InputPath $record.finalPptx -OutputDir $finalAuditDir -ContactSheet -NoPdf | Out-Host
-                $finalAuditManifest = Read-JsonObject -Path $finalAuditManifestPath
-                $record.finalPageCount = [int](Get-ObjectPropertyValue -Object $finalAuditManifest -PropertyName 'exportedSlideCount' -DefaultValue 0)
             }
+            if ($null -eq $finalAuditManifest -or [string]::IsNullOrWhiteSpace($auditedPptx) -or $auditedPptx -ine $finalPptx) {
+                throw 'Final visual audit is not bound to the exact final PPTX bytes.'
+            }
+            $currentFinalHash = Get-FileSha256OrNull -Path ([string]$finalPptx)
+            if (-not [string]::IsNullOrWhiteSpace($auditedSha256) -and $auditedSha256 -cne $currentFinalHash) {
+                throw 'Final visual audit input hash is inconsistent with the exact final PPTX bytes.'
+            }
+            $record.ruleAuditEnabled = $true
+            $record.finalPageCount = [int](Get-ObjectPropertyValue -Object $finalAuditManifest -PropertyName 'exportedSlideCount' -DefaultValue 0)
+            $record.visualAuditStatus = 'Completed'
+            $record.visualAuditErrorCount = [int](Get-ObjectPropertyValue -Object $finalAuditManifest -PropertyName 'errorCount' -DefaultValue 0)
+            $record.visualAuditWarningCount = [int](Get-ObjectPropertyValue -Object $finalAuditManifest -PropertyName 'warningCount' -DefaultValue 0)
+            if (-not [string]::IsNullOrWhiteSpace($normalizedAuditDir) -and (Test-Path -LiteralPath $normalizedAuditDir)) {
+                $confirmation = Invoke-VisualConfirmationArtifact -VisualAuditDir $finalAuditDir -BaselineVisualAuditDir $normalizedAuditDir
+                $record.visualConfirmationCsv = $confirmation.csv
+                $record.visualConfirmationGateStatus = $confirmation.gateStatus
+                $record.visualAuditStatus = if ($confirmation.gateStatus -eq 'Passed') { 'Passed' } else { $confirmation.status }
+                $record.newErrorCount = [int]$confirmation.newErrorCount
+                $record.newWarningCount = [int]$confirmation.newWarningCount
+            } else {
+                $record.visualAuditStatus = 'NeedsReviewNoNormalizedBaseline'
+            }
+            $record.finalPptxSha256 = $currentFinalHash
             $expectedSlides = [int](Get-ObjectPropertyValue -Object (Get-ObjectPropertyValue -Object $file -PropertyName 'validation' -DefaultValue $null) -PropertyName 'expectedSlides' -DefaultValue 0)
             if ($expectedSlides -gt 0 -and $record.finalPageCount -ne $expectedSlides) {
                 $record.status = 'FailedPageCount'
@@ -2904,7 +2901,13 @@ if ($BrandRefresh -or $HighlightBox) {
         foreach ($chainFile in @($brandStageArtifacts.files)) {
             if ((Get-ObjectPropertyValue -Object $chainFile -PropertyName 'status' -DefaultValue '') -ne 'Completed') { continue }
             $finalPptx = [string](Get-ObjectPropertyValue -Object $chainFile -PropertyName 'finalPptx' -DefaultValue '')
-            $finalPdf = Join-Path $normalizedDir ("{0}.pdf" -f [string](Get-ObjectPropertyValue -Object $chainFile -PropertyName 'deckStem' -DefaultValue ''))
+            # The delivery PDF must be named after the SOURCE deck (same-name
+            # contract enforced by Complete-FinalDeliveryPackaging and
+            # Get-FullChainDeliveryFailures). deckStem is the normalize output
+            # stem and carries the content-hash infix (__<hash10>), which would
+            # strand the PDF under a stage name and abort packaging.
+            $chainInputStem = [System.IO.Path]::GetFileNameWithoutExtension([string](Get-ObjectPropertyValue -Object $chainFile -PropertyName 'file' -DefaultValue ''))
+            $finalPdf = Join-Path $normalizedDir ($chainInputStem + '.pdf')
             $exported = Export-FinalChainPdf -PptxPath $finalPptx -PdfPath $finalPdf -FileName (Split-Path -Leaf $finalPptx)
             if (-not $exported) { continue }
             $chainFile.finalPdf = $finalPdf
@@ -2933,7 +2936,7 @@ if ($BrandRefresh -or $HighlightBox) {
         # copy audited in step 5. Render every final page after the PDF export
         # so a later stage cannot introduce a clipped title or overflowing
         # conclusion box while the workflow still reports Completed.
-        $finalVisualAuditArtifacts = Invoke-FinalChainVisualAudit -Manifest $manifest -OutputRoot $OutputRoot -RunRuleAudit ([bool]$IncludeVisualAudit)
+        $finalVisualAuditArtifacts = Invoke-FinalChainVisualAudit -Manifest $manifest -OutputRoot $OutputRoot
         $manifest | Add-Member -NotePropertyName finalVisualAuditArtifacts -NotePropertyValue $finalVisualAuditArtifacts.files -Force
 } else {
     $manifest | Add-Member -NotePropertyName brandStageEnabled -NotePropertyValue $false -Force

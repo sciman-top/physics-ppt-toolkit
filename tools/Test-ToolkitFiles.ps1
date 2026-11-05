@@ -510,9 +510,11 @@ if (Test-Path -LiteralPath $reportsRoot) {
         if (-not $entry.PSIsContainer) { continue }
         if ($entry.Name -eq '_archive') { continue }
         if ($entry.Name -match '_v(\d+)$') {
-            if ($entry.Name -match '(^|[^A-Za-z0-9])(normalized|brand|callout|highlight|pptx)_v\d+$') {
+            if (Test-StageWordVersionSuffixName -Name $entry.Name) {
                 # Stage-suffix vocabulary directly before _v<N>: the legacy
                 # dotted-naming fingerprint (normalized_v1, brand_v2, __pptx_v1).
+                # Judged through the shared Common predicate so the delivery
+                # root naming guard and this gate can never drift apart.
                 $layoutViolations += $entry.Name
             } elseif ($entry.Name -like 'run_*') {
                 # Reserved ad-hoc scratch prefix stays rejected even with a
@@ -892,6 +894,43 @@ foreach ($stemCase in $stemProbeCases) {
     if ([string]$stemActual -cne [string]$stemCase[2]) {
         throw ("Deck-stem probe failed for {0}: expected '{1}', got '{2}'." -f $stemCase[0], $stemCase[2], $stemActual)
     }
+}
+
+# Delivery-root naming guard probe: the version-root creator must refuse
+# stems whose <stem>_v<N> name carries a stage word directly before the
+# suffix (directory input "PPTX" used to silently yield PPTX_v1, a layout
+# the gate below rejects), while legal deck stems keep claiming roots.
+$stageWordFnAst = $fingerprintCommonAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-StageWordVersionSuffixName' }, $true) | Select-Object -First 1
+if ($null -eq $stageWordFnAst) { throw 'Test-StageWordVersionSuffixName function definition not found for the behavioral probe.' }
+Invoke-Expression $stageWordFnAst.Extent.Text
+$stageWordProbeCases = @(
+    @('directory stem PPTX', 'PPTX_v1', $true),
+    @('legacy dotted name', 'X.normalized_v1', $true),
+    @('underscore-prefixed stage word', '__pptx_v1', $true),
+    @('legal ASCII deck stem', 'Review_v1', $false),
+    @('repo-root stem', 'physics-ppt-toolkit_v1', $false),
+    @('CJK deck stem', '17.1电流与电压、电阻的关系（王耀强）_v1', $false)
+)
+foreach ($stageWordCase in $stageWordProbeCases) {
+    $stageWordActual = Test-StageWordVersionSuffixName -Name ([string]$stageWordCase[1])
+    if ($stageWordActual -ne [bool]$stageWordCase[2]) {
+        throw ("Stage-word suffix probe failed for {0}: expected {1}, got {2}." -f $stageWordCase[0], $stageWordCase[2], $stageWordActual)
+    }
+}
+$versionRootFnAst = $fingerprintCommonAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'New-VersionedDeliveryRoot' }, $true) | Select-Object -First 1
+if ($null -eq $versionRootFnAst) { throw 'New-VersionedDeliveryRoot function definition not found for the behavioral probe.' }
+Invoke-Expression $versionRootFnAst.Extent.Text
+$versionRootProbeRoot = Join-Path $env:TEMP ("version-root-probe-" + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $versionRootProbeRoot -Force | Out-Null
+try {
+    $guardThrew = $false
+    try { New-VersionedDeliveryRoot -Stem 'PPTX' -ReportsRoot $versionRootProbeRoot | Out-Null } catch { $guardThrew = $true }
+    if (-not $guardThrew) { throw 'Delivery-root guard probe failed: stem PPTX must be refused at creation time.' }
+    if (Test-Path -LiteralPath (Join-Path $versionRootProbeRoot 'PPTX_v1')) { throw 'Delivery-root guard probe failed: violating directory was created anyway.' }
+    $legalRoot = New-VersionedDeliveryRoot -Stem 'Review' -ReportsRoot $versionRootProbeRoot
+    if (-not (Test-Path -LiteralPath (Join-Path $legalRoot -ChildPath '.'))) { throw 'Delivery-root guard probe failed: legal stem could not claim a root.' }
+} finally {
+    Remove-Item -LiteralPath $versionRootProbeRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 $fingerprintFunctionAst = $fingerprintCommonAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-OleEquationCjkFingerprint' }, $true) | Select-Object -First 1
