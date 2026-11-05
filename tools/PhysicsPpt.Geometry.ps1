@@ -46,6 +46,14 @@ function Add-IntentionalGeometryChange {
         # before the caller moves the shape instead of writing a dead key.
         throw "Add-IntentionalGeometryChange: no slide part map entry for presentation slide $SlideNumber; refusing to book an unverifiable intentional geometry change (shape $ShapeId, reason '$Reason')."
     }
+    # Lazy bucket creation: the per-file table starts empty and a scope key
+    # only materializes on first write. Indexing a missing key returns $null
+    # and the nested assignment would throw, failing every intentional-
+    # geometry candidate once the width-expansion/move features are enabled
+    # (latent today only because those config switches default off).
+    if (-not $script:IntentionalGeometryShapesByFile.ContainsKey($ScopeKey)) {
+        $script:IntentionalGeometryShapesByFile[$ScopeKey] = @{}
+    }
     $script:IntentionalGeometryShapesByFile[$ScopeKey]["$partName|$ShapeId"] = $Reason
 }
 

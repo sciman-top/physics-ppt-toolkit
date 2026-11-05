@@ -834,6 +834,24 @@ foreach ($classifyCatch in @($classifyFunctionAst.FindAll({ param($node) $node -
     $catchFiltersRetryable = @($classifyCatch.Body.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Test-IsRetryablePresentationFailure' }, $true)).Count -gt 0
     if (-not ($catchRethrows -or $catchFiltersRetryable)) { throw 'Get-HighlightBoxClass catch must rethrow or consult Test-IsRetryablePresentationFailure; a blanket ClassifyFailed swallow defeats the call-site COM retry wrapper.' }
 }
+
+# Intentional-geometry bucketing probe: the per-file table starts empty, so
+# the recorder must create its scope bucket lazily. A missing-bucket index
+# throw would fail every candidate once width-expansion/move features are
+# enabled (latent only because those config switches default off), and the
+# per-scope buckets are what keep deck A's keys from leaking into deck B's
+# deferred restore.
+$intentionalGeometryAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'tools\PhysicsPpt.Geometry.ps1'), [ref]$null, [ref]$null)
+$intentionalFunctionAst = $intentionalGeometryAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Add-IntentionalGeometryChange' }, $true) | Select-Object -First 1
+if ($null -eq $intentionalFunctionAst) { throw 'Add-IntentionalGeometryChange function definition not found for the bucketing probe.' }
+Invoke-Expression $intentionalFunctionAst.Extent.Text
+$script:IntentionalGeometryShapesByFile = @{}
+$script:CurrentIntentionalGeometryScope = ''
+$script:PresentationSlidePartMap = @{ 1 = 'ppt/slides/slide1.xml' }
+Add-IntentionalGeometryChange -SlideNumber 1 -ShapeId 42 -Reason 'probe-a' -ScopeKey 'deck-a'
+Add-IntentionalGeometryChange -SlideNumber 1 -ShapeId 7 -Reason 'probe-b' -ScopeKey 'deck-b'
+if ($script:IntentionalGeometryShapesByFile['deck-a']['ppt/slides/slide1.xml|42'] -ne 'probe-a') { throw 'Add-IntentionalGeometryChange did not record into the lazily created deck-a bucket.' }
+if ($script:IntentionalGeometryShapesByFile['deck-b']['ppt/slides/slide1.xml|7'] -ne 'probe-b') { throw 'Add-IntentionalGeometryChange did not create the second scope bucket.' }
 $brandContent = Get-Content -LiteralPath (Join-Path $root 'tools\Apply-PptxBrandVisualRefresh.ps1') -Raw -Encoding UTF8
 if ($brandContent -notmatch '(?s)\$presentationToPublish\s*=.*?Copy-Item -LiteralPath \$PptxPath -Destination \$presentationToPublish.*?Presentations\.Open\(\$presentationToPublish.*?if \(-not \(Test-PptxPackageIntegrity -Path \$presentationToPublish\)\).*?Move-Item -LiteralPath \$presentationToPublish -Destination \$workingPptx') {
     throw 'Brand refresh must write a verified temporary copy and publish it only on success.'
