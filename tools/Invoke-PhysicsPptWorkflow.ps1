@@ -1943,7 +1943,12 @@ function Export-FinalChainPdf {
     $application = $null
     $presentation = $null
     try {
-        $application = New-PowerPointApplication
+        # The brand/highlight-box stage runs each start and quit their own
+        # PowerPoint instance right before this call — the same busy window
+        # where every sibling exporter wraps application start in the shared
+        # COM retry — and this is the full chain's only PDF exit, so a single
+        # transient rejection here would abort the whole chain.
+        $application = Invoke-WithComRetry -MaxRetries 3 -DelayMs 1500 -Action { New-PowerPointApplication }.GetNewClosure()
         $pptxFullPath = [System.IO.Path]::GetFullPath($PptxPath)
         $pdfFullPath = [System.IO.Path]::GetFullPath($PdfPath)
         if (Test-Path -LiteralPath $pdfFullPath) { throw "Final PDF target already exists; refusing to overwrite stale or unknown evidence: $pdfFullPath" }
@@ -1959,7 +1964,17 @@ function Export-FinalChainPdf {
             $fallbackError = $_.Exception.Message
             if (Test-Path -LiteralPath $pdfFullPath) { Remove-Item -LiteralPath $pdfFullPath -Force }
             $pdfFormat = 32 # ppSaveAsPDF fallback for hosts without fixed-format export
-            Invoke-WithComRetry -MaxRetries 3 -DelayMs 800 -Action { $presentation.SaveAs($pdfFullPath, $pdfFormat) }.GetNewClosure()
+            try {
+                Invoke-WithComRetry -MaxRetries 3 -DelayMs 800 -Action { $presentation.SaveAs($pdfFullPath, $pdfFormat) }.GetNewClosure()
+            } catch {
+                # A half-written PDF must not survive this failure: the
+                # final-pdf step refuses to overwrite stale evidence, so a
+                # leftover partial file would wedge the next rerun behind
+                # 'refusing to overwrite' instead of surfacing the real
+                # export error.
+                if (Test-Path -LiteralPath $pdfFullPath) { Remove-Item -LiteralPath $pdfFullPath -Force }
+                throw
+            }
             if ((Test-Path -LiteralPath $sameNamePresentation) -and -not $sameNamePresentationExisted) {
                 throw "PowerPoint SaveAs produced a presentation instead of a PDF. Fixed-format export error: $fallbackError"
             }
@@ -1968,6 +1983,10 @@ function Export-FinalChainPdf {
             }
         }
         if (-not (Test-Path -LiteralPath $pdfFullPath) -or (Get-Item -LiteralPath $pdfFullPath).Length -le 0 -or -not (Test-PdfFileSignature -Path $pdfFullPath)) {
+            # Same partial-output contract as the SaveAs fallback above: an
+            # invalid PDF left in place wedges the next rerun behind the
+            # stale-evidence guard instead of the real failure.
+            if (Test-Path -LiteralPath $pdfFullPath) { Remove-Item -LiteralPath $pdfFullPath -Force }
             throw "PowerPoint did not create a non-empty final-chain PDF: $PdfPath"
         }
         Write-Host "  final PDF -> $(Split-Path -Leaf $PdfPath)"
@@ -2922,6 +2941,21 @@ if ($BrandRefresh -or $HighlightBox) {
     # instead of the .normalized PDF Normalize skipped in this mode, and the
     # manifest's PDF validation is rebound to the delivered bytes.
     if ($Mode -ne 'SafeNormalize') {
+        # Same-named source decks (recursive multi-deck batches are a designed
+        # scenario, per Get-RelativePathSafeStem) would collide on the delivery
+        # PDF '<source stem>.pdf' mid-loop: the second export hits the
+        # stale-evidence guard with a misleading message and the dedicated
+        # packaging collision guidance below is never reached. Fail before any
+        # export work with the same disposition advice instead.
+        $seenChainStems = @{}
+        foreach ($chainFile in @($brandStageArtifacts.files)) {
+            if ((Get-ObjectPropertyValue -Object $chainFile -PropertyName 'status' -DefaultValue '') -ne 'Completed') { continue }
+            $chainInputStem = [System.IO.Path]::GetFileNameWithoutExtension([string](Get-ObjectPropertyValue -Object $chainFile -PropertyName 'file' -DefaultValue ''))
+            if ($seenChainStems.ContainsKey($chainInputStem)) {
+                throw ("Two same-named source decks in this batch would collide on the delivery PDF '{0}.pdf'. Rename one of the source files before running the full chain (same disposition as Complete-FinalDeliveryPackaging)." -f $chainInputStem)
+            }
+            $seenChainStems[$chainInputStem] = $true
+        }
         foreach ($chainFile in @($brandStageArtifacts.files)) {
             if ((Get-ObjectPropertyValue -Object $chainFile -PropertyName 'status' -DefaultValue '') -ne 'Completed') { continue }
             $finalPptx = [string](Get-ObjectPropertyValue -Object $chainFile -PropertyName 'finalPptx' -DefaultValue '')
