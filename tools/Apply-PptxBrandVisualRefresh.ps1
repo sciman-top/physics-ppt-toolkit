@@ -162,7 +162,14 @@ function Get-SlidePlainText {
             if ($shape.HasTextFrame -eq -1 -and $shape.TextFrame.HasText -eq -1) {
                 $parts += [string]$shape.TextFrame.TextRange.Text
             }
-        } catch { }
+        } catch {
+            # Transient COM rejections must reach the slide-level
+            # Invoke-WithComRetry wrapper instead of silently corrupting role
+            # detection (a skipped shape here can flip a divider to Content or
+            # misread a special page). Deterministic read failures still skip
+            # the single shape quietly.
+            if (Test-IsRetryablePresentationFailure -Category (Get-ComFailureCategory -ErrorRecord $_) -Message $_.Exception.Message) { throw }
+        }
     }
     return ($parts -join "`n")
 }
@@ -206,7 +213,13 @@ function Test-DividerSlide {
         try {
             if ($shape.Name -eq 'sciman-brand-icon') { continue }
             if ($shape.Type -in @(3, 6, 7, 13, 16, 19)) { return $false }
-        } catch { }
+        } catch {
+            # A transient read must not answer the disqualification probe:
+            # silently continuing can leave a two-text-shape page classified
+            # as a Divider and force-refreshed at 80pt. Retryable failures
+            # propagate to the slide-level Invoke-WithComRetry wrapper.
+            if (Test-IsRetryablePresentationFailure -Category (Get-ComFailureCategory -ErrorRecord $_) -Message $_.Exception.Message) { throw }
+        }
         try {
             if ($shape.HasTextFrame -ne -1 -or $shape.TextFrame.HasText -ne -1) { continue }
             if (([string]$shape.TextFrame.TextRange.Text).Trim().Length -gt 0) {
@@ -220,7 +233,14 @@ function Test-DividerSlide {
                     $hasAutoNumberedOrBulletedParagraph = ($bulletVisible -ne 0)
                 } catch { }
             }
-        } catch { }
+        } catch {
+            # Same transient rule as the disqualification probe above: a
+            # swallowed read here can leave a two-text-shape page classified
+            # as a Divider and force-refreshed at 80pt. Retryable failures
+            # propagate to the slide-level Invoke-WithComRetry wrapper;
+            # deterministic failures keep the conservative non-divider path.
+            if (Test-IsRetryablePresentationFailure -Category (Get-ComFailureCategory -ErrorRecord $_) -Message $_.Exception.Message) { throw }
+        }
     }
     return ($hasTitle -and $textShapeCount -eq 1 -and $paragraphCount -eq 1 -and -not $hasAutoNumberedOrBulletedParagraph)
 }
@@ -498,6 +518,11 @@ function Update-SpecialSlideText {
                 $Actions.Add('InfoBlockCentred(left-aligned)') | Out-Null
             }
         } catch {
+            # Transient COM rejections must propagate to the slide-level
+            # Invoke-WithComRetry wrapper (whole-slide retries are idempotent);
+            # swallowing them here would strand half-styled special pages.
+            # Deterministic failures keep the recorded skip.
+            if (Test-IsRetryablePresentationFailure -Category (Get-ComFailureCategory -ErrorRecord $_) -Message $_.Exception.Message) { throw }
             $Actions.Add("ShapeSkipped: $($_.Exception.Message)") | Out-Null
         }
     }
@@ -519,6 +544,9 @@ function Update-SpecialSlideText {
                 $titleShape.Left = [single][Math]::Round(([double]$slideWidth - [double]$titleShape.Width) / 2, 1)
                 $titleShape.Top = [single][Math]::Round([double]$slideHeight * 0.16, 1)
             } catch {
+                # Transient rejections retry at the slide-level wrapper;
+                # deterministic failures stay a recorded skip.
+                if (Test-IsRetryablePresentationFailure -Category (Get-ComFailureCategory -ErrorRecord $_) -Message $_.Exception.Message) { throw }
                 $Actions.Add("CoverTitlePlaced: failed - $($_.Exception.Message)") | Out-Null
             }
         }
@@ -544,6 +572,9 @@ function Update-SpecialSlideText {
                 $blockShape.Height = [single][Math]::Round([double]$blockHeight, 1)
                 $blockShape.Left = [single][Math]::Round(([double]$slideWidth - [double]$blockShape.Width) / 2, 1)
             } catch {
+                # Transient rejections retry at the slide-level wrapper;
+                # deterministic failures stay a recorded skip.
+                if (Test-IsRetryablePresentationFailure -Category (Get-ComFailureCategory -ErrorRecord $_) -Message $_.Exception.Message) { throw }
                 $Actions.Add("BlockCentred: failed - $($_.Exception.Message)") | Out-Null
             }
         }
@@ -593,6 +624,9 @@ function Update-SpecialSlideText {
                 $shape.Left = [single][Math]::Round(([double]$slideWidth - [double]$shape.Width) / 2, 1)
                 $Actions.Add("LinkHubFitted(centred, width $([int]$hugWidth)pt, font $([string]$fitSize)pt, shrink steps: $shrunk)") | Out-Null
             } catch {
+                # Transient rejections retry at the slide-level wrapper;
+                # deterministic failures stay a recorded skip.
+                if (Test-IsRetryablePresentationFailure -Category (Get-ComFailureCategory -ErrorRecord $_) -Message $_.Exception.Message) { throw }
                 $Actions.Add("LinkHubFit: failed - $($_.Exception.Message)") | Out-Null
             }
         }
@@ -712,6 +746,12 @@ function Update-DividerSlide {
                 $Actions.Add("DividerFitted(font $([string]$fontSize)pt, steps $fitSteps)") | Out-Null
             }
         } catch {
+            # Transient COM rejections must propagate to the slide-level
+            # Invoke-WithComRetry wrapper (whole-slide retries are idempotent):
+            # swallowing them here would leave a half-styled divider stranded
+            # below the unified 80pt voice. Deterministic failures keep the
+            # recorded DividerShapeSkipped row.
+            if (Test-IsRetryablePresentationFailure -Category (Get-ComFailureCategory -ErrorRecord $_) -Message $_.Exception.Message) { throw }
             $Actions.Add("DividerShapeSkipped: $($_.Exception.Message) << $($_.ScriptStackTrace)") | Out-Null
         }
     }
@@ -773,7 +813,17 @@ function Add-BrandIcon {
         $stale = @($Slide.Shapes | Where-Object { $_.Name -eq 'sciman-brand-icon' })
         for ($i = $stale.Count - 1; $i -ge 0; $i--) { $stale[$i].Delete() }
         $picture = $Slide.Shapes.AddPicture($resolvedIconPath, 0, -1, $left, $top, $pictureSize, $pictureSize)
-        $picture.Name = 'sciman-brand-icon'
+        try {
+            $picture.Name = 'sciman-brand-icon'
+        } catch {
+            # AddPicture + rename is not atomic: if the rename is refused, the
+            # closure retry would add ANOTHER picture while the first remains
+            # behind as an unnamed orphan the name-matched stale sweep cannot
+            # see. Delete the just-added picture so the outer retry starts
+            # from a clean slide.
+            try { $picture.Delete() } catch { }
+            throw
+        }
     }.GetNewClosure() | Out-Null
     if ($Force) {
         $Actions.Add('IconAdded(watermark, uniform)') | Out-Null
@@ -792,7 +842,7 @@ try {
     $presentation = Invoke-WithComRetry -Action {
         $application.Presentations.Open($presentationToPublish, $false, $false, $false)
     }
-    $slideCount = $presentation.Slides.Count
+    $slideCount = Invoke-WithComRetry -Action { $presentation.Slides.Count }
     Write-Host "Opened $workingPptx with $slideCount slides."
 
     for ($index = 1; $index -le $slideCount; $index++) {
@@ -941,7 +991,7 @@ $manifest = [pscustomobject]@{
 }
 $manifestPath = Join-Path $deliveryRoot 'review-manifest.json'
 $manifestJson = $manifest | ConvertTo-Json -Depth 6
-[System.IO.File]::WriteAllText([System.IO.Path]::GetFullPath($manifestPath), $manifestJson, (New-Object System.Text.UTF8Encoding($false)))
+Write-Utf8BomText -Text $manifestJson -Path $manifestPath
 
 $roleSummary = $slideRecords | Group-Object Role | ForEach-Object { "$($_.Name) x$($_.Count)" }
 $summaryLines = @(

@@ -137,6 +137,8 @@ if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
     }
     Copy-Item -LiteralPath $PptxPath -Destination (Join-Path $backupDir ([System.IO.Path]::GetFileName($PptxPath))) -Force
     $workingPptx = $OutputPath
+    $workingPptxPreExisting = (Test-Path -LiteralPath $workingPptx)
+    if ($workingPptxPreExisting) { throw "OutputPath already exists; refusing to overwrite evidence: $workingPptx" }
     Copy-Item -LiteralPath $PptxPath -Destination $workingPptx -Force
 } else {
     $deliveryRoot = New-VersionedDeliveryRoot -Stem $stem -ReportsRoot $OutputRoot
@@ -149,6 +151,10 @@ if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
     Copy-Item -LiteralPath $PptxPath -Destination (Join-Path $backupDir "$stem$sourceExtension") -Force
 
     $workingPptx = Join-Path $deliveryDir "$stem.callout$sourceExtension"
+    # A freshly claimed versioned delivery root cannot contain the copy, but
+    # record pre-existence anyway so failure cleanup only ever deletes what
+    # this run created.
+    $workingPptxPreExisting = (Test-Path -LiteralPath $workingPptx)
     Copy-Item -LiteralPath $PptxPath -Destination $workingPptx -Force
 }
 
@@ -248,12 +254,25 @@ function Set-HighlightBoxStyle {
     # child scope, so a function-local flag set inside the block would never
     # surface here (and -Scope N is call-depth fragile).
     $script:radiusRestoredForTextFit = $false
+    $script:conversionRevertedForTextFit = $false
     try {
         $slideWidth = 960.0
         try {
             $pageSetup = $Shape.Parent.Parent.PageSetup
             $slideWidth = [double]$pageSetup.SlideWidth
         } catch { }
+        # Author-frame constants are captured OUTSIDE the retry closure: the
+        # closure may transiently fail after the AutoShapeType assignment
+        # (which rewrites the bounding box), and re-reading inside attempt 2
+        # would adopt the rewritten box as the author frame — the rewrite
+        # would become permanent and the restore/evidence rows below would
+        # record the wrong frame. The closure resolves these names through
+        # its parent function scope, like $Shape/$before already do.
+        $left0 = Invoke-WithComRetry -Action { [double]$Shape.Left }
+        $top0 = Invoke-WithComRetry -Action { [double]$Shape.Top }
+        $width0 = Invoke-WithComRetry -Action { [double]$Shape.Width }
+        $height0 = Invoke-WithComRetry -Action { [double]$Shape.Height }
+        $name0 = Invoke-WithComRetry -Action { [string]$Shape.Name }
         # Geometry first: it is the assignment most likely to be refused, and
         # failing before any write keeps the shape free of half-applied styles.
         # Assigning AutoShapeType (even the same value) makes PowerPoint rewrite
@@ -262,11 +281,6 @@ function Set-HighlightBoxStyle {
         # conclusion box can also need a modest symmetric expansion when the
         # 36pt display guard makes its text wider than the source frame.
         Invoke-WithComRetry -Action {
-            $left0 = [double]$Shape.Left
-            $top0 = [double]$Shape.Top
-            $width0 = [double]$Shape.Width
-            $height0 = [double]$Shape.Height
-            $name0 = [string]$Shape.Name
             $expanded = $false
             if ([int]$Shape.AutoShapeType -eq $script:MsoShapeRectangle) {
                 $Shape.AutoShapeType = $script:MsoShapeRoundedRectangle
@@ -282,23 +296,43 @@ function Set-HighlightBoxStyle {
             # the cosmetic radius standard, and the restore is idempotent
             # (a re-run re-wraps, re-detects, and re-restores the same value).
             $radiusRestoredForTextFit = $false
-            if ($before.CornerAdj -gt 0 -and [Math]::Abs([double]$before.CornerAdj - $CornerRadiusAdj) -gt 0.001) {
+            # Probe families the standard radius NEWLY threatens, besides the
+            # classic authored radius that differs from the standard one: a
+            # rectangle just converted to a roundRect (no author radius
+            # exists) and an author roundRect pinned at adj 0. A roundRect's
+            # text rectangle insets by the corner radius, so all three can
+            # overflow where the author geometry did not.
+            $convertedFromRectangle = ([int]$before.AutoShapeType -eq $script:MsoShapeRectangle)
+            if (($before.CornerAdj -gt 0 -and [Math]::Abs([double]$before.CornerAdj - $CornerRadiusAdj) -gt 0.001) -or
+                    $convertedFromRectangle -or $before.CornerAdj -eq 0) {
                 $fitProbe = $Shape.TextFrame.TextRange
                 $boundHeight = [double]$fitProbe.BoundHeight
                 $frameTextHeight = [double]$Shape.Height - [double]$Shape.TextFrame.MarginTop - [double]$Shape.TextFrame.MarginBottom
                 if ($boundHeight -gt $frameTextHeight + 1.0) {
-                    $Shape.Adjustments.Item(1) = $before.CornerAdj
-                    $script:radiusRestoredForTextFit = $true
+                    if ($convertedFromRectangle) {
+                        # No author radius to restore: revert the conversion
+                        # so the author rectangle survives the style pass.
+                        # Idempotent — a re-run converts again, detects the
+                        # same overflow, and reverts again.
+                        $Shape.AutoShapeType = $script:MsoShapeRectangle
+                        $script:conversionRevertedForTextFit = $true
+                    } else {
+                        $Shape.Adjustments.Item(1) = $before.CornerAdj
+                        $script:radiusRestoredForTextFit = $true
+                    }
                 }
             }
             $Shape.Fill.ForeColor.RGB = $targetFill
             $Shape.Line.Visible = $script:MsoTrue
             $Shape.Line.ForeColor.RGB = $rgbBorder
             $Shape.Line.Weight = $BorderWeightPt
-            # Text size guard: runs without an explicit sz inherit the layout
-            # master and drift when the deck is re-themed.  Pin conclusion-box
-            # text to the 36pt display size; runs already carrying a size are
-            # left untouched (per-box overrides stay respected).
+            # Text size guard, honest scope: COM Font.Size reports an
+            # effective size for inherited runs too, so TryParse below almost
+            # always succeeds and this loop only intercepts runs whose size
+            # read fails or yields an unusable value. True inherited-size
+            # protection would need run-level XML rPr sz inspection, which
+            # this tool does not do. Runs already carrying a size are left
+            # untouched (per-box overrides stay respected).
             if ($isConclusion) {
                 $tr = $Shape.TextFrame.TextRange
                 $runCount = $tr.Runs().Count
@@ -373,6 +407,9 @@ function Set-HighlightBoxStyle {
         if ($script:radiusRestoredForTextFit) {
             $details = ($details + ' Author corner radius restored: standard radius wrapped the text beyond the frame (COM-measured).').Trim()
         }
+        if ($script:conversionRevertedForTextFit) {
+            $details = ($details + ' Rounded conversion reverted for text fit: rectangle restored because the roundRect text rectangle wrapped the text (COM-measured).').Trim()
+        }
         Add-ReportRow -SlideNumber $SlideNumber -ShapeName $ShapeName -Class $Class -Before $before -After $after -Result 'Changed' -Details $details
     } else {
         $script:counters.AlreadyApplied++
@@ -386,18 +423,22 @@ $slideCount = 0
 $presentationFailed = $false
 try {
     $presentation = Invoke-WithComRetry -Action { $application.Presentations.Open($workingPptx, $false, $false, $false) }
-    $slideCount = $presentation.Slides.Count
+    $slideCount = Invoke-WithComRetry -Action { $presentation.Slides.Count }
     for ($i = 1; $i -le $slideCount; $i++) {
         $slide = Invoke-WithComRetry -Action { $presentation.Slides.Item($i) }
         try {
-            $shapes = $slide.Shapes
-            $shapeCount = $shapes.Count
+            $shapes = Invoke-WithComRetry -Action { $slide.Shapes }
+            $shapeCount = Invoke-WithComRetry -Action { $shapes.Count }
             for ($j = 1; $j -le $shapeCount; $j++) {
                 $shape = Invoke-WithComRetry -Action { $shapes.Item($j) }
                 try {
                     $shapeName = ''
-                    try { $shapeName = [string]$shape.Name } catch { }
-                    if ([int]$shape.Type -eq $script:MsoGroup) {
+                    try { $shapeName = Invoke-WithComRetry -Action { [string]$shape.Name }.GetNewClosure() } catch { }
+                    # A bare type read here would let one transient rejection
+                    # turn the whole slide into a Failed row with zero retry;
+                    # the same single-statement wrappers above cover it.
+                    $shapeType = Invoke-WithComRetry -Action { [int]$shape.Type }.GetNewClosure()
+                    if ($shapeType -eq $script:MsoGroup) {
                         $script:counters.GroupsSkipped++
                         Add-ReportRow -SlideNumber $i -ShapeName $shapeName -Class 'Group' `
                             -Before ([pscustomobject]@{ Fill = 'none'; LineColor = 'none'; LineWeightPt = 0; AutoShapeType = -1; CornerAdj = -1 }) `
@@ -450,9 +491,11 @@ try {
     try { Stop-PowerPointApplicationIfIdle -Application $application } catch { }
     Release-ComObjectSafe $application
 }
-if ($presentationFailed -and (Test-Path -LiteralPath $workingPptx)) {
+if ($presentationFailed -and -not $workingPptxPreExisting -and (Test-Path -LiteralPath $workingPptx)) {
     # Only now is the COM session fully released; removing earlier would hit
     # the live PowerPoint file lock and silently leave the half-done copy.
+    # The pre-existence guard scopes cleanup to the copy this run created:
+    # a file that already existed before the run is never deleted.
     try { Remove-Item -LiteralPath $workingPptx -Force -ErrorAction Stop } catch {
         Write-Warning ("Could not remove the incomplete highlight-box copy: {0}" -f $_.Exception.Message)
     }
