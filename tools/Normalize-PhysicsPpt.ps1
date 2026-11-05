@@ -377,6 +377,13 @@ function Test-FileFailureShapedRow {
     if ([string]$Row.Result -eq 'Failed') { return $true }
     $issue = [string]$Row.Issue
     if ($issue -in $script:FileFailureShapedIssues) { return $true }
+    # Informational retry marker: the row documents a transient attempt the
+    # retry loop already recovered from. Without this exemption the parallel
+    # parent's whole-child-CSV scan counts the recovered attempt as a file
+    # failure while the sequential path — whose per-attempt slice starts
+    # after the marker — counts success, so the same report means success in
+    # one mode and failure in the other.
+    if ($issue -eq 'RetryAfterFailure') { return $false }
     return ($issue -match '(?i)(Failed|Failure)$')
 }
 
@@ -3192,6 +3199,21 @@ if ($DegreeOfParallelism -gt 1 -and $files.Count -gt 1) {
                         Add-ReportRow -File $file.Name -FilePath $file.FullName -SlideNumber 0 -ShapeName '(presentation)' -Issue 'RetrySucceeded' -Details "Succeeded on attempt $attempt."
                     }
                     $completed = $true
+                    # Verdict parity with the parallel parent (same predicate as
+                    # the cache slice): rows that did not throw — per-shape
+                    # write failures, deferred heal failures — must still count
+                    # the file as failed, or the same report means success here
+                    # and failure under the parallel parent.
+                    $fileFailureRows = @(
+                        for ($rowIndex = $rowSnapshot; $rowIndex -lt $script:ReportRows.Count; $rowIndex++) {
+                            $sliceRow = $script:ReportRows[$rowIndex]
+                            if ($sliceRow.FilePath -eq $file.FullName -and (Test-FileFailureShapedRow $sliceRow)) { $sliceRow }
+                        }
+                    )
+                    if ($fileFailureRows.Count -gt 0) {
+                        $failedCount++
+                        Write-Warning ("Failed: {0} — {1} failure-shaped report row(s): {2}" -f $file.Name, $fileFailureRows.Count, (@($fileFailureRows | ForEach-Object { [string]$_.Issue } | Sort-Object -Unique) -join ', '))
+                    }
                 } catch {
                     Reset-ReportRowsToCount -Count $rowSnapshot
                     $details = Format-ComFailureDetails $_

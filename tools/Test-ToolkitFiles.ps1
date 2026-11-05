@@ -852,6 +852,30 @@ Add-IntentionalGeometryChange -SlideNumber 1 -ShapeId 42 -Reason 'probe-a' -Scop
 Add-IntentionalGeometryChange -SlideNumber 1 -ShapeId 7 -Reason 'probe-b' -ScopeKey 'deck-b'
 if ($script:IntentionalGeometryShapesByFile['deck-a']['ppt/slides/slide1.xml|42'] -ne 'probe-a') { throw 'Add-IntentionalGeometryChange did not record into the lazily created deck-a bucket.' }
 if ($script:IntentionalGeometryShapesByFile['deck-b']['ppt/slides/slide1.xml|7'] -ne 'probe-b') { throw 'Add-IntentionalGeometryChange did not create the second scope bucket.' }
+
+# Failure-shape predicate probe: the informational retry marker must not be
+# failure-shaped. The parallel parent scans the whole child CSV while the
+# sequential per-attempt slice starts after the marker — without the
+# exemption the same recovered run means success in one mode and failure in
+# the other.
+$normalizeAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'tools\Normalize-PhysicsPpt.ps1'), [ref]$null, [ref]$null)
+$failureIssuesAssignment = $normalizeAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -eq '$script:FileFailureShapedIssues' }, $true) | Select-Object -First 1
+if ($null -eq $failureIssuesAssignment) { throw 'FileFailureShapedIssues assignment not found for the failure-shape predicate probe.' }
+Invoke-Expression $failureIssuesAssignment.Extent.Text
+$failureShapedFunction = $normalizeAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-FileFailureShapedRow' }, $true) | Select-Object -First 1
+if ($null -eq $failureShapedFunction) { throw 'Test-FileFailureShapedRow function definition not found for the predicate probe.' }
+Invoke-Expression $failureShapedFunction.Extent.Text
+$failureShapeCases = @(
+    @('explicit failed result', [pscustomobject]@{ Result = 'Failed'; Issue = 'TextStyleApplied' }, $true),
+    @('informational retry marker', [pscustomobject]@{ Result = ''; Issue = 'RetryAfterFailure' }, $false),
+    @('explicit issue list hit', [pscustomobject]@{ Result = ''; Issue = [string]$script:FileFailureShapedIssues[0] }, $true),
+    @('catch-all failure suffix', [pscustomobject]@{ Result = ''; Issue = 'GeometryRestoreFailed' }, $true),
+    @('benign informational row', [pscustomobject]@{ Result = ''; Issue = 'RetrySucceeded' }, $false)
+)
+foreach ($failureShapeCase in $failureShapeCases) {
+    $failureShapeActual = Test-FileFailureShapedRow -Row $failureShapeCase[1]
+    if ($failureShapeActual -ne [bool]$failureShapeCase[2]) { throw ("Failure-shape predicate probe failed for {0}: expected {1}, got {2}." -f $failureShapeCase[0], $failureShapeCase[2], $failureShapeActual) }
+}
 $brandContent = Get-Content -LiteralPath (Join-Path $root 'tools\Apply-PptxBrandVisualRefresh.ps1') -Raw -Encoding UTF8
 if ($brandContent -notmatch '(?s)\$presentationToPublish\s*=.*?Copy-Item -LiteralPath \$PptxPath -Destination \$presentationToPublish.*?Presentations\.Open\(\$presentationToPublish.*?if \(-not \(Test-PptxPackageIntegrity -Path \$presentationToPublish\)\).*?Move-Item -LiteralPath \$presentationToPublish -Destination \$workingPptx') {
     throw 'Brand refresh must write a verified temporary copy and publish it only on success.'
