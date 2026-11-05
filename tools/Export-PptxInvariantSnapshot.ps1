@@ -152,7 +152,7 @@ function Get-ShapeSnapshot {
     $runFormats = $null
     try {
         if ($Shape.TextFrame2.HasText -eq -1) { $runFormats = Get-RunFormatFingerprint -Shape $Shape -ReadFailed ([ref]$readFailed) }
-    } catch { }
+    } catch { $readFailed = $true }
     [pscustomobject]@{
         id = [int](Get-SafeComProperty $Shape 'Id' 0 ([ref]$readFailed))
         name = [string](Get-SafeComProperty $Shape 'Name' '' ([ref]$readFailed))
@@ -196,7 +196,11 @@ function Add-ShapeSnapshotRows {
         # the invariant comparator.
         if ([int]$row.type -eq 6) {
             $groupId = [int]$row.id
-            foreach ($child in $Shape.GroupItems) {
+            # Same transient-rejection exposure as the slide-level enumeration:
+            # a bare GroupItems read fails the whole group into one unreadable
+            # count instead of its children's real snapshots.
+            $groupChildren = Invoke-WithComRetry -MaxRetries 3 -DelayMs 1500 -Action { @($Shape.GroupItems) }.GetNewClosure()
+            foreach ($child in $groupChildren) {
                 Add-ShapeSnapshotRows -Shape $child -ParentGroupId $groupId -Rows $Rows -UnreadableCount $UnreadableCount
             }
         }
@@ -210,7 +214,11 @@ function Get-SlideSnapshot {
     $shapeRows = New-Object System.Collections.Generic.List[object]
     $unreadableShapeCount = 0
     try {
-        foreach ($shape in $Slide.Shapes) {
+        # One transient rejection in a bare enumeration would silently drop
+        # every shape on the slide (the catch only bumps the unreadable
+        # count), so capture the collection under the shared retry first.
+        $slideShapes = Invoke-WithComRetry -MaxRetries 3 -DelayMs 1500 -Action { @($Slide.Shapes) }.GetNewClosure()
+        foreach ($shape in $slideShapes) {
             Add-ShapeSnapshotRows -Shape $shape -ParentGroupId 0 -Rows $shapeRows -UnreadableCount ([ref]$unreadableShapeCount)
         }
     } catch {
@@ -301,14 +309,19 @@ try {
         $slides += Get-SlideSnapshot -Slide (Invoke-WithComRetry -MaxRetries 3 -DelayMs 1500 -Action { $presentation.Slides.Item($i) }) -Index $i
     }
 
+    # PageSetup sits in the same post-open busy window as the Slides.Count
+    # read above; retry the width/height reads the same way and reuse the
+    # already-wrapped live count instead of re-reading Slides.Count bare.
+    $slideWidth = [double](Invoke-WithComRetry -MaxRetries 3 -DelayMs 1500 -Action { $presentation.PageSetup.SlideWidth })
+    $slideHeight = [double](Invoke-WithComRetry -MaxRetries 3 -DelayMs 1500 -Action { $presentation.PageSetup.SlideHeight })
     $snapshot = [pscustomobject]@{
         schemaVersion = 1
         generatedAt = (Get-Date).ToUniversalTime().ToString('o')
         sourcePath = $inputFullPath
         sourceSha256 = Get-FileSha256Hex -Path $inputFullPath
-        slideWidth = [double]$presentation.PageSetup.SlideWidth
-        slideHeight = [double]$presentation.PageSetup.SlideHeight
-        slideCount = [int]$presentation.Slides.Count
+        slideWidth = $slideWidth
+        slideHeight = $slideHeight
+        slideCount = $slideCountLive
         slides = @($slides)
         package = Get-PackageSnapshot -PptxPath $inputFullPath
     }

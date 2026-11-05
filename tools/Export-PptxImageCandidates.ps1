@@ -442,6 +442,7 @@ $files = @(Get-PresentationFiles -Path $InputPath -Pattern $FilePattern -Recurse
 if ($files.Count -eq 0) { throw "No PPTX files found in $InputPath" }
 
 $allRows = New-Object System.Collections.Generic.List[object]
+$failedFiles = New-Object System.Collections.Generic.List[object]
 foreach ($file in $files) {
     Write-Host "Scanning images: $($file.Name)"
     try {
@@ -450,7 +451,13 @@ foreach ($file in $files) {
         }
     } catch {
         # One unreadable deck must not abort a multi-file scan; keep going so
-        # the remaining decks still produce their candidate reports.
+        # the remaining decks still produce their candidate reports. Record
+        # the failure so the manifest distinguishes an all-decks failure from
+        # a valid scan that legitimately found nothing.
+        $failedFiles.Add([pscustomobject]@{
+            file = $file.Name
+            error = $_.Exception.Message
+        }) | Out-Null
         Write-Warning "Image scan failed for $($file.Name): $($_.Exception.Message)"
     }
 }
@@ -461,7 +468,7 @@ $manifestPath = Join-Path $OutputDir 'pptx-image-candidates-manifest.json'
 
 $sortedRows = @($allRows | Sort-Object Deck, @{ Expression = 'EnhancementCandidate'; Descending = $true }, @{ Expression = 'PhotoScore'; Descending = $true }, MediaPath)
 Write-Utf8BomCsv -InputObject $sortedRows -Path $csvPath
-$sortedRows | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $jsonPath -Encoding UTF8
+Write-Utf8BomText -Text ($sortedRows | ConvertTo-Json -Depth 6) -Path $jsonPath
 
 $candidateRows = @($allRows | Where-Object { $_.EnhancementCandidate })
 $likelyRows = @($allRows | Where-Object { $_.CandidateLevel -eq 'LikelyPhoto' })
@@ -473,6 +480,7 @@ $manifest = [pscustomobject]@{
     input = $InputPath
     outputDir = $OutputDir
     fileCount = $files.Count
+    failedFiles = @($failedFiles)
     imageCount = $allRows.Count
     enhancementCandidateCount = $candidateRows.Count
     likelyPhotoCount = $likelyRows.Count
@@ -486,7 +494,7 @@ $manifest = [pscustomobject]@{
     json = $jsonPath
     note = 'Scanner is heuristic and read-only. Video poster frames are excluded from image enhancement candidates.'
 }
-$manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+Write-Utf8BomText -Text ($manifest | ConvertTo-Json -Depth 6) -Path $manifestPath
 
 Write-Host "Image candidate scan done: $OutputDir"
 Write-Host "Candidates: $($candidateRows.Count) / Images: $($allRows.Count)"

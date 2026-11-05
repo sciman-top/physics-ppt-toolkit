@@ -126,17 +126,23 @@ try {
     # automation instance is still tearing down; use the shared COM retry.
     $pp = Invoke-WithComRetry -MaxRetries 3 -DelayMs 1500 -Action { New-PowerPointApplication }
     $pres = Invoke-WithComRetry -MaxRetries 3 -DelayMs 1500 -Action { $pp.Presentations.Open($OutputPath, $script:MsoFalse, $script:MsoFalse, $script:MsoFalse) }
-    $slideWidth = [double]$pres.PageSetup.SlideWidth
-    $slideHeight = [double]$pres.PageSetup.SlideHeight
+    # PageSetup sits in the same post-open busy window as Open above: one
+    # unguarded read here aborts the fix pass before any fix row is reported.
+    $slideWidth = [double](Invoke-WithComRetry -MaxRetries 3 -DelayMs 1000 -Action { $pres.PageSetup.SlideWidth })
+    $slideHeight = [double](Invoke-WithComRetry -MaxRetries 3 -DelayMs 1000 -Action { $pres.PageSetup.SlideHeight })
 
     foreach ($row in $rows) {
         $slideNo = [int]$row.Slide
         $shapeName = [string]$row.Shape
         try {
-            $slide = $pres.Slides.Item($slideNo)
+            # Same post-open busy window as the PageSetup reads above: wrap
+            # the per-row Item/enumeration reads so a transient rejection is
+            # retried instead of consumed as a per-row failure.
+            $slide = Invoke-WithComRetry -MaxRetries 3 -DelayMs 1000 -Action { $pres.Slides.Item($slideNo) }
             $shape = $null
             $nameMatches = New-Object System.Collections.Generic.List[object]
-            foreach ($candidate in $slide.Shapes) {
+            $slideShapes = Invoke-WithComRetry -MaxRetries 3 -DelayMs 1000 -Action { @($slide.Shapes) }.GetNewClosure()
+            foreach ($candidate in $slideShapes) {
                 if ([string]$candidate.Name -eq $shapeName) {
                     $nameMatches.Add($candidate)
                 }

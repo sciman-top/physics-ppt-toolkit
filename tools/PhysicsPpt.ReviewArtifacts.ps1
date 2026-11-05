@@ -325,8 +325,13 @@ function Export-SourcePageImages {
     $pp = $null
     $presentations = $null
     try {
-        $pp = New-PowerPointApplication
-        try { $presentations = $pp.Presentations } catch { $presentations = $null }
+        # Application start rejects transiently while a previous automation
+        # instance is still tearing down; the Open below already retries.
+        $pp = Invoke-WithComRetry -Action { New-PowerPointApplication }.GetNewClosure()
+        # A null collections reference would fail every deck's Open below, so
+        # this read gets the same retry treatment as the start above instead
+        # of a swallow-to-null catch.
+        $presentations = Invoke-WithComRetry -Action { $pp.Presentations }.GetNewClosure()
         foreach ($file in $Files) {
             $identity = $IdentityMap[$file.FullName]
             $imageDir = Join-Path $sourceImageRoot $identity.safeStem

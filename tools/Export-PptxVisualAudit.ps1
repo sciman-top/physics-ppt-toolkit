@@ -394,7 +394,11 @@ try {
             }
         }
 
-        foreach ($shape in $slide.Shapes) {
+        # Shapes enumeration is a COM call too; one transient rejection here
+        # aborts the audit mid-loop and loses every CSV/manifest. Capture the
+        # collection under the shared retry before iterating.
+        $slideShapes = Invoke-WithComRetry -MaxRetries 3 -DelayMs 800 -Action { @($slide.Shapes) }.GetNewClosure()
+        foreach ($shape in $slideShapes) {
             $shapeName = Get-ShapeName -Shape $shape
             $shapeType = Get-ShapeTypeName -Shape $shape
             try {
@@ -572,7 +576,7 @@ $manifest = [pscustomobject]@{
     contactSheet = if ($contactSheetCreated) { $contactSheetPath } else { '' }
     note = 'Rule-based visual audit. Use exported PNG/PDF for final visual review before replacing originals.'
 }
-$manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+Write-Utf8BomText -Text ($manifest | ConvertTo-Json -Depth 6) -Path $manifestPath
 
 Write-Host "Visual audit done: $OutputDir"
 Write-Host "Slides: $($slideRows.Count); Errors: $errorCount; Warnings: $warningCount"
