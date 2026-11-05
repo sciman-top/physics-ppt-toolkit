@@ -205,7 +205,17 @@ function Get-HighlightBoxClass {
             $lineRgb = [int]$Shape.Line.ForeColor.RGB
             if ($lineRgb -eq $rgbLegacyBorderOrange -or $lineRgb -eq $rgbLegacyBorderRed) { return 'Conclusion' }
         }
-    } catch { return 'ClassifyFailed' }
+    } catch {
+        # Transient COM rejections (RPC_E_CALL_REJECTED and family) must
+        # propagate to the Invoke-WithComRetry wrapper at the call site: a
+        # blanket swallow here made the wrapper dead code and the stage lost
+        # its only resilience against busy-reject storms. Deterministic read
+        # failures stay a fast ClassifyFailed — burning retries on a permanent
+        # shape state (e.g. ForeColor on a gradient fill) only delays the same
+        # loud Failed row.
+        if (Test-IsRetryablePresentationFailure -Category (Get-ComFailureCategory -ErrorRecord $_) -Message $_.Exception.Message) { throw }
+        return 'ClassifyFailed'
+    }
     return $null
 }
 

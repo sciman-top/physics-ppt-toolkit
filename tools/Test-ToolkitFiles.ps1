@@ -819,6 +819,21 @@ foreach ($stageScript in @('tools\Apply-PptxBrandVisualRefresh.ps1', 'tools\Appl
         throw "Explicit output path must copy the source into the original backup directory: $stageScript"
     }
 }
+
+# Retry-wrapper liveness probe: Get-HighlightBoxClass catch clauses must
+# rethrow or consult the retryability filter. A blanket catch returning
+# ClassifyFailed directly never lets the exception reach the call site's
+# Invoke-WithComRetry wrapper, so transient COM rejections fail the whole
+# stage with zero retries attempted (9b78dce intent defeated by the very
+# catch added alongside it).
+$highlightBoxAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'tools\Apply-PptxHighlightBoxStyle.ps1'), [ref]$null, [ref]$null)
+$classifyFunctionAst = $highlightBoxAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-HighlightBoxClass' }, $true) | Select-Object -First 1
+if ($null -eq $classifyFunctionAst) { throw 'Get-HighlightBoxClass function definition not found for the retry-liveness probe.' }
+foreach ($classifyCatch in @($classifyFunctionAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.CatchClauseAst] }, $true))) {
+    $catchRethrows = $classifyCatch.Body.FindAll({ param($node) $node -is [System.Management.Automation.Language.ThrowStatementAst] }, $true).Count -gt 0
+    $catchFiltersRetryable = @($classifyCatch.Body.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Test-IsRetryablePresentationFailure' }, $true)).Count -gt 0
+    if (-not ($catchRethrows -or $catchFiltersRetryable)) { throw 'Get-HighlightBoxClass catch must rethrow or consult Test-IsRetryablePresentationFailure; a blanket ClassifyFailed swallow defeats the call-site COM retry wrapper.' }
+}
 $brandContent = Get-Content -LiteralPath (Join-Path $root 'tools\Apply-PptxBrandVisualRefresh.ps1') -Raw -Encoding UTF8
 if ($brandContent -notmatch '(?s)\$presentationToPublish\s*=.*?Copy-Item -LiteralPath \$PptxPath -Destination \$presentationToPublish.*?Presentations\.Open\(\$presentationToPublish.*?if \(-not \(Test-PptxPackageIntegrity -Path \$presentationToPublish\)\).*?Move-Item -LiteralPath \$presentationToPublish -Destination \$workingPptx') {
     throw 'Brand refresh must write a verified temporary copy and publish it only on success.'
