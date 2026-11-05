@@ -923,6 +923,26 @@ try {
 } finally {
     Remove-Item -LiteralPath $zipProbePath -Force -ErrorAction SilentlyContinue
 }
+
+# Size-fit terminal gate probe: the overflow repair loop must track a clean
+# measurement state (seeded false, set true on the two no-overflow exits)
+# and keep a post-loop throw naming the still-overflowing shapes. The S1 fix
+# (silent Unfittable pass-through) has no pure function to probe, so the
+# structural lock below keeps a regression from quietly shipping clipped
+# formulas again.
+$batchAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'tools\Invoke-FormulaOleBatch.ps1'), [ref]$null, [ref]$null)
+$cleanAssignments = @($batchAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -eq '$measurementsClean' }, $true))
+if ($cleanAssignments.Count -lt 3) { throw ("Size-fit loop must seed measurementsClean=false and mark it clean on the no-overflow exits; found only {0} assignment(s)." -f $cleanAssignments.Count) }
+function Get-EnclosingActionScriptBlock($Node) {
+    $current = $Node.Parent
+    while ($null -ne $current -and $current -isnot [System.Management.Automation.Language.ScriptBlockExpressionAst]) { $current = $current.Parent }
+    return $current
+}
+$sizeFitActionBlock = Get-EnclosingActionScriptBlock $cleanAssignments[0]
+if ($null -eq $sizeFitActionBlock) { throw 'Size-fit measurementsClean assignments are not inside an -Action scriptblock; probe boundary lost.' }
+if ((Get-EnclosingActionScriptBlock $cleanAssignments[-1]) -ne $sizeFitActionBlock) { throw 'Size-fit clean assignments span multiple scriptblocks; probe boundary lost.' }
+$terminalThrows = @($sizeFitActionBlock.FindAll({ param($node) $node -is [System.Management.Automation.Language.ThrowStatementAst] }, $true) | Where-Object { $_.Extent.StartOffset -gt $cleanAssignments[-1].Extent.EndOffset })
+if ($terminalThrows.Count -eq 0) { throw 'Size-fit post-loop terminal throw (still-overflow batch failure) is missing after the last measurementsClean assignment.' }
 $brandContent = Get-Content -LiteralPath (Join-Path $root 'tools\Apply-PptxBrandVisualRefresh.ps1') -Raw -Encoding UTF8
 if ($brandContent -notmatch '(?s)\$presentationToPublish\s*=.*?Copy-Item -LiteralPath \$PptxPath -Destination \$presentationToPublish.*?Presentations\.Open\(\$presentationToPublish.*?if \(-not \(Test-PptxPackageIntegrity -Path \$presentationToPublish\)\).*?Move-Item -LiteralPath \$presentationToPublish -Destination \$workingPptx') {
     throw 'Brand refresh must write a verified temporary copy and publish it only on success.'

@@ -8,6 +8,11 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
   <ItemGroup>
+    <!-- Program.cs exempts two benign OpenXml validation errors by their
+         English Description substrings ("leaf element"; "invalid child
+         element" combined with a main:rPr path). An SDK upgrade can rewrite
+         those texts and flip the exemptions back into blocking errors —
+         re-verify both after any DocumentFormat.OpenXml bump. -->
     <PackageReference Include="DocumentFormat.OpenXml" Version="3.3.0" />
   </ItemGroup>
 </Project>

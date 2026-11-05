@@ -214,8 +214,11 @@ function Measure-FormulaOmmlRenderBounds {
             Write-Host ("[size-fit] COM attempt {0} failed transiently, retrying: {1}" -f $attempts, (Format-ComFailureDetails -ErrorRecord $_))
             Start-Sleep -Seconds (3 * $attempts)
         } finally {
-            if ($null -ne $presentation) { $presentation.Close() }
-            if ($null -ne $powerPoint) { $powerPoint.Quit() }
+            # A transient Close/Quit rejection in this teardown window must
+            # not discard a successful measurement returned above; same wrap
+            # as the final-pdf teardown (the battle-verified pattern).
+            if ($null -ne $presentation) { try { $presentation.Close() } catch { } }
+            if ($null -ne $powerPoint) { try { $powerPoint.Quit() } catch { } }
             Release-ComObjectSafe $presentation
             Release-ComObjectSafe $powerPoint
         }
@@ -448,6 +451,12 @@ $completedManifestWritten = $false
 # even when the batch failed before the delivery steps assigned them.
 $outputPptx = $null
 $finalPdfPath = $null
+# Creator tracking for the same cleanup: only outputs THIS run produced are
+# removed on failure — a refused-overwrite pre-existing final PDF or a
+# -Resume carryover from a crashed earlier run must survive with its
+# evidence and reusable step receipts intact.
+$outputPptxCreatedByRun = $false
+$finalPdfCreatedByRun = $false
 try {
     # --- step 1: carrier inventory ---
     $inventoryDir = Join-Path $reportDir 'inventory'
@@ -502,6 +511,7 @@ try {
     Invoke-BatchStep -StepName 'apply' -Inputs @($inputFullPath, $mappingCsv, $fragmentsDir) -Outputs @($outputPptx, $applyReport) -Action {
         & (Join-Path $PSScriptRoot 'Apply-FormulaOmmlForOle.ps1') -InputPath $inputFullPath -MappingCsv $mappingCsv -OmmlCandidateCsv $candidatesCsv -OutputPath $outputPptx -ReportPath $applyReport -MaxItems $MaxItems | Out-Null
     }
+    $outputPptxCreatedByRun = $true
 
     # --- step 7: rendered size fit (PowerPoint-measured overflow guard) ---
     $sizeFitReport = Join-Path $reportDir 'formula-ole-size-fit-report.csv'
@@ -657,6 +667,7 @@ try {
             }
         }
     }
+    $finalPdfCreatedByRun = $true
 
     # --- step 10: after visual audit (PowerPoint open proof + pages) ---
     if (-not $SkipVisualAudit) {
@@ -693,7 +704,7 @@ try {
     }
     $manifest = [ordered]@{
         schemaVersion = 1
-        generatedAt = Get-Date -Format 'yyyy-MM-dd hh:mm:ss'
+        generatedAt = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
         status = $batchStatus
         input = [ordered]@{ path = $inputFullPath; sha256 = $inputSha256 }
         goldSet = [ordered]@{ path = $goldSetPath; sha256 = $goldSetSha256 }
@@ -761,7 +772,15 @@ try {
     if (-not $completedManifestWritten) {
         # An incomplete batch must not leave half-built deliverables behind
         # either; the apply step's output is removed with the same contract.
-        foreach ($partialOutput in @($outputPptx, $finalPdfPath)) {
+        # Only outputs this run created are removed. A refused-overwrite
+        # pre-existing final PDF (the final-pdf step refuses stale evidence
+        # loudly) or a -Resume carryover from a crashed earlier run must
+        # survive this failure with its evidence and reusable receipts
+        # intact; deleting it here contradicted the step-level guard.
+        $runCreatedOutputs = @()
+        if ($outputPptxCreatedByRun) { $runCreatedOutputs += $outputPptx }
+        if ($finalPdfCreatedByRun) { $runCreatedOutputs += $finalPdfPath }
+        foreach ($partialOutput in $runCreatedOutputs) {
             if (-not [string]::IsNullOrWhiteSpace([string]$partialOutput) -and (Test-Path -LiteralPath $partialOutput)) {
                 try { Remove-Item -LiteralPath $partialOutput -Force -ErrorAction Stop } catch {
                     Write-Warning ("Failed to remove the partial batch output: {0}" -f $_.Exception.Message)
@@ -770,7 +789,7 @@ try {
         }
         $manifest = [ordered]@{
             schemaVersion = 1
-            generatedAt = Get-Date -Format 'yyyy-MM-dd hh:mm:ss'
+            generatedAt = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
             status = 'Failed'
             error = $_.Exception.Message
             input = [ordered]@{ path = $inputFullPath; sha256 = $inputSha256 }
