@@ -132,7 +132,7 @@ reports/13.2内能（王耀强）_v12/
 # FullChain 与 -PrepareAiVisualReview/-AiVisualReviewResult 组合会被拒绝。
 
 # 受控放映验收：逐页进入 PowerPoint 放映视图，保留首末页 PNG 与播放收据；
-# 仅在全屏接管可见桌面可接受时加 -FullScreen。
+# 放映总会全屏接管可见桌面，-FullScreen 仅把该模式记录进播放收据。
 pwsh -NoProfile -File tools\Test-PhysicsPptPlayback.ps1 `
   -InputPath .\reports\<课件身份>_v<N>\01_交付物\<课件身份>.pptx `
   -EvidenceDir .\reports\<课件身份>_v<N>\18_受控播放验收
@@ -183,7 +183,7 @@ VBA 宏是独立的离线方案，不读取 JSON 配置。如需调整，请手�
 ## 适用场景
 
 - 批量统一标题、正文、重点框样式（表格样式默认保留，仅报告；VBA 备用宏可选统一表格）。
-- 批量设置普通页白底、视频页黑底。
+- 批量设置普通页白底、视频页黑底（默认关闭、仅进报告行；按 `docs\自动化边界与风险控制.md` 显式启用后需视觉复核）。
 - 批量检查小字号、疑似公式、非规范字体、配置字体回退风险和非 16:9 画布。
 - 对既有 PPT 进行低风险视觉规范化。
 

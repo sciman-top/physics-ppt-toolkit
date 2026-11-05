@@ -4,8 +4,13 @@
 
 .DESCRIPTION
   Checks the production, review, and optional helper tools used by this PPT
-  workflow. The default run avoids opening PowerPoint. Use -LaunchPowerPoint
-  when you need to verify live COM activation as well as registration.
+  workflow. The default run avoids opening PowerPoint and only blocks on
+  Required-tier gaps. Use -LaunchPowerPoint when you need to verify live COM
+  activation as well as registration. Use -Deep for the delivery-depth gate:
+  Recommended-tier gaps (legacy host, .NET SDK unless -RequireFormulaValidator
+  already promoted it) then block like Required failures; SKIP stays
+  non-blocking because live activation remains an explicit -LaunchPowerPoint
+  decision.
 
 .EXAMPLE
   .\tools\Assert-Toolchain.ps1
@@ -329,9 +334,21 @@ foreach ($tool in @('magick', 'ffmpeg', 'pngquant', 'cjpeg', 'jpegtran')) {
 $ordered = @($checks | Sort-Object Order, Name)
 $requiredFailures = @($ordered | Where-Object { $_.Tier -eq 'Required' -and $_.Status -in @('MISSING', 'FAIL') })
 
+# -Deep gives the Recommended tier delivery-gate force (the deep level of the
+# AGENTS.md gate hierarchy). SKIP is not a failure: live PowerPoint activation
+# stays an explicit -LaunchPowerPoint decision, so an unlaunched probe is a
+# deliberate opt-out, not a gap.
+$deepFailures = @()
+if ($Deep) {
+    $deepFailures = @($ordered | Where-Object { $_.Tier -eq 'Recommended' -and $_.Status -in @('WARN', 'MISSING', 'FAIL') })
+}
+$blockingFailures = @($requiredFailures + $deepFailures)
+
 $ordered | Select-Object Tier, Name, Status, Version, Path, Details | Format-Table -AutoSize
 Write-Host ("Required failures: {0}" -f $requiredFailures.Count)
+if ($Deep) { Write-Host ("Deep (recommended-tier) failures counted as blocking: {0}" -f $deepFailures.Count) }
 
-if ($requiredFailures.Count -gt 0) {
-    throw "Toolchain check failed: required=$($requiredFailures.Count)."
+if ($blockingFailures.Count -gt 0) {
+    $scope = if ($Deep) { 'required+deep' } else { 'required' }
+    throw ("Toolchain check failed: {0}={1}." -f $scope, $blockingFailures.Count)
 }
