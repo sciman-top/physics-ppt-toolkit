@@ -102,7 +102,9 @@ if ($PSCmdlet.ParameterSetName -eq 'VerifyGoldSetEvidence') {
     }
     $receiptParent = Split-Path -Parent $EvidenceReceiptPath
     if (-not [string]::IsNullOrWhiteSpace($receiptParent)) { New-Item -ItemType Directory -Path $receiptParent -Force | Out-Null }
-    $receipt | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $EvidenceReceiptPath -Encoding UTF8
+    # Human-readable JSON keeps the UTF-8 BOM via the shared writer; pwsh's
+    # Set-Content -Encoding UTF8 emits BOM-less UTF-8.
+    Write-Utf8BomText -Text ($receipt | ConvertTo-Json -Depth 20) -Path $EvidenceReceiptPath
     Write-Host "Formula GoldSet evidence availability written: $EvidenceReceiptPath"
     return
 }
@@ -186,7 +188,9 @@ $manifest = [ordered]@{
 }
 $jsonPath = Join-Path $OutputDir 'formula-goldset-manifest.json'
 $csvPath = Join-Path $OutputDir 'formula-goldset.csv'
-$manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $jsonPath -Encoding UTF8
+# Same UTF-8-BOM rule as the evidence receipt above; do not revert to
+# Set-Content, which drops the BOM under pwsh.
+Write-Utf8BomText -Text ($manifest | ConvertTo-Json -Depth 20) -Path $jsonPath
 Write-Utf8BomCsv -InputObject @($records | ForEach-Object { [pscustomobject]@{ GoldSetId = $_.goldSetId; Carrier = $_.source.carrier; Slide = $_.source.slide; SourceId = $_.source.sourceId; SourceSha256 = $_.source.sourceSha256; GroundTruthClass = $_.groundTruth.class; Difficulty = $_.groundTruth.difficulty; ReviewStatus = $_.groundTruth.reviewStatus; CanonicalStatus = $_.canonical.status; UnicodeMath = $_.canonical.unicodeMath; TeX = $_.canonical.tex; EvidencePath = $_.evidence.path; EvidenceSha256 = $_.evidence.sha256; EvidenceKind = $_.evidence.kind } }) -Path $csvPath
 Write-Host "Formula GoldSet exported: $OutputDir"
 Write-Host "Total: $($manifest.counts.total); Formula: $($manifest.counts.formula); NonFormula: $($manifest.counts.nonFormula); MixedNonIsolatable: $($manifest.counts.mixedNonIsolatable)"

@@ -705,7 +705,7 @@ $csvColumns = @(
 Write-Utf8BomCsvWithHeader -Rows @($csvRows.ToArray()) -Columns $csvColumns -Path $csvPath
 
 $counts = [ordered]@{}
-foreach ($carrierName in @('OfficeMath', 'MathTypeOle', 'TextFormula', 'FormulaImage', 'MixedImage', 'GroupFormula', 'Unknown')) {
+foreach ($carrierName in @('OfficeMath', 'MathTypeOle', 'TextFormula', 'FormulaImage', 'MixedImage', 'Picture', 'GroupFormula', 'Unknown')) {
     $counts[$carrierName] = @($records | Where-Object { $_.source.carrier -eq $carrierName }).Count
 }
 $manifest = [ordered]@{
@@ -744,10 +744,11 @@ $summaryLines.Add("| MathTypeOle | $($counts.MathTypeOle) | 保留原 OLE，待�
 $summaryLines.Add("| TextFormula | $($counts.TextFormula) | 白名单仅作候选，未写回 |") | Out-Null
 $summaryLines.Add("| FormulaImage | $($counts.FormulaImage) | 进入识别/白名单审查 |") | Out-Null
 $summaryLines.Add("| MixedImage | $($counts.MixedImage) | 保留图片，禁止自由 OCR 写回 |") | Out-Null
+$summaryLines.Add("| Picture | $($counts.Picture) | 保留图片，仅经显式 GoldSet 迁移 |") | Out-Null
 $summaryLines.Add("| GroupFormula | $($counts.GroupFormula) | 组合对象保护，人工/显式迁移 |") | Out-Null
 $summaryLines.Add("| Unknown | $($counts.Unknown) | 人工识别来源后再决定 |") | Out-Null
 $summaryLines.Add('') | Out-Null
 $summaryLines.Add('本报告是只读盘点。图片启发式、OCR 或视觉模型只产生候选，不构成 canonical 公式内容；任何 OfficeMath 写回仍需 FormulaIR、结构校验、PowerPoint 保存/导出和视觉门禁。') | Out-Null
 Write-Utf8BomText -Text ($summaryLines -join "`r`n") -Path $summaryPath
 
-Write-Output ("Formula carrier inventory done: {0}`nRecords: {1}; OfficeMath={2}; MathTypeOle={3}; TextFormula={4}; FormulaImage={5}; MixedImage={6}; GroupFormula={7}; Unknown={8}" -f $outputFullPath, $records.Count, $counts.OfficeMath, $counts.MathTypeOle, $counts.TextFormula, $counts.FormulaImage, $counts.MixedImage, $counts.GroupFormula, $counts.Unknown)
+Write-Output ("Formula carrier inventory done: {0}`nRecords: {1}; OfficeMath={2}; MathTypeOle={3}; TextFormula={4}; FormulaImage={5}; Picture={6}; MixedImage={7}; GroupFormula={8}; Unknown={9}" -f $outputFullPath, $records.Count, $counts.OfficeMath, $counts.MathTypeOle, $counts.TextFormula, $counts.FormulaImage, $counts.Picture, $counts.MixedImage, $counts.GroupFormula, $counts.Unknown)
