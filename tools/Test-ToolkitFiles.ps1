@@ -876,6 +876,53 @@ foreach ($failureShapeCase in $failureShapeCases) {
     $failureShapeActual = Test-FileFailureShapedRow -Row $failureShapeCase[1]
     if ($failureShapeActual -ne [bool]$failureShapeCase[2]) { throw ("Failure-shape predicate probe failed for {0}: expected {1}, got {2}." -f $failureShapeCase[0], $failureShapeCase[2], $failureShapeActual) }
 }
+
+# Zip in-place overwrite probe: Write-ZipEntryText must replace an existing
+# entry via Update-mode stream overwrite (write + SetLength), not the
+# Delete->Create dance that stranded part-less packages on mid-write
+# failures. Overwriting with shorter text must not leave a stale tail, a
+# missing entry must fail loud without -CreateIfMissing, and the switch must
+# still create.
+Add-Type -AssemblyName System.IO.Compression -ErrorAction SilentlyContinue
+$zipCommonAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'tools\PhysicsPpt.Common.ps1'), [ref]$null, [ref]$null)
+$zipEntryTextFunction = $zipCommonAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Write-ZipEntryText' }, $true) | Select-Object -First 1
+if ($null -eq $zipEntryTextFunction) { throw 'Write-ZipEntryText function definition not found for the in-place overwrite probe.' }
+Invoke-Expression $zipEntryTextFunction.Extent.Text
+$zipProbePath = Join-Path $env:TEMP ("zip-entry-probe-" + [guid]::NewGuid().ToString('N') + '.zip')
+try {
+    $zipCreateStream = [System.IO.File]::Create($zipProbePath)
+    $zipCreate = New-Object System.IO.Compression.ZipArchive($zipCreateStream, [System.IO.Compression.ZipArchiveMode]::Create)
+    try {
+        $seedStream = $zipCreate.CreateEntry('ppt/slides/slide1.xml').Open()
+        try { $seedBytes = [System.Text.Encoding]::UTF8.GetBytes(('x' * 500)); $seedStream.Write($seedBytes, 0, $seedBytes.Length) } finally { $seedStream.Dispose() }
+    } finally { $zipCreate.Dispose(); $zipCreateStream.Dispose() }
+    $zipUpdateStream = [System.IO.File]::Open($zipProbePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite)
+    $zipUpdate = New-Object System.IO.Compression.ZipArchive($zipUpdateStream, [System.IO.Compression.ZipArchiveMode]::Update)
+    try {
+        Write-ZipEntryText -Zip $zipUpdate -EntryName 'ppt/slides/slide1.xml' -Text '<short/>'
+        $replaceThrew = $false
+        try { Write-ZipEntryText -Zip $zipUpdate -EntryName 'ppt/slides/absent.xml' -Text '<x/>' } catch { $replaceThrew = $true }
+        if (-not $replaceThrew) { throw 'Write-ZipEntryText must fail loud for a missing entry without -CreateIfMissing.' }
+        Write-ZipEntryText -Zip $zipUpdate -EntryName 'ppt/slides/created.xml' -Text '<created/>' -CreateIfMissing
+    } finally { $zipUpdate.Dispose(); $zipUpdateStream.Dispose() }
+    $zipReadStream = [System.IO.File]::OpenRead($zipProbePath)
+    $zipRead = New-Object System.IO.Compression.ZipArchive($zipReadStream, [System.IO.Compression.ZipArchiveMode]::Read)
+    try {
+        $expectedBytes = [System.Text.Encoding]::UTF8.GetBytes('<short/>')
+        $probeEntry = $zipRead.GetEntry('ppt/slides/slide1.xml')
+        if ($null -eq $probeEntry) { throw 'In-place zip overwrite lost the entry.' }
+        $probeStream = $probeEntry.Open()
+        try {
+            $probeBytes = New-Object byte[] $probeEntry.Length
+            $readTotal = 0
+            while ($readTotal -lt $probeBytes.Length) { $readTotal += $probeStream.Read($probeBytes, $readTotal, $probeBytes.Length - $readTotal) }
+        } finally { $probeStream.Dispose() }
+        if ($readTotal -ne $expectedBytes.Length -or [System.Text.Encoding]::UTF8.GetString($probeBytes) -ne '<short/>') { throw 'In-place zip overwrite left stale tail bytes or wrong content.' }
+        if ($null -eq $zipRead.GetEntry('ppt/slides/created.xml')) { throw 'Write-ZipEntryText -CreateIfMissing did not create the entry.' }
+    } finally { $zipRead.Dispose(); $zipReadStream.Dispose() }
+} finally {
+    Remove-Item -LiteralPath $zipProbePath -Force -ErrorAction SilentlyContinue
+}
 $brandContent = Get-Content -LiteralPath (Join-Path $root 'tools\Apply-PptxBrandVisualRefresh.ps1') -Raw -Encoding UTF8
 if ($brandContent -notmatch '(?s)\$presentationToPublish\s*=.*?Copy-Item -LiteralPath \$PptxPath -Destination \$presentationToPublish.*?Presentations\.Open\(\$presentationToPublish.*?if \(-not \(Test-PptxPackageIntegrity -Path \$presentationToPublish\)\).*?Move-Item -LiteralPath \$presentationToPublish -Destination \$workingPptx') {
     throw 'Brand refresh must write a verified temporary copy and publish it only on success.'

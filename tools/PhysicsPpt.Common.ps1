@@ -939,16 +939,27 @@ function Write-ZipEntryText {
         [string]$Text,
         [switch]$CreateIfMissing
     )
+    $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($Text)
     $entry = $Zip.GetEntry($EntryName)
-    if ($null -eq $entry) {
-        if (-not $CreateIfMissing) { throw "Zip entry not found: $EntryName" }
-    } else {
-        $entry.Delete() | Out-Null
+    if ($null -ne $entry) {
+        # Overwrite the existing entry in place (Update mode replaces the
+        # content when the stream is disposed): the Delete->Create dance left
+        # a window where a mid-write failure stranded the package without its
+        # part (0381ac1⑦ applied the same change to the geometry heal writer;
+        # this closes it for every other zip text consumer).
+        $stream = $entry.Open()
+        try {
+            $stream.Write($bytes, 0, $bytes.Length)
+            $stream.SetLength($bytes.Length)
+        } finally {
+            $stream.Dispose()
+        }
+        return
     }
+    if (-not $CreateIfMissing) { throw "Zip entry not found: $EntryName" }
     $newEntry = $Zip.CreateEntry($EntryName, [System.IO.Compression.CompressionLevel]::Optimal)
     $stream = $newEntry.Open()
     try {
-        $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($Text)
         $stream.Write($bytes, 0, $bytes.Length)
     } finally {
         $stream.Dispose()
