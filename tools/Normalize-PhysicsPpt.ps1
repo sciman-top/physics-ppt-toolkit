@@ -966,6 +966,44 @@ function Get-TextRangeFontSize {
     return $null
 }
 
+function Get-TextRangeFontSizeRunSnapshot {
+    # Per-run size capture. PowerPoint's Font.Size on a mixed-size range
+    # returns the FIRST run's size — TextRange2.Font.Size has no msoMixed
+    # sentinel (measured on 17.1 slide13: a genuine 36/32 mixed range read as
+    # a flat 36), so a whole-range scalar write or scalar rollback silently
+    # flattens the author's size hierarchy (the 32pt list body and its 36pt
+    # numerals became uniform 36pt and reflowed the list into the sibling
+    # instrument images). Callers scale and restore sizes through this
+    # snapshot instead of the lying scalar. Returns $null when any run's size
+    # cannot be resolved.
+    param($TextRange)
+    try {
+        $entries = New-Object System.Collections.Generic.List[object]
+        foreach ($runRange in @($TextRange.Runs())) {
+            $runSize = Get-TextRangeFontSize $runRange
+            if ($null -eq $runSize -or [double]$runSize -le 0) { return $null }
+            $entries.Add([pscustomobject]@{ Range = $runRange; Size = [double]$runSize }) | Out-Null
+        }
+        if ($entries.Count -eq 0) { return $null }
+        return $entries
+    } catch { return $null }
+}
+
+function Test-TextRangeFontSizeEffectivelyMixed {
+    # True when the range mixes font sizes — including the lying-scalar case
+    # where the whole-range read resolves to the first run's size while other
+    # runs differ. Whole-range scalar size writes must be skipped for these.
+    param($TextRange)
+    $rangeSize = Get-TextRangeFontSize $TextRange
+    if ($null -eq $rangeSize) { return $true }
+    $entries = Get-TextRangeFontSizeRunSnapshot -TextRange $TextRange
+    if ($null -eq $entries) { return $false }
+    foreach ($entry in $entries) {
+        if ([Math]::Abs([double]$entry.Size - [double]$rangeSize) -gt 0.01) { return $true }
+    }
+    return $false
+}
+
 function Get-TextRangeBounds {
     param($TextRange)
     try {
@@ -1290,8 +1328,12 @@ function Set-TextRangeStyle {
         $beforeBold = [string]$font.Bold
         $beforeColor = try { [string]$font.Fill.ForeColor.RGB } catch { '' }
         # A missing size (mixed runs report a negative COM value) means a size
-        # write would flatten the emphasis hierarchy; preserve it like mixed fonts.
-        $mixedFontSize = ($null -eq $beforeSize -and -not $ForceTargetSize)
+        # write would flatten the emphasis hierarchy; preserve it like mixed
+        # fonts. The range read itself can also be a lying scalar — PowerPoint
+        # returns the FIRST run's size on a mixed-size range (no msoMixed
+        # sentinel for TextRange2.Font.Size), so effective mixedness is
+        # verified per run before any whole-range size write.
+        $mixedFontSize = ((Test-TextRangeFontSizeEffectivelyMixed -TextRange $TextRange) -and -not $ForceTargetSize)
         $safeSize = Resolve-SafeFontSize -TextRange $TextRange -TargetSize $Size -FileName $FileName -SlideNumber $SlideNumber -ShapeName $ShapeName -ForceTargetSize:$ForceTargetSize -MaxSize $MaxSize
         $beforeLayout = Get-TextRangeLineLayout -TextRange $TextRange
         $font.Name = $script:Style.FontLatin
@@ -1705,22 +1747,16 @@ function Set-AutoSizeTextFontSafely {
             # Bounded at 25% total shrink and the configured minimum; when no
             # factor holds the layout, roll back exactly as before.
             $relayoutFitFactor = 0.0
-            $authorSizeForFit = Get-TextRangeFontSize $textRange
-            $perRunSizes = $null
-            if ($null -eq $authorSizeForFit) {
-                try {
-                    $perRunSizes = New-Object System.Collections.Generic.List[object]
-                    foreach ($runRange in @($textRange.Runs())) {
-                        $runSize = Get-TextRangeFontSize $runRange
-                        if ($null -eq $runSize -or $runSize -le 0) { $perRunSizes = $null; break }
-                        $perRunSizes.Add([pscustomobject]@{ Range = $runRange; Size = [double]$runSize }) | Out-Null
-                    }
-                } catch { $perRunSizes = $null }
-                if ($null -ne $perRunSizes -and $perRunSizes.Count -gt 0) {
-                    $authorSizeForFit = ($perRunSizes | Measure-Object -Property Size -Maximum).Maximum
-                } else {
-                    $authorSizeForFit = $null
-                }
+            # Per-run capture is unconditional here: the whole-range read can
+            # be a lying scalar (first run's size) on a mixed-size range, and
+            # only per-run probes and restores keep the author's size
+            # hierarchy intact through the scaling attempts.
+            $perRunSizes = Get-TextRangeFontSizeRunSnapshot -TextRange $textRange
+            $authorSizeForFit = $null
+            if ($null -ne $perRunSizes) {
+                $authorSizeForFit = ($perRunSizes | Measure-Object -Property Size -Maximum).Maximum
+            } else {
+                $authorSizeForFit = Get-TextRangeFontSize $textRange
             }
             if ($null -ne $authorSizeForFit -and $authorSizeForFit -gt 0) {
                 foreach ($factor in @(0.98, 0.96, 0.94, 0.92, 0.90, 0.88, 0.86, 0.84, 0.82, 0.80, 0.78, 0.75)) {
@@ -1787,9 +1823,18 @@ function Set-AutoSizeTextFontSafely {
             # fitted size must keep the line layout unchanged, actually fit,
             # and never drop below the configured minimum; anything else rolls
             # the family, size, and geometry back exactly as before.
+            # A mixed-size range must not be size-probed here: the fitted
+            # write and its rollback both assign one whole-range scalar, and
+            # PowerPoint's range read is a lying scalar (first run's size, no
+            # msoMixed sentinel) — the pair flattened a 32pt list body and
+            # 36pt numerals into uniform explicit 36pt on 17.1 slide13 and
+            # reflowed the list into the instrument images. Mixed ranges skip
+            # the fitted attempt entirely and roll back verbatim below, so no
+            # size write ever touches them.
+            $sizeEffectivelyMixed = Test-TextRangeFontSizeEffectivelyMixed -TextRange $textRange
             $authorSize = Get-TextRangeFontSize $textRange
             $fittedSize = $null
-            if ($null -ne $authorSize -and $targetFit.Available) {
+            if (-not $sizeEffectivelyMixed -and $null -ne $authorSize -and $targetFit.Available) {
                 $fittedSize = Get-FittedOverflowFontSize -CurrentSize $authorSize -TargetWidth $targetFit.Width -TargetHeight $targetFit.Height `
                     -ShapeWidth $width -ShapeHeight $height -MinimumSize $script:Style.SizeMinimum
             }
@@ -2694,7 +2739,108 @@ function Invoke-NormalizeSlideShape {
         } else {
             Normalize-TextShape -Shape $Shape -Text $text -SlideNumber $SlideNumber -FileName $FileName -IsVideoSlide $IsVideo -IsSectionTitleSlide $IsSectionTitle -SlideWidth $SlideWidth
             Normalize-HighlightBox -Shape $Shape -SlideNumber $SlideNumber -FileName $FileName
+            Normalize-QuantitySymbolFont -Shape $Shape -SlideNumber $SlideNumber -FileName $FileName
         }
+    }
+}
+
+function Normalize-QuantitySymbolFont {
+    # Physical-quantity and unit symbol letters (U I R V P A W Q F N L J S t
+    # v m g s η ρ θ Ω μ, plus short digit/lowercase suffixes such as Rx, A1,
+    # U₁) must render in the configured math font (docs §5.3/§10.1: Cambria
+    # Math; 2026-11-05 user acceptance flagged serif leftovers on 17.1/17.3/17.4).
+    # Authors often embed the letter inside a larger colored run ("用电压表
+    # 测量导体两端的电压U，" is one blue run), so the sweep works at
+    # character-range granularity over the paragraph text instead of whole
+    # runs. Bold matches the enclosing paragraph (CJK-majority bold) so the
+    # symbols do not break the sentence weight (图3); posture and color stay
+    # with the author (§10.4: 单位正体、量符号可用斜体).
+    param($Shape, [int]$SlideNumber, [string]$FileName)
+
+    try {
+        $textRange = $Shape.TextFrame2.TextRange
+        $fullText = [string]$textRange.Text
+        if ([string]::IsNullOrWhiteSpace($fullText)) { return }
+        $matchPattern = '(?<![0-9A-Za-z])([UIRVPAWQFNLJStvmgsηρθΩμ][0-9₁₂₃xX]{0,2})(?![A-Za-z0-9])'
+
+        # Paragraph-relative matching: paragraph text uses the same visible
+        # characters as the shape text, so matches map to absolute character
+        # offsets through the accumulated paragraph lengths (PowerPoint
+        # separates paragraphs with \r, which .NET regex treats as plain
+        # whitespace and never matches inside the symbol pattern).
+        $plans = New-Object System.Collections.Generic.List[object]
+        $paraOffset = 1
+        foreach ($para in @($textRange.Paragraphs())) {
+            $paraText = [string]$para.Text
+            $paraMatches = [regex]::Matches($paraText, $matchPattern)
+            if ($paraMatches.Count -gt 0) {
+                # Paragraph-dominant bold among CJK-bearing runs decides the
+                # target weight for the swept symbols in this paragraph.
+                $cjkBold = 0
+                $cjkTotal = 0
+                foreach ($run in @($para.Runs())) {
+                    if ([string]$run.Text -match '[\u4e00-\u9fff]') {
+                        $cjkTotal++
+                        try { if ([int]$run.Font.Bold -eq -1) { $cjkBold++ } } catch { }
+                    }
+                }
+                $targetBold = if ($cjkTotal -gt 0 -and $cjkBold -gt ($cjkTotal / 2)) { -1 } else { $null }
+                foreach ($m in $paraMatches) {
+                    $plans.Add([pscustomobject]@{
+                        Start = $paraOffset + $m.Index
+                        Length = $m.Length
+                        Text = $m.Groups[1].Value
+                        TargetBold = $targetBold
+                    }) | Out-Null
+                }
+            }
+            $paraOffset += $paraText.Length
+        }
+        if ($plans.Count -eq 0) { return }
+
+        $beforeLayout = Get-TextRangeLineLayout -TextRange $textRange
+        $written = 0
+        $captured = New-Object System.Collections.Generic.List[object]
+        foreach ($plan in $plans) {
+            $charRange = $textRange.Characters($plan.Start, $plan.Length)
+            $font = $charRange.Font
+            $captured.Add([pscustomobject]@{
+                Range = $charRange
+                Name = [string]$font.Name
+                Bold = try { [int]$font.Bold } catch { 0 }
+            }) | Out-Null
+            $changedHere = $false
+            if ([string]$font.Name -cne $script:Style.FontMath) {
+                $font.Name = $script:Style.FontMath
+                $changedHere = $true
+            }
+            if ($null -ne $plan.TargetBold -and (try { [int]$font.Bold } catch { 0 }) -ne $plan.TargetBold) {
+                $font.Bold = $plan.TargetBold
+                $changedHere = $true
+            }
+            if ($changedHere) { $written++ }
+        }
+        if ($written -eq 0) { return }
+
+        $afterLayout = Get-TextRangeLineLayout -TextRange $textRange
+        if (-not (Test-TextRangeLayoutUnchanged -Before $beforeLayout -After $afterLayout -Shape $Shape)) {
+            foreach ($entry in $captured) {
+                try {
+                    $entry.Range.Font.Name = $entry.Name
+                    if ($entry.Bold -in @(-1, 0)) { $entry.Range.Font.Bold = $entry.Bold }
+                } catch { }
+            }
+            Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName (Get-ShapeName $Shape) -Issue 'QuantitySymbolFontSkippedRelayout' `
+                -Details ("Math font {0} re-wrapped the shape; the original symbol fonts were restored." -f $script:Style.FontMath) `
+                -RuleId 'STYLE.TEXT.FONT' -RiskLevel 'R0' -Result 'Skipped'
+            return
+        }
+        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName (Get-ShapeName $Shape) -Issue 'QuantitySymbolFontNormalized' `
+            -Details ("{0} quantity/unit symbol range(s) set to {1}; paragraph-matched bold applied; author posture and color preserved." -f $written, $script:Style.FontMath) `
+            -RuleId 'STYLE.TEXT.FONT' -RiskLevel 'R1' -Result 'Applied'
+    } catch {
+        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName (Get-ShapeName $Shape) -Issue 'QuantitySymbolFontFailed' `
+            -Details $_.Exception.Message -RuleId 'STYLE.TEXT.FONT' -RiskLevel 'R1' -Result 'Failed'
     }
 }
 

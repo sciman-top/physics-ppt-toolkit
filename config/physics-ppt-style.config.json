@@ -482,6 +482,111 @@
       "note": "电阻数值代入链；来源：16.3电阻、欧姆定律 Picture slide20（用户确认晋升，公式位图转原生）。"
     },
     {
+      "name": "电阻数值代入链2.4V0.4A",
+      "sourcePattern": "^R=U/I=2\\.4V/0\\.4A=6Ω$",
+      "targetUnicodeMath": "R=U/I=2.4V/0.4A=6Ω",
+      "targetTex": "R=\\frac{U}{I}=\\frac{2.4V}{0.4A}=6\\Omega",
+      "note": "电阻数值代入链；来源：17.3电阻的测量 OLE slide17（红色；2026-11-05 自主授权批次晋升，裁剪图+整页图证据，独立判官定稿）。"
+    },
+    {
+      "name": "电阻数值代入链0.0165V0.3A",
+      "sourcePattern": "^R=U/I=0\\.0165V/0\\.3A=0\\.055Ω$",
+      "targetUnicodeMath": "R=U/I=0.0165V/0.3A=0.055Ω",
+      "targetTex": "R=\\frac{U}{I}=\\frac{0.0165V}{0.3A}=0.055\\Omega",
+      "note": "电阻数值代入链；来源：17.3电阻的测量 OLE slide27（黑色；2026-11-05 自主授权批次晋升）。"
+    },
+    {
+      "name": "并联支路电流式",
+      "sourcePattern": "^I_1=U_1/R_1$",
+      "targetUnicodeMath": "I_1=U_1/R_1",
+      "targetTex": "I_1=\\frac{U_1}{R_1}",
+      "note": "并联支路欧姆定律式；来源：17.4欧姆定律应用 OLE slide14（品红；2026-11-05 自主授权批次晋升）。"
+    },
+    {
+      "name": "串联等流式",
+      "sourcePattern": "^I=I1=I2$",
+      "targetUnicodeMath": "I=I_1=I_2",
+      "targetTex": "I=I_1=I_2",
+      "note": "串联电路等流关系；来源：17.4欧姆定律应用 文本公式 slide3/5（2026-11-05 用户验收要求文本公式转原生）。"
+    },
+    {
+      "name": "串联分压式",
+      "sourcePattern": "^U=U1\\+U2$",
+      "targetUnicodeMath": "U=U_1+U_2",
+      "targetTex": "U=U_1+U_2",
+      "note": "串联电路分压关系；来源：17.4欧姆定律应用 文本公式 slide3/5（2026-11-05 用户验收要求）。"
+    },
+    {
+      "name": "并联等压式",
+      "sourcePattern": "^U=U1=U2$",
+      "targetUnicodeMath": "U=U_1=U_2",
+      "targetTex": "U=U_1=U_2",
+      "note": "并联电路等压关系；来源：17.4欧姆定律应用 文本公式 slide3/5（2026-11-05 用户验收要求）。"
+    },
+    {
+      "name": "并联分流式",
+      "sourcePattern": "^I=I1\\+I2$",
+      "targetUnicodeMath": "I=I_1+I_2",
+      "targetTex": "I=I_1+I_2",
+      "note": "并联电路分流关系；来源：17.4欧姆定律应用 文本公式 slide3/5（2026-11-05 用户验收要求）。"
+    },
+    {
+      "name": "串联总电阻式",
+      "sourcePattern": "^R=R1\\+R2$",
+      "targetUnicodeMath": "R=R_1+R_2",
+      "targetTex": "R=R_1+R_2",
+      "note": "串联电路总电阻；来源：17.4欧姆定律应用 文本公式 slide7/8（2026-11-05 用户验收要求）。"
+    },
+    {
+      "name": "电阻数值代入链3V0.49A",
+      "sourcePattern": "^R=U/I=3V/0\\.49A=6\\.1Ω$",
+      "targetUnicodeMath": "R=U/I=3V/0.49A=6.1Ω",
+      "targetTex": "R=\\frac{U}{I}=\\frac{3V}{0.49A}=6.1\\Omega",
+      "note": "电阻数值代入链；来源：17.4欧姆定律应用 OLE slide13（红 U/I 分式+黑结果，AccentTokens 双色保留；2026-11-05 用户验收要求转原生）。"
+    },
+    {
+      "name": "电阻数值代入链3V0.24A",
+      "sourcePattern": "^U/I=3V/0\\.24A=12\\.5Ω$",
+      "targetUnicodeMath": "U/I=3V/0.24A=12.5Ω",
+      "targetTex": "\\frac{U}{I}=\\frac{3V}{0.24A}=12.5\\Omega",
+      "note": "电阻数值代入链；来源：17.4欧姆定律应用 OLE slide5（红 U/I 分式+黑结果，AccentTokens 双色保留；2026-11-05 用户验收要求转原生）。"
+    },
+    {
+      "name": "效率前缀式",
+      "sourcePattern": "^η=$",
+      "targetUnicodeMath": "η=",
+      "targetTex": "η=",
+      "note": "效率符号前缀残段（后续分式在相邻对象）；来源：17.1 OLE slide22、17.3 OLE slide14（品红；2026-11-05 统一转原生口径）。"
+    },
+    {
+      "name": "电阻前缀式",
+      "sourcePattern": "^R=$",
+      "targetUnicodeMath": "R=",
+      "targetTex": "R=",
+      "note": "电阻符号前缀残段（等号后内容在相邻对象）；来源：17.4 OLE slide5/13（红色；2026-11-05 统一转原生口径）。"
+    },
+    {
+      "name": "数值分式1/100",
+      "sourcePattern": "^1/100$",
+      "targetUnicodeMath": "1/100",
+      "targetTex": "\\frac{1}{100}",
+      "note": "数值分式；来源：17.4欧姆定律应用 OLE slide11（红色；2026-11-05 统一转原生口径）。"
+    },
+    {
+      "name": "数值分式1/300",
+      "sourcePattern": "^1/300$",
+      "targetUnicodeMath": "1/300",
+      "targetTex": "\\frac{1}{300}",
+      "note": "数值分式；来源：17.4欧姆定律应用 OLE slide19（红色；2026-11-05 统一转原生口径）。"
+    },
+    {
+      "name": "光电效率式",
+      "sourcePattern": "^光能/电能≈10%$",
+      "targetUnicodeMath": "光能/电能≈10%",
+      "targetTex": "\\frac{光能}{电能}≈10\\%",
+      "note": "光电转换效率分式；来源：17.3电阻的测量 OLE slide14（黑色；2026-11-05 统一转原生口径）。"
+    },
+    {
       "name": "电流数值代入式0.3A",
       "sourcePattern": "^I=0\\.3A$",
       "targetUnicodeMath": "I=0.3A",
