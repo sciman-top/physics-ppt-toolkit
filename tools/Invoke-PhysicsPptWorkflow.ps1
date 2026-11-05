@@ -557,11 +557,35 @@ function Get-PostPackagingFailureAssessment {
         if (-not [bool](Get-ObjectPropertyValue -Object $receipt -PropertyName 'applied' -DefaultValue $false)) {
             $failureList.Add('FullChain did not commit the final delivery layout.') | Out-Null
         }
-        $manifestDeliveryDir = Get-ObjectPropertyValue -Object @((Get-ObjectPropertyValue -Object $Manifest -PropertyName 'files' -DefaultValue @()) | Select-Object -First 1) -PropertyName 'pdf' -DefaultValue ''
-        if (-not [string]::IsNullOrWhiteSpace([string]$manifestDeliveryDir)) {
-            $manifestDeliveryDir = Split-Path -Parent ([string]$manifestDeliveryDir)
-            $expectedDeliveryFiles = @($receipt.files | Where-Object { $_.kind -eq 'Final' } | ForEach-Object { [IO.Path]::GetFileName($_.new) })
-            foreach ($deliveryItem in @(Get-ChildItem -LiteralPath $manifestDeliveryDir -ErrorAction SilentlyContinue)) {
+        # Expected final layout, per delivery directory. Two live sources:
+        # receipt 'Final' moves (the same-name PPTX) and each completed chain
+        # record's finalPdf — the PDF is exported in place at its delivery
+        # name and never moves, so it has no receipt move of its own. Per-dir
+        # derivation covers multi-deck runs; a single first-file lookup would
+        # silently cover only deck one.
+        $expectedByDeliveryDir = @{}
+        foreach ($movedFinal in @((Get-ObjectPropertyValue -Object $receipt -PropertyName 'files' -DefaultValue @()))) {
+            if ([string](Get-ObjectPropertyValue -Object $movedFinal -PropertyName 'kind' -DefaultValue '') -ne 'Final') { continue }
+            $finalDir = Split-Path -Parent ([string](Get-ObjectPropertyValue -Object $movedFinal -PropertyName 'new' -DefaultValue ''))
+            if ([string]::IsNullOrWhiteSpace($finalDir)) { continue }
+            if (-not $expectedByDeliveryDir.ContainsKey($finalDir)) { $expectedByDeliveryDir[$finalDir] = New-Object System.Collections.Generic.List[string] }
+            $expectedByDeliveryDir[$finalDir].Add([IO.Path]::GetFileName([string](Get-ObjectPropertyValue -Object $movedFinal -PropertyName 'new')))
+        }
+        foreach ($chainRecord in @((Get-ObjectPropertyValue -Object (Get-ObjectPropertyValue -Object $Manifest -PropertyName 'brandStageArtifacts' -DefaultValue $null) -PropertyName 'files' -DefaultValue @()))) {
+            if ([string](Get-ObjectPropertyValue -Object $chainRecord -PropertyName 'status' -DefaultValue '') -ne 'Completed') { continue }
+            $finalPdf = [string](Get-ObjectPropertyValue -Object $chainRecord -PropertyName 'finalPdf' -DefaultValue '')
+            if ([string]::IsNullOrWhiteSpace($finalPdf)) { continue }
+            $finalDir = Split-Path -Parent $finalPdf
+            if ([string]::IsNullOrWhiteSpace($finalDir)) { continue }
+            if (-not $expectedByDeliveryDir.ContainsKey($finalDir)) { $expectedByDeliveryDir[$finalDir] = New-Object System.Collections.Generic.List[string] }
+            $expectedByDeliveryDir[$finalDir].Add([IO.Path]::GetFileName($finalPdf))
+        }
+        foreach ($deliveryEntry in @($expectedByDeliveryDir.GetEnumerator())) {
+            # Duplicate names (same deck delivered twice into one dir) are
+            # refused upstream as collisions; de-duplicate so the count
+            # comparison matches the real file set.
+            $expectedDeliveryFiles = @(@($deliveryEntry.Value) | Select-Object -Unique)
+            foreach ($deliveryItem in @(Get-ChildItem -LiteralPath $deliveryEntry.Key -ErrorAction SilentlyContinue)) {
                 if ($deliveryItem.PSIsContainer) {
                     # Subdirectories (e.g. a _backup_originals residue from a
                     # locked backup move) violate the 01_交付物 layout as much
@@ -573,7 +597,7 @@ function Get-PostPackagingFailureAssessment {
                     $failureList.Add("FullChain delivery directory contains a non-final artifact: $($deliveryItem.Name)") | Out-Null
                 }
             }
-            if (@(Get-ChildItem -LiteralPath $manifestDeliveryDir -File -ErrorAction SilentlyContinue).Count -ne $expectedDeliveryFiles.Count) {
+            if (@(Get-ChildItem -LiteralPath $deliveryEntry.Key -File -ErrorAction SilentlyContinue).Count -ne $expectedDeliveryFiles.Count) {
                 $failureList.Add('FullChain delivery directory does not match its committed final-file receipt.') | Out-Null
             }
         }

@@ -199,6 +199,20 @@ try {
     if ($packGates.Count -ne 0) { throw "Committed packaging failed the final gate: $($packGates -join '; ')" }
     $postPackagingGate = Get-PostPackagingFailureAssessment -Manifest $packedManifest -Mode 'NormalizeAndPdf' -IncludeReviewArtifacts $false -IncludeVisualAudit $true
     if (@($postPackagingGate.blocked).Count -ne 0) { throw "Post-packaging gate rejected a committed delivery: $(@($postPackagingGate.blocked) -join '; ')" }
+    # Positive control for the cleanliness probe: a zero-block result on a
+    # clean dir proves nothing on its own (the probe once skipped every
+    # delivery item through an array-wrapped property lookup and still passed
+    # this assertion). Dirt must block, or the check is vacuous.
+    $strayArtifactPath = Join-Path $chainDeliveryDir 'stray-artifact.txt'
+    [System.IO.File]::WriteAllText($strayArtifactPath, 'probe')
+    $straySubdirPath = Join-Path $chainDeliveryDir 'stray-subdir'
+    New-Item -ItemType Directory -Path $straySubdirPath -Force | Out-Null
+    $dirtyPackagingGate = Get-PostPackagingFailureAssessment -Manifest $packedManifest -Mode 'NormalizeAndPdf' -IncludeReviewArtifacts $false -IncludeVisualAudit $true
+    $dirtyBlocked = (@($dirtyPackagingGate.blocked) -join '; ')
+    if ($dirtyBlocked -notmatch 'non-final artifact: stray-artifact\.txt') { throw "Post-packaging gate accepted a stray delivery file: $dirtyBlocked" }
+    if ($dirtyBlocked -notmatch 'unexpected subdirectory: stray-subdir') { throw "Post-packaging gate accepted a stray delivery subdirectory: $dirtyBlocked" }
+    Remove-Item -LiteralPath $strayArtifactPath -Force
+    Remove-Item -LiteralPath $straySubdirPath -Recurse -Force
     $visualEvidenceManifest = [ordered]@{ inputPath = $finalPptxPath; inputSha256 = (Get-FileSha256OrNull -Path $finalPptxPath); outputDir = (Join-Path $chainStageDir 'audit-evidence') }
     New-Item -ItemType Directory -Path $visualEvidenceManifest.outputDir -Force | Out-Null
     $visualEvidenceCsv = Join-Path $visualEvidenceManifest.outputDir 'pptx-visual-audit.csv'
