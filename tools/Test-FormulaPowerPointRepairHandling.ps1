@@ -16,9 +16,15 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$FixturePptx = (Join-Path (Split-Path -Parent $PSScriptRoot) 'examples\fixtures\minimal-physics-sample.pptx'),
+    [string]$FixturePptx = '',
     [string]$OutputJsonPath = ''
 )
+
+# Resolve after param binding: parameter defaults must not depend on
+# $PSScriptRoot (repo rule enforced by the gate's AST probe).
+if ([string]::IsNullOrWhiteSpace($FixturePptx)) {
+    $FixturePptx = Join-Path (Split-Path -Parent $PSScriptRoot) 'examples\fixtures\minimal-physics-sample.pptx'
+}
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'

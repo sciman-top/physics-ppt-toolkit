@@ -369,20 +369,52 @@ foreach ($field in $requiredFontFields) {
     if ([string]::IsNullOrWhiteSpace($config.fonts.$field)) { throw "Config fonts.$field is missing or empty" }
 }
 
-$requiredSizeFields = @('title1', 'sectionTitle', 'title2', 'body', 'bodyMax', 'displayTitleMin', 'auxiliary', 'minimum', 'tableHeader', 'tableBody', 'formulaInline', 'formulaStandalone', 'formulaCore', 'footer')
-foreach ($field in $requiredSizeFields) {
-    if ($null -eq $config.fontSizes.$field -or $config.fontSizes.$field -isnot [ValueType] -or [double]$config.fontSizes.$field -ne [math]::Floor([double]$config.fontSizes.$field) -or $config.fontSizes.$field -lt 8 -or $config.fontSizes.$field -gt 96) { throw "Config fontSizes.$field must be an integer between 8 and 96" }
+function Test-StyleConfigSizeColorContract {
+    # Size/color contract for the style config. Extracted as a function so
+    # the mutation controls below can prove the validator still rejects a
+    # broken config: live-config-only assertions pass vacuously once the
+    # validator itself decays (a weakened throw or a broken comparison is
+    # invisible without a positive control).
+    param($Config)
+    $requiredSizeFields = @('title1', 'sectionTitle', 'title2', 'body', 'bodyMax', 'displayTitleMin', 'auxiliary', 'minimum', 'tableHeader', 'tableBody', 'formulaInline', 'formulaStandalone', 'formulaCore', 'footer')
+    foreach ($field in $requiredSizeFields) {
+        if ($null -eq $Config.fontSizes.$field -or $Config.fontSizes.$field -isnot [ValueType] -or [double]$Config.fontSizes.$field -ne [math]::Floor([double]$Config.fontSizes.$field) -or $Config.fontSizes.$field -lt 8 -or $Config.fontSizes.$field -gt 96) { throw "Config fontSizes.$field must be an integer between 8 and 96" }
+    }
+    if ($Config.fontSizes.minimum -gt $Config.fontSizes.body) { throw 'Config fontSizes.minimum must not exceed body.' }
+    if ($Config.fontSizes.bodyMax -lt $Config.fontSizes.body) { throw 'Config fontSizes.bodyMax must not be smaller than body.' }
+    if ($Config.fontSizes.displayTitleMin -lt $Config.fontSizes.bodyMax) { throw 'Config fontSizes.displayTitleMin must not be smaller than bodyMax.' }
+    # Validate color values are hex strings
+    $requiredColorFields = @('white', 'black', 'body', 'darkGray', 'emphasisRed', 'sectionTitle', 'extensionTitle', 'formulaBlue', 'experimentGreen', 'yellowFill', 'yellowBorder', 'blueFill', 'grayFill', 'videoYellow', 'videoBlue', 'videoRed', 'videoGreen')
+    foreach ($field in $requiredColorFields) {
+        $val = $Config.colors.$field
+        if ([string]::IsNullOrWhiteSpace($val)) { throw "Config colors.$field is missing or empty" }
+        if ($val -notmatch '^#[0-9A-Fa-f]{6}$') { throw "Config colors.$field is not a valid hex color: $val" }
+    }
+    # Apply-PptxHighlightBoxStyle writes MediaTag chips with colors.videoYellow
+    # but re-classifies existing chips against a hard-coded twin constant; if
+    # the two drift, chips written by an older run are never classified
+    # MediaTag again (no AlreadyApplied rows, idempotency silently broken)
+    # while the hex-format checks above stay green. The tool's own comment
+    # declares this invariant; lock it like the VBA constant syncs.
+    if ([string]$Config.colors.videoYellow -ne '#FFD966') { throw "Config colors.videoYellow must equal the MediaTag classification constant '#FFD966' hard-coded in Apply-PptxHighlightBoxStyle.ps1; a drift silently breaks chip re-classification and idempotency." }
 }
-if ($config.fontSizes.minimum -gt $config.fontSizes.body) { throw 'Config fontSizes.minimum must not exceed body.' }
-if ($config.fontSizes.bodyMax -lt $config.fontSizes.body) { throw 'Config fontSizes.bodyMax must not be smaller than body.' }
-if ($config.fontSizes.displayTitleMin -lt $config.fontSizes.bodyMax) { throw 'Config fontSizes.displayTitleMin must not be smaller than bodyMax.' }
+Test-StyleConfigSizeColorContract -Config $config
 
-# Validate color values are hex strings
-$requiredColorFields = @('white', 'black', 'body', 'darkGray', 'emphasisRed', 'sectionTitle', 'extensionTitle', 'formulaBlue', 'experimentGreen', 'yellowFill', 'yellowBorder', 'blueFill', 'grayFill', 'videoYellow', 'videoBlue', 'videoRed', 'videoGreen')
-foreach ($field in $requiredColorFields) {
-    $val = $config.colors.$field
-    if ([string]::IsNullOrWhiteSpace($val)) { throw "Config colors.$field is missing or empty" }
-    if ($val -notmatch '^#[0-9A-Fa-f]{6}$') { throw "Config colors.$field is not a valid hex color: $val" }
+# Positive controls: mutate deep clones and require every mutation to be
+# rejected. Zero-blocking fixtures are immune to their own decay, so the
+# validator must prove it can still say no.
+foreach ($mutationControl in @(
+    @{ Name = 'missing fontSizes.body'; Mutate = { param($c) $c.fontSizes.PSObject.Properties.Remove('body') } },
+    @{ Name = 'non-numeric fontSizes.body'; Mutate = { param($c) $c.fontSizes.body = 'thirty-two' } },
+    @{ Name = 'out-of-range fontSizes.title1'; Mutate = { param($c) $c.fontSizes.title1 = 200 } },
+    @{ Name = 'empty colors.body'; Mutate = { param($c) $c.colors.body = '' } },
+    @{ Name = 'videoYellow drifting from classification constant'; Mutate = { param($c) $c.colors.videoYellow = '#FFC000' } }
+)) {
+    $mutatedConfig = $config | ConvertTo-Json -Depth 24 | ConvertFrom-Json
+    & $mutationControl.Mutate $mutatedConfig
+    $mutationRejected = $false
+    try { Test-StyleConfigSizeColorContract -Config $mutatedConfig } catch { $mutationRejected = $true }
+    if (-not $mutationRejected) { throw ("Config validator mutation control failed: a '{0}' config must be rejected but passed every check." -f $mutationControl.Name) }
 }
 
 function Get-RelativeLuminance {
@@ -568,15 +600,23 @@ $psFiles = @(
 foreach ($file in $psFiles) {
     $tokens = $null
     $errors = $null
-    [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+    $fileAst = [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors)
     if ($errors.Count -gt 0) {
         $msg = ($errors | ForEach-Object { $_.Message }) -join '; '
         throw "PowerShell parse errors in $($file.Name): $msg"
     }
 
     $content = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8
-    if ($content -match '\[[^\]]+\]\s*\$[A-Za-z_][A-Za-z0-9_]*\s*=\s*\(?\s*Join-Path\s+\$PSScriptRoot') {
-        throw "PowerShell parameter defaults must not depend on PSScriptRoot; resolve after param binding: $($file.Name)"
+    # Parameter defaults must not depend on PSScriptRoot. The old regex only
+    # matched the direct typed form; interpolation, concatenation, and
+    # untyped defaults slipped past, so walk every parameter default subtree
+    # for the variable instead (same rule, semantic-level detection).
+    foreach ($paramBlock in @($fileAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.ParamBlockAst] }, $true))) {
+        foreach ($paramAst in @($paramBlock.Parameters)) {
+            if ($null -eq $paramAst.DefaultValue) { continue }
+            $defaultUsesPsscriptRoot = @($paramAst.DefaultValue.FindAll({ param($node) $node -is [System.Management.Automation.Language.VariableExpressionAst] -and $node.VariablePath.UserPath -eq 'PSScriptRoot' }, $true)).Count -gt 0
+            if ($defaultUsesPsscriptRoot) { throw "PowerShell parameter defaults must not depend on PSScriptRoot; resolve after param binding: $($file.Name)" }
+        }
     }
     if ($content -match '\}function\s+[A-Za-z_][A-Za-z0-9_-]*') {
         throw "PowerShell function declarations must be separated by whitespace: $($file.Name)"
@@ -646,12 +686,38 @@ if ($vbaContent -notmatch '(?m)^Public\s+Const\s+NORMALIZE_TABLE_STYLE\s+As\s+Bo
 # string literals; every configured keyword must exist there, or the offline
 # path silently classifies video slides differently from the mainline.
 $vbaNormalizeContent = Get-Content -LiteralPath (Join-Path $root 'vba\PhysicsPptNormalize.bas') -Raw -Encoding UTF8
-foreach ($videoKeyword in @($config.rules.videoSlideKeywords)) {
-    if ($null -eq $videoKeyword -or [string]::IsNullOrWhiteSpace([string]$videoKeyword)) { continue }
-    if ($vbaNormalizeContent -notmatch ('"' + [regex]::Escape([string]$videoKeyword) + '"')) {
+$configVideoKeywords = @(@($config.rules.videoSlideKeywords) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { [string]$_ })
+if ($configVideoKeywords.Count -eq 0) { throw 'rules.videoSlideKeywords must not be empty; an empty array passes the per-entry loop vacuously and silently changes mainline video-slide classification.' }
+foreach ($videoKeyword in $configVideoKeywords) {
+    if ($vbaNormalizeContent -notmatch ('"' + [regex]::Escape($videoKeyword) + '"')) {
         throw ("JSON <-> VBA mismatch: rules.videoSlideKeywords entry '{0}' has no matching string literal in PhysicsPptNormalize.bas IsVideoSlide." -f $videoKeyword)
     }
 }
+# Reverse direction of the check above: a keyword kept only in the VBA
+# fallback (or dropped from config after an incident) silently diverges the
+# offline classification from the mainline. IsVideoSlide carries no other
+# string literals, so its quoted literals must equal the config set exactly.
+$vbaIsVideoSlideBody = ''
+if ($vbaNormalizeContent -match '(?s)Function\s+IsVideoSlide\b.*?\r?\nEnd\s+Function') { $vbaIsVideoSlideBody = $Matches[0] }
+if ([string]::IsNullOrWhiteSpace($vbaIsVideoSlideBody)) { throw 'PhysicsPptNormalize.bas IsVideoSlide function body not found for the keyword sync check.' }
+$vbaVideoLiterals = @()
+foreach ($literalMatch in [regex]::Matches($vbaIsVideoSlideBody, '"([^"]*)"')) {
+    $literalValue = $literalMatch.Groups[1].Value
+    if (-not [string]::IsNullOrWhiteSpace($literalValue)) { $vbaVideoLiterals += $literalValue }
+}
+foreach ($vbaLiteral in $vbaVideoLiterals) {
+    if ($configVideoKeywords -cnotcontains $vbaLiteral) {
+        throw ("JSON <-> VBA mismatch: IsVideoSlide string literal '{0}' has no rules.videoSlideKeywords entry; the offline fallback would classify video slides differently from the mainline." -f $vbaLiteral)
+    }
+}
+# The OLE formula chain hard-codes the latin math font in three places
+# (Apply-FormulaOmmlForOle -MathFontName default, PhysicsPpt.Formula candidate
+# generation, Test-FormulaOmmlFragment identity rebuild) while the normalize
+# mainline reads fonts.math from this config. Until those three read the
+# config, changing fonts.math here would silently split the normalize-text
+# formula font from the OLE-batch formula font, and the fragment identity
+# check cannot catch it because it is rebuilt with the same hard-coded value.
+if ([string]$config.fonts.math -ne 'Cambria Math') { throw "Config fonts.math must stay 'Cambria Math' until the OLE formula chain reads it from config (Apply-FormulaOmmlForOle/PhysicsPpt.Formula/Test-FormulaOmmlFragment); changing it here silently splits the two formula font paths." }
 
 # Mapping: VBA constant -> JSON path -> expected value
 $syncChecks = @(
@@ -794,6 +860,11 @@ foreach ($launcher in @('一键规范化并导出PDF.cmd', '一键全链规范�
     $launcherBytes = [System.IO.File]::ReadAllBytes($launcherPath)
     if ($launcherBytes.Length -ge 3 -and $launcherBytes[0] -eq 0xEF -and $launcherBytes[1] -eq 0xBB -and $launcherBytes[2] -eq 0xBF) { throw "Launcher must not carry a UTF-8 BOM: $launcher" }
     $launcherContent = Get-Content -LiteralPath $launcherPath -Raw -Encoding UTF8
+    # The Chinese echo lines are UTF-8 bytes; without the code-page switch
+    # they render as mojibake on the default GBK console. New launchers are
+    # added to the required list over time, so this must be asserted, not
+    # assumed.
+    if ($launcherContent -notmatch '(?m)^chcp 65001') { throw "Launcher must switch the console to UTF-8 (chcp 65001) before printing Chinese text: $launcher" }
     if ($launcherContent -notmatch '(?im)where\s+pwsh\.exe') { throw "Launcher must probe pwsh first: $launcher" }
     if ($launcherContent -notmatch '(?im)set\s+"PS_HOST=pwsh\.exe"') { throw "Launcher must default to pwsh.exe: $launcher" }
     if ($launcherContent -notmatch '(?im)powershell\.exe') { throw "Launcher must retain the explicit Windows PowerShell fallback: $launcher" }
@@ -832,7 +903,53 @@ if ($null -eq $classifyFunctionAst) { throw 'Get-HighlightBoxClass function defi
 foreach ($classifyCatch in @($classifyFunctionAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.CatchClauseAst] }, $true))) {
     $catchRethrows = $classifyCatch.Body.FindAll({ param($node) $node -is [System.Management.Automation.Language.ThrowStatementAst] }, $true).Count -gt 0
     $catchFiltersRetryable = @($classifyCatch.Body.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Test-IsRetryablePresentationFailure' }, $true)).Count -gt 0
-    if (-not ($catchRethrows -or $catchFiltersRetryable)) { throw 'Get-HighlightBoxClass catch must rethrow or consult Test-IsRetryablePresentationFailure; a blanket ClassifyFailed swallow defeats the call-site COM retry wrapper.' }
+    # AND, not OR: a catch that consults the filter but then swallows the
+    # exception anyway ("consult without rethrow") defeats the retry wrapper
+    # exactly like the original blanket swallow this probe exists to lock.
+    if (-not ($catchRethrows -and $catchFiltersRetryable)) { throw 'Get-HighlightBoxClass catch must consult Test-IsRetryablePresentationFailure AND rethrow retryable failures; a consult-without-rethrow or blanket ClassifyFailed swallow defeats the call-site COM retry wrapper.' }
+
+# Lying-scalar guard wiring probe (17.1 slide13 flattening class): every
+# whole-range font-size write path must consult
+# Test-TextRangeFontSizeEffectivelyMixed, and the probe itself must treat an
+# unresolvable per-run snapshot as mixed. Parsing and BOM checks cannot see
+# these wirings, and removing any of them re-allows the scalar
+# write/rollback pair that flattens mixed 36/32 ranges while the gate stays
+# green — the incident class that motivated the per-run snapshot.
+$normalizeFontSizeAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'tools\Normalize-PhysicsPpt.ps1'), [ref]$null, [ref]$null)
+foreach ($fontSizeFnName in @('Set-TextRangeStyle', 'Set-FormulaTextStyle', 'Set-AutoSizeFontSizeCapSafely', 'Set-AutoSizeTextFontSafely')) {
+    $fontSizeFnAst = $normalizeFontSizeAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $fontSizeFnName }, $true) | Select-Object -First 1
+    if ($null -eq $fontSizeFnAst) { throw "$fontSizeFnName function definition not found for the lying-scalar wiring probe." }
+    $consultsMixedProbe = @($fontSizeFnAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Test-TextRangeFontSizeEffectivelyMixed' }, $true)).Count -gt 0
+    if (-not $consultsMixedProbe) { throw "$fontSizeFnName must consult Test-TextRangeFontSizeEffectivelyMixed before whole-range font-size writes; removing the wiring re-allows the lying-scalar flattening (17.1 slide13 class)." }
+}
+$mixedProbeFnAst = $normalizeFontSizeAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-TextRangeFontSizeEffectivelyMixed' }, $true) | Select-Object -First 1
+if ($null -eq $mixedProbeFnAst) { throw 'Test-TextRangeFontSizeEffectivelyMixed function definition not found for the snapshot-failure probe.' }
+if ($mixedProbeFnAst.Extent.Text -notmatch [regex]::Escape('if ($null -eq $entries) { return $true }')) {
+    throw 'Test-TextRangeFontSizeEffectivelyMixed must treat an unresolvable per-run snapshot as mixed (return $true); returning $false lets a transient COM failure in the busy window open the lying-scalar flattening window again.'
+}
+
+# Brand slide-level retry liveness: the divider/special-page write functions
+# run inside the slide-level Invoke-WithComRetry wrapper, so their per-shape
+# catch clauses must consult the retryability filter and rethrow retryable
+# failures (5a547ad family). A wiring-removal regression here silently
+# strands half-styled dividers below the retry boundary again.
+$brandRefreshAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'tools\Apply-PptxBrandVisualRefresh.ps1'), [ref]$null, [ref]$null)
+foreach ($brandFnName in @('Get-SlidePlainText', 'Test-DividerSlide', 'Update-DividerSlide', 'Update-SpecialSlideText')) {
+    $brandFnAst = $brandRefreshAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $brandFnName }, $true) | Select-Object -First 1
+    if ($null -eq $brandFnAst) { throw "$brandFnName function definition not found for the brand retry-liveness probe." }
+    $consultsRetryFilter = @($brandFnAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Test-IsRetryablePresentationFailure' }, $true)).Count -gt 0
+    if (-not $consultsRetryFilter) { throw "$brandFnName must consult Test-IsRetryablePresentationFailure so transient COM rejections reach the slide-level retry wrapper; a blanket per-shape swallow strands half-styled slides." }
+}
+
+# Mechanism probe for the Write-ZipEntryText Update-mode fix: reverting to
+# Delete+Create produces byte-identical happy-path output, so the behavioral
+# zip probe cannot see it — forbid the Delete call inside the function body.
+$commonZipAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'tools\PhysicsPpt.Common.ps1'), [ref]$null, [ref]$null)
+$zipTextFnAst = $commonZipAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Write-ZipEntryText' }, $true) | Select-Object -First 1
+if ($null -eq $zipTextFnAst) { throw 'Write-ZipEntryText function definition not found for the Update-mode mechanism probe.' }
+if ($zipTextFnAst.Extent.Text -match '\.Delete\(') {
+    throw 'Write-ZipEntryText must keep Update-mode in-place overwrite (entry.Open + write + SetLength); an entry.Delete() reintroduces the mid-failure corrupt-package window that the behavioral probe cannot detect.'
+}
 }
 
 # Intentional-geometry bucketing probe: the per-file table starts empty, so
