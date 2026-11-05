@@ -336,12 +336,15 @@ function Export-SourcePageImages {
                 Get-ChildItem -LiteralPath $imageDir -Filter '*.png' -File -ErrorAction SilentlyContinue | Remove-Item -Force
                 # Read-only open: this pass only renders page images and never saves.
                 $pres = Invoke-WithComRetry -Action { $presentations.Open($file.FullName, -1, 0, 0) }
-                $expectedSlides = [int]$pres.Slides.Count
+                # Same post-export busy window as the per-slide Export below:
+                # the count/Item reads reject transiently too (9b78dce⑧ fixed
+                # the audit sibling; keep the source-image pass symmetric).
+                $expectedSlides = [int](Invoke-WithComRetry -Action { $pres.Slides.Count })
                 $failedSlides = New-Object System.Collections.Generic.List[int]
                 for ($slideNo = 1; $slideNo -le $expectedSlides; $slideNo++) {
                     $target = Join-Path $imageDir ('page-{0:000}.png' -f $slideNo)
                     try {
-                        $slide = $pres.Slides.Item($slideNo)
+                        $slide = Invoke-WithComRetry -Action { $pres.Slides.Item($slideNo) }
                         Invoke-WithComRetry -Action { $slide.Export($target, 'PNG') } | Out-Null
                         if (-not (Test-Path -LiteralPath $target) -or (Get-Item -LiteralPath $target).Length -le 0) {
                             throw "PowerPoint did not create a non-empty PNG: $target"

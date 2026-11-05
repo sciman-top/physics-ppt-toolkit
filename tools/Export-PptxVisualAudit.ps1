@@ -317,8 +317,10 @@ try {
     # expression" while a previous automation instance is still tearing down.
     $pp = Invoke-WithComRetry -MaxRetries 3 -DelayMs 1500 -Action { New-PowerPointApplication }
     $pres = Invoke-WithComRetry -MaxRetries 3 -DelayMs 1500 -Action { $pp.Presentations.Open($InputPath, $script:MsoTrue, $script:MsoFalse, $script:MsoFalse) }
-    $slideWidth = [double]$pres.PageSetup.SlideWidth
-    $slideHeight = [double]$pres.PageSetup.SlideHeight
+    # PageSetup sits in the same post-open busy window as Slides.Count below:
+    # one unguarded read here aborts the audit with every CSV/manifest lost.
+    $slideWidth = [double](Invoke-WithComRetry -MaxRetries 3 -DelayMs 1000 -Action { $pres.PageSetup.SlideWidth })
+    $slideHeight = [double](Invoke-WithComRetry -MaxRetries 3 -DelayMs 1000 -Action { $pres.PageSetup.SlideHeight })
     # Right after a PDF export PowerPoint can still reject reads (RPC_E_
     # CALL_REJECTED family); an unguarded count here would abort the audit
     # with every CSV/manifest lost (only pages/*.png survive).
@@ -342,6 +344,13 @@ try {
                 Invoke-WithComRetry -MaxRetries 3 -DelayMs 1000 -Action { $pres.SaveAs($pdfPath, 32) } | Out-Null
                 if (-not (Test-Path -LiteralPath $pdfPath) -or (Get-Item -LiteralPath $pdfPath).Length -le 0) {
                     throw "PowerPoint did not create a non-empty PDF through SaveAs fallback: $pdfPath"
+                }
+                # The final-chain exporter validates the %PDF- header on this
+                # same fallback; a mislabeled non-PDF (SaveAs writing another
+                # format on a localized host) must fail the export row instead
+                # of entering the evidence package.
+                if (-not (Test-PdfPackageIntegrity -Path $pdfPath)) {
+                    throw "SaveAs fallback did not produce a valid PDF signature: $pdfPath"
                 }
                 Add-AuditRow -Rows $auditRows -File $fileName -Slide 0 -Shape '(presentation)' -Issue 'PdfExportedBySaveAsFallback' -Severity 'Info' -Details $pdfPath
             } catch {

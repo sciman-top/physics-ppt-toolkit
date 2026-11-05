@@ -291,9 +291,14 @@ try {
     # the workflow, so both get the shared COM retry.
     $powerPoint = Invoke-WithComRetry -MaxRetries 3 -DelayMs 1500 -Action { New-PowerPointApplication }
     $presentation = Invoke-WithComRetry -MaxRetries 3 -DelayMs 1500 -Action { $powerPoint.Presentations.Open($inputFullPath, -1, -1, 0) }
+    # Enumeration sits in the same post-teardown busy window as Open above:
+    # one transient rejection here failed the whole snapshot (or mislabeled a
+    # slide Unreadable and tripped the compare gate) — retry each read the
+    # same way Export-PptxVisualAudit does.
+    $slideCountLive = [int](Invoke-WithComRetry -MaxRetries 3 -DelayMs 1500 -Action { $presentation.Slides.Count })
     $slides = @()
-    for ($i = 1; $i -le $presentation.Slides.Count; $i++) {
-        $slides += Get-SlideSnapshot -Slide $presentation.Slides.Item($i) -Index $i
+    for ($i = 1; $i -le $slideCountLive; $i++) {
+        $slides += Get-SlideSnapshot -Slide (Invoke-WithComRetry -MaxRetries 3 -DelayMs 1500 -Action { $presentation.Slides.Item($i) }) -Index $i
     }
 
     $snapshot = [pscustomobject]@{
