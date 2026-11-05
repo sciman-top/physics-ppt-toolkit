@@ -122,7 +122,12 @@ for ($i = 0; $i -lt $slideCount; $i++) {
     $beforeAdvanceOnClick = Get-SnapshotProperty (Get-SnapshotProperty $bs 'transition') 'advanceOnClick'
     $afterAdvanceOnClick = Get-SnapshotProperty (Get-SnapshotProperty $as 'transition') 'advanceOnClick'
     if ("$beforeAdvanceOnClick" -ne "$afterAdvanceOnClick") {
-        $advanceKind = if ($AllowAdvanceOnClickDisable -and [int]$beforeAdvanceOnClick -eq -1 -and [int]$afterAdvanceOnClick -eq 0) { 'AllowedChange' } else { 'Blocker' }
+        # A missing/failed read must never silently qualify as the allowed
+        # disable: [int]$null is 0, which would masquerade as a transition to
+        # advanceOnClick=0. Only an explicit -1 → 0 pair is allowed.
+        $advanceKind = if ($AllowAdvanceOnClickDisable -and
+            -not [string]::IsNullOrEmpty("$beforeAdvanceOnClick") -and -not [string]::IsNullOrEmpty("$afterAdvanceOnClick") -and
+            [int]$beforeAdvanceOnClick -eq -1 -and [int]$afterAdvanceOnClick -eq 0) { 'AllowedChange' } else { 'Blocker' }
         Add-Difference $rows "$prefix.transition.advanceOnClick" "$beforeAdvanceOnClick" "$afterAdvanceOnClick" $advanceKind
     }
     foreach ($transitionProperty in @('advanceOnTime','advanceTime','entryEffect','speed')) {

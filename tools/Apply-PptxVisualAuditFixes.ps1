@@ -160,6 +160,19 @@ try {
                 Add-FixRow -Rows $reportRows -File ([System.IO.Path]::GetFileName($InputPath)) -Slide $slideNo -Shape $shapeName -Issue 'ShapeOutOfSlideBounds' -Status 'SkippedBitmapCarriedType' -Details ("shapeType={0}; moving bitmap-backed shapes would trigger a fill re-bake on save." -f $shapeType)
                 continue
             }
+            if ($shapeType -eq 14) {
+                # msoPlaceholder: the visible content may be a carried bitmap
+                # (ContainedType in the same picture/OLE family); moving such
+                # a placeholder re-bakes its bitmap on save like any direct
+                # bitmap carrier, and the XML blipFill probe only scans p:sp
+                # bodies, so this COM-side check is the only guard for it.
+                $containedType = 0
+                try { $containedType = [int]$shape.PlaceholderFormat.ContainedType } catch { }
+                if ($containedType -in $script:MsoBitmapCarriedTypes) {
+                    Add-FixRow -Rows $reportRows -File ([System.IO.Path]::GetFileName($InputPath)) -Slide $slideNo -Shape $shapeName -Issue 'ShapeOutOfSlideBounds' -Status 'SkippedBitmapCarriedPlaceholder' -Details ("containedType={0}; moving a bitmap-carried placeholder would trigger a fill re-bake on save." -f $containedType)
+                    continue
+                }
+            }
             $shapeId = 0
             try { $shapeId = [int]$shape.Id } catch { }
             if (Test-PictureFillShapeId -Map $pictureFillShapeIds -SlideNumber $slideNo -ShapeId $shapeId) {
