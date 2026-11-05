@@ -909,9 +909,13 @@ function Set-FormulaTextStyle {
         $beforeBold = [string]$font.Bold
         $beforeColor = ''
         try { $beforeColor = [string]$font.Fill.ForeColor.RGB } catch { }
-        # A mixed-size range (Get-TextRangeFontSize returns null) means a size
-        # write would flatten the emphasis hierarchy — same guard as body text.
-        if ($null -eq $beforeSize) {
+        # A mixed-size range means a whole-range size write would flatten the
+        # emphasis hierarchy — same guard as body text, including the lying
+        # scalar: the range read resolves to the FIRST run's size (no msoMixed
+        # sentinel for TextRange2.Font.Size), so effective mixedness is
+        # verified per run before the whole-range write below. Skipped ranges
+        # keep family, size, and alignment untouched.
+        if (Test-TextRangeFontSizeEffectivelyMixed -TextRange $textRange -KnownRangeSize $beforeSize) {
             Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $Shape.Name -Issue 'FormulaStyleSkippedMixedFontSize' `
                 -Details 'Formula text mixes font sizes; family, size, and alignment were preserved to keep the emphasis hierarchy.' `
                 -RuleId 'STYLE.FORMULA.TEXT' -Property 'FontName/NameFarEast/Size/ParagraphAlignment' -RiskLevel 'R0' -Result 'Skipped'
@@ -993,11 +997,19 @@ function Test-TextRangeFontSizeEffectivelyMixed {
     # True when the range mixes font sizes — including the lying-scalar case
     # where the whole-range read resolves to the first run's size while other
     # runs differ. Whole-range scalar size writes must be skipped for these.
-    param($TextRange)
-    $rangeSize = Get-TextRangeFontSize $TextRange
+    # An unresolvable per-run snapshot counts as mixed too: transient COM
+    # refusals cluster in the same busy windows (15.3 slide30 storm), and the
+    # asymmetry is deliberate — skipping the size write on a uniform range
+    # only keeps the author size, while letting one through on a lying-scalar
+    # mixed range repeats the 17.1 slide13 flattening. Callers that already
+    # captured the range size or a run snapshot pass them via
+    # -KnownRangeSize/-KnownEntries so this hot path pays for each COM read
+    # once.
+    param($TextRange, $KnownRangeSize, $KnownEntries)
+    $rangeSize = if ($PSBoundParameters.ContainsKey('KnownRangeSize')) { $KnownRangeSize } else { Get-TextRangeFontSize $TextRange }
     if ($null -eq $rangeSize) { return $true }
-    $entries = Get-TextRangeFontSizeRunSnapshot -TextRange $TextRange
-    if ($null -eq $entries) { return $false }
+    $entries = if ($PSBoundParameters.ContainsKey('KnownEntries')) { $KnownEntries } else { Get-TextRangeFontSizeRunSnapshot -TextRange $TextRange }
+    if ($null -eq $entries) { return $true }
     foreach ($entry in $entries) {
         if ([Math]::Abs([double]$entry.Size - [double]$rangeSize) -gt 0.01) { return $true }
     }
@@ -1332,26 +1344,26 @@ function Set-TextRangeStyle {
         # fonts. The range read itself can also be a lying scalar — PowerPoint
         # returns the FIRST run's size on a mixed-size range (no msoMixed
         # sentinel for TextRange2.Font.Size), so effective mixedness is
-        # verified per run before any whole-range size write.
-        $mixedFontSize = ((Test-TextRangeFontSizeEffectivelyMixed -TextRange $TextRange) -and -not $ForceTargetSize)
+        # verified per run before any whole-range size write. One range read
+        # and one run snapshot are shared between the size capture and the
+        # mixedness probe instead of repeating the COM reads.
+        $fontSizeRunSnapshot = Get-TextRangeFontSizeRunSnapshot -TextRange $TextRange
+        $mixedFontSize = ((Test-TextRangeFontSizeEffectivelyMixed -TextRange $TextRange -KnownRangeSize $beforeSize -KnownEntries $fontSizeRunSnapshot) -and -not $ForceTargetSize)
         $safeSize = Resolve-SafeFontSize -TextRange $TextRange -TargetSize $Size -FileName $FileName -SlideNumber $SlideNumber -ShapeName $ShapeName -ForceTargetSize:$ForceTargetSize -MaxSize $MaxSize
         $beforeLayout = Get-TextRangeLineLayout -TextRange $TextRange
         $font.Name = $script:Style.FontLatin
         $font.NameFarEast = $script:Style.FontChinese
-        if ($mixedFontSize) {
-            Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $ShapeName -Issue 'TextStyleSkippedMixedFontSize' `
-                -Details 'Text range mixes font sizes; size, bold, and color were preserved to keep the emphasis hierarchy.' `
-                -RuleId 'STYLE.TEXT.FONT' -Property 'Size/Bold/Color' -Before "$beforeSize|$beforeBold|$beforeColor" -After "$beforeSize|$beforeBold|$beforeColor" `
-                -RiskLevel 'R0' -Result 'Skipped'
-        } else {
+        if (-not $mixedFontSize) {
             $font.Size = $safeSize
-            # Emphasis colors and weight belong to the author: red/blue
-            # highlights and bold runs carry teaching semantics, so this
-            # pass only ever ADDS bold for titles and never writes a
-            # color (43 red and 14 blue runs were flattened to black in
-            # 18.2 v3 before this guard).
-            if ($Bold) { $font.Bold = $script:MsoTrue }
+        } else {
+            Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $ShapeName -Issue 'TextStyleSkippedMixedFontSize' `
+                -Details 'Text range mixes font sizes; size was preserved to keep the emphasis hierarchy.' `
+                -RuleId 'STYLE.TEXT.FONT' -Property 'Size' -Before "$beforeSize|$beforeBold|$beforeColor" -After "$beforeSize|$beforeBold|$beforeColor" `
+                -RiskLevel 'R0' -Result 'Skipped'
         }
+        # Emphasis colors belong to the author: red/blue highlights carry
+        # teaching semantics, so this pass never writes a color (43 red and
+        # 14 blue runs were flattened to black in 18.2 v3 before this guard).
         # Roll back text or line-bound changes that would shift glyphs into a
         # sibling text shape; harmless metric changes without overlap can stay.
         $afterLayout = Get-TextRangeLineLayout -TextRange $TextRange
@@ -1377,13 +1389,45 @@ function Set-TextRangeStyle {
             }
             return
         }
+        # Bold-everything policy (2026-11-05 user acceptance: classroom
+        # projection legibility): every normalized text range renders bold,
+        # regardless of the old title-only rule. Bold is applied after the
+        # family write passes the layout guard, with its own guard and a
+        # per-run restore: bold widening must not re-wrap the author layout,
+        # and colors/sizes are never touched by this write.
+        $boldRunSnapshot = New-Object System.Collections.Generic.List[object]
+        $boldSnapshotUsable = $true
+        try {
+            foreach ($runRange in @($TextRange.Runs())) {
+                $runBold = try { [int]$runRange.Font.Bold } catch { 0 }
+                if ($runBold -notin @(-1, 0)) { $boldSnapshotUsable = $false; break }
+                $boldRunSnapshot.Add([pscustomobject]@{ Range = $runRange; Bold = $runBold }) | Out-Null
+            }
+        } catch { $boldSnapshotUsable = $false }
+        $font.Bold = $script:MsoTrue
+        $afterBoldLayout = Get-TextRangeLineLayout -TextRange $TextRange
+        $boldApplied = $true
+        if (-not (Test-TextRangeLayoutUnchanged -Before $beforeLayout -After $afterBoldLayout -Shape $Shape)) {
+            $boldApplied = $false
+            if ($boldSnapshotUsable) {
+                foreach ($entry in $boldRunSnapshot) {
+                    try { $entry.Range.Font.Bold = $entry.Bold } catch { }
+                }
+            }
+            if ($FileName -ne '') {
+                Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $ShapeName -Issue 'TextStyleBoldSkippedRelayout' `
+                    -Details "Bold re-wrapped the shape; bold was rolled back while the normalized font family was kept." `
+                    -RuleId 'STYLE.TEXT.FONT' -Property 'Bold' `
+                    -Before "$beforeBold" -After "$beforeBold" `
+                    -RiskLevel 'R0' -Result 'Skipped'
+            }
+        }
         if ($FileName -ne '') {
-            $writtenProperties = $(if ($Bold) { 'FontName/NameFarEast/Size/Bold' } else { 'FontName/NameFarEast/Size' })
             Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $ShapeName -Issue 'TextStyleNormalized' `
-                -Details 'Font family and safe font size normalized; author bold and color preserved; text content preserved.' `
-                -RuleId 'STYLE.TEXT.FONT' -Property $writtenProperties `
+                -Details $(if ($boldApplied) { 'Font family, safe font size, and bold weight normalized; author color preserved; text content preserved.' } else { 'Font family and safe font size normalized; bold skipped (relayout guard); author color preserved; text content preserved.' }) `
+                -RuleId 'STYLE.TEXT.FONT' -Property 'FontName/NameFarEast/Size/Bold' `
                 -Before ("{0}|{1}|{2}|{3}|{4}" -f $beforeName, $beforeFarEast, $beforeSize, $beforeBold, $beforeColor) `
-                -After $(if ($mixedFontSize) { "{0}|{1}|{2}|{3}|{4}" -f $script:Style.FontLatin, $script:Style.FontChinese, $beforeSize, $beforeBold, $beforeColor } else { "{0}|{1}|{2}|{3}|{4}" -f $script:Style.FontLatin, $script:Style.FontChinese, $safeSize, $beforeBold, $beforeColor }) `
+                -After $(if ($mixedFontSize) { "{0}|{1}|{2}|{3}|{4}" -f $script:Style.FontLatin, $script:Style.FontChinese, $beforeSize, '1', $beforeColor } else { "{0}|{1}|{2}|{3}|{4}" -f $script:Style.FontLatin, $script:Style.FontChinese, $safeSize, '1', $beforeColor }) `
                 -RiskLevel 'R1' -Result 'Applied'
         }
     } catch {
@@ -1585,6 +1629,19 @@ function Set-AutoSizeFontSizeCapSafely {
     $beforeSize = Get-TextRangeFontSize $textRange
     if ($null -eq $beforeSize -or $beforeSize -le $MaxSize) { return }
 
+    # A lying scalar (first-run size) can read above the ceiling while other
+    # runs sit below it; the whole-range cap write below would flatten them to
+    # the ceiling. Mixed ranges are skipped entirely — same policy as
+    # Set-TextRangeStyle.
+    if (Test-TextRangeFontSizeEffectivelyMixed -TextRange $textRange -KnownRangeSize $beforeSize) {
+        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $ShapeName `
+            -Issue 'BodyFontSizeCapSkippedMixedFontSize' `
+            -Details "$beforeSize pt reads above the $MaxSize pt ceiling but the range mixes font sizes; size cap skipped to keep the emphasis hierarchy." `
+            -RuleId 'STYLE.TEXT.FONT' -Property 'Size' -Before "$beforeSize" -After "$beforeSize" `
+            -RiskLevel 'R0' -Result 'Skipped'
+        return
+    }
+
     # An AutoSize text box owns its final bounds.  PowerPoint recalculates those
     # bounds during SaveAs from the effective font metrics, even when COM lets
     # us assign the old Left/Top/Width/Height immediately after changing the
@@ -1732,6 +1789,13 @@ function Set-AutoSizeTextFontSafely {
         $beforeFit = Test-TextRangeFitsShape -TextRange $textRange -ShapeWidth $width -ShapeHeight $height
         $beforeLayout = Get-TextRangeLineLayout -TextRange $textRange
         & $setFontFamily $latinTarget $script:Style.FontChinese
+        # Bold-everything policy (2026-11-05 user acceptance): AutoSize formula
+        # lists render bold like every other normalized shape. The write lands
+        # before the layout guards so the relayout-fit factor search and the
+        # rollback paths treat bold-induced rewrap exactly like family-induced
+        # rewrap; width pressure is resolved by scaling sizes, never by
+        # dropping the weight.
+        $textRange.Font.Bold = $script:MsoTrue
 
         # Compare line bounds as well as text: the line count and shape box can
         # stay unchanged while a font write shifts glyphs into sibling text.
@@ -1831,8 +1895,8 @@ function Set-AutoSizeTextFontSafely {
             # reflowed the list into the instrument images. Mixed ranges skip
             # the fitted attempt entirely and roll back verbatim below, so no
             # size write ever touches them.
-            $sizeEffectivelyMixed = Test-TextRangeFontSizeEffectivelyMixed -TextRange $textRange
             $authorSize = Get-TextRangeFontSize $textRange
+            $sizeEffectivelyMixed = Test-TextRangeFontSizeEffectivelyMixed -TextRange $textRange -KnownRangeSize $authorSize
             $fittedSize = $null
             if (-not $sizeEffectivelyMixed -and $null -ne $authorSize -and $targetFit.Available) {
                 $fittedSize = Get-FittedOverflowFontSize -CurrentSize $authorSize -TargetWidth $targetFit.Width -TargetHeight $targetFit.Height `
@@ -2728,9 +2792,12 @@ function Invoke-NormalizeSlideShape {
                 Add-FormulaCandidateReport -FileName $FileName -SlideNumber $SlideNumber -ShapeName $shapeName -Text $text | Out-Null
             }
             try {
-                # Font.Size returns msoSizeMixed (-2) on mixed-run ranges;
-                # the guarded helper maps that to $null instead of a bogus
-                # "SmallText -2pt" review row.
+                # Measured 2026-11-05 (17.1 slide13): TextRange2.Font.Size has
+                # no msoMixed sentinel — a mixed-run range reads as the FIRST
+                # run's size. Get-TextRangeFontSize maps negative/invalid COM
+                # values to $null so the SmallText review row never reports a
+                # bogus "-2pt"; mixedness itself is decided per run by
+                # Test-TextRangeFontSizeEffectivelyMixed, not by this read.
                 $fontSize = Get-TextRangeFontSize $Shape.TextFrame2.TextRange
                 if ($null -ne $fontSize -and $fontSize -lt $script:Style.SizeMinimum) {
                     Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName -Issue 'SmallText' -Details "$fontSize pt"
@@ -2929,10 +2996,14 @@ function Normalize-Presentation {
         $pictureFillShapeIds = Get-PictureFillShapeIds -SourcePath $File.FullName
         $script:PresentationSlidePartMap = Get-SourceSlidePartMap -SourcePath $File.FullName
         Add-PresentationPreflightReports -Presentation $pres -FileName $File.Name | Out-Null
-        $slideWidth = [double]$pres.PageSetup.SlideWidth
+        # This runs right after the previous deck's PowerPoint quit — the same
+        # busy window that motivated the Open retry above — so every page-setup
+        # and slide-enumeration read gets the shared COM retry too.
+        $slideWidth = [double](Invoke-WithComRetry { $pres.PageSetup.SlideWidth })
+        $slideCount = [int](Invoke-WithComRetry { $pres.Slides.Count })
 
-        for ($i = 1; $i -le $pres.Slides.Count; $i++) {
-            $slide = $pres.Slides.Item($i)
+        for ($i = 1; $i -le $slideCount; $i++) {
+            $slide = Invoke-WithComRetry { $pres.Slides.Item($i) }
             $slideFacts = Get-SlideShapeFacts -Slide $slide
             $isVideo = Test-IsVideoSlide -Slide $slide -Facts $slideFacts
             $slideKind = Get-SlideKind -Slide $slide -SlideNumber $i -Facts $slideFacts
@@ -3404,6 +3475,7 @@ $sw.Stop()
 # Deferred geometry conservation: PowerPoint has quit, so the SaveAs targets
 # are lock-free. Restores run before the report write so healed shapes are
 # part of the same evidence CSV.
+$preDeferredRestoreRowCount = $script:ReportRows.Count
 foreach ($pending in $script:PendingGeometryRestores.ToArray()) {
     $pendingCachePath = "$($pending.OutputPath).cache.json"
     try {
@@ -3440,6 +3512,35 @@ try {
     Write-Utf8BomCsv -InputObject $script:ReportRows.ToArray() -Path $reportPath
 } catch {
     Write-Warning "Failed to write report CSV '$reportPath' — $($_.Exception.Message)"
+}
+
+# Deferred-restore failures land after the per-file loop has finished, so the
+# in-loop failure accounting never sees them. Re-run the same failure-shaped
+# predicate over the post-loop rows: the parallel parent scans the whole child
+# CSV and judges these files failed, so the sequential summary and
+# -FailOnError must reach the same verdict or one mode reports success where
+# the other reports failure (e675660 alignment).
+$deferredFailedFiles = @()
+if ($script:ReportRows.Count -gt $preDeferredRestoreRowCount) {
+    foreach ($row in @($script:ReportRows)[$preDeferredRestoreRowCount..($script:ReportRows.Count - 1)]) {
+        if (-not (Test-FileFailureShapedRow -Row $row)) { continue }
+        $rowFile = [string]$row.FilePath
+        if ([string]::IsNullOrWhiteSpace($rowFile)) { $rowFile = [string]$row.File }
+        if ([string]::IsNullOrWhiteSpace($rowFile) -or $deferredFailedFiles -ccontains $rowFile) { continue }
+        $alreadyCounted = $false
+        if ($preDeferredRestoreRowCount -gt 0) {
+            foreach ($earlier in @($script:ReportRows)[0..($preDeferredRestoreRowCount - 1)]) {
+                $earlierFile = [string]$earlier.FilePath
+                if ([string]::IsNullOrWhiteSpace($earlierFile)) { $earlierFile = [string]$earlier.File }
+                if (([string]$earlierFile -ceq $rowFile) -and (Test-FileFailureShapedRow -Row $earlier)) { $alreadyCounted = $true; break }
+            }
+        }
+        if (-not $alreadyCounted) { $deferredFailedFiles += $rowFile }
+    }
+}
+if ($deferredFailedFiles.Count -gt 0) {
+    $failedCount += $deferredFailedFiles.Count
+    Write-Warning ("Deferred geometry restore failed for {0} file(s): {1}" -f $deferredFailedFiles.Count, ($deferredFailedFiles -join ', '))
 }
 
 Write-Host "Report saved: $reportPath"
