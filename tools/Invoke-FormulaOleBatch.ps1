@@ -411,6 +411,10 @@ function Invoke-BatchStep {
         [string[]]$Flags = @(),
         [string[]]$Outputs = @()
     )
+    # Whether THIS run executed the action (vs a -Resume receipt reuse).
+    # Callers read it immediately after the step returns to decide whether
+    # step outputs were produced by this run and are therefore owned by it.
+    $script:LastBatchStepExecutedByRun = $false
     $existing = $null
     if ($Resume) { $existing = Get-RecordedStep -StepName $StepName }
     $expectedSignature = New-StepSignature -StepName $StepName -InputPaths $Inputs -Flags $Flags
@@ -426,6 +430,7 @@ function Invoke-BatchStep {
         if ([string]$batchSteps[$i].name -eq $StepName) { $batchSteps.RemoveAt($i) }
     }
     Write-Output ("[step] {0}" -f $StepName)
+    $script:LastBatchStepExecutedByRun = $true
     $null = & $Action
     foreach ($output in $Outputs) {
         if ([string]::IsNullOrWhiteSpace($output) -or -not (Test-Path -LiteralPath $output)) {
@@ -509,13 +514,23 @@ try {
     $outputPptx = Join-Path $deliveryDir $outputName
     $applyReport = Join-Path $reportDir 'formula-ole-apply-report.csv'
     Invoke-BatchStep -StepName 'apply' -Inputs @($inputFullPath, $mappingCsv, $fragmentsDir) -Outputs @($outputPptx, $applyReport) -Action {
+        # Attempted-run marker, set when the action STARTS rather than after
+        # Invoke-BatchStep returns: a mid-action failure (copy done, zip open
+        # or mid-write failed) leaves a half-converted PPTX in the delivery
+        # directory, and the failed-batch contract requires this run to own
+        # and remove it — a post-return assignment cannot run on that path.
+        $script:outputPptxCreatedByRun = $true
         & (Join-Path $PSScriptRoot 'Apply-FormulaOmmlForOle.ps1') -InputPath $inputFullPath -MappingCsv $mappingCsv -OmmlCandidateCsv $candidatesCsv -OutputPath $outputPptx -ReportPath $applyReport -MaxItems $MaxItems | Out-Null
     }
-    $outputPptxCreatedByRun = $true
 
     # --- step 7: rendered size fit (PowerPoint-measured overflow guard) ---
     $sizeFitReport = Join-Path $reportDir 'formula-ole-size-fit-report.csv'
     Invoke-BatchStep -StepName 'size-fit' -Inputs @($outputPptx) -Outputs @($outputPptx, $sizeFitReport) -Action {
+        # Same attempted-run ownership as apply: this step rewrites the
+        # delivery PPTX in place, so once it starts, the (possibly mutated)
+        # file belongs to this run and must not survive a later failure as a
+        # stray deliverable.
+        $script:outputPptxCreatedByRun = $true
         $fitRows = New-Object System.Collections.Generic.List[object]
         $sizeFitTolerancePt = 2.0
         # Tracks whether the latest PowerPoint measurement saw no overflow.
@@ -667,7 +682,12 @@ try {
             }
         }
     }
-    $finalPdfCreatedByRun = $true
+    # Only a run that actually executed the final-pdf action owns the PDF. A
+    # -Resume receipt reuse must leave the carryover PDF untouched so a later
+    # failure keeps its evidence and reusable step receipts; the action itself
+    # refuses pre-existing targets and self-cleans only attempt-created
+    # partials (pdfExistedBeforeAttempt).
+    if ($script:LastBatchStepExecutedByRun) { $finalPdfCreatedByRun = $true }
 
     # --- step 10: after visual audit (PowerPoint open proof + pages) ---
     if (-not $SkipVisualAudit) {
