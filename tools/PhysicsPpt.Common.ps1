@@ -434,13 +434,40 @@ function New-PowerPointApplication {
     param([switch]$Visible)
 
     $application = New-Object -ComObject PowerPoint.Application
-    $hasOpenDocuments = $true
-    try { $hasOpenDocuments = ($application.Presentations.Count -gt 0 -or $application.ProtectedViewWindows.Count -gt 0) } catch { }
-    if (-not $hasOpenDocuments) {
+    # Attached-busy contract (2026-11-06 user report: decks the user had open
+    # were hidden/parked by automation). COM activation attaches to the user's
+    # running instance; when it holds open presentations or protected-view
+    # decks, the automation must not touch window state, position, or
+    # visibility at all — the user keeps their exact window layout. Only a
+    # FRESH automation-only instance is hidden/minimized/offscreen-parked.
+    # User-session refusal (2026-11-09 user report: an automation batch
+    # sharing the interactively used instance kept flashing the taskbar and
+    # the decks the user was editing ended up closed). Preserving window
+    # state is not enough: a VISIBLE instance is a human session by
+    # definition, and every Open/Close below would still flash their taskbar
+    # and run inside their process. Fail loud instead — the chain stages each
+    # quit their own instance before returning, so any pre-existing instance
+    # with a visible window or open decks belongs to the user. Hidden
+    # zero-deck leftovers stay adoptable (previous automation runs leave
+    # exactly that behind), which keeps crash recovery self-healing.
+    $preExistingPowerPoint = @((Get-Process -Name POWERPNT -ErrorAction SilentlyContinue)).Count -gt 0
+    if ($preExistingPowerPoint) {
+        $guardVisible = $false
+        $guardBusy = $false
+        try { $guardVisible = ([int]$application.Visible -ne 0) } catch { }
+        try { $guardBusy = ($application.Presentations.Count -gt 0 -or $application.ProtectedViewWindows.Count -gt 0) } catch { $guardBusy = $true }
+        if ($guardVisible -or $guardBusy) {
+            Release-ComObjectSafe -ComObject $application
+            throw 'PowerPoint is currently in use (a visible window or open presentations already exist). Close PowerPoint and rerun, or wait until editing is done: automation must not share an interactive session.'
+        }
+    }
+    $attachedBusy = $true
+    try { $attachedBusy = ($application.Presentations.Count -gt 0 -or $application.ProtectedViewWindows.Count -gt 0) } catch { }
+    if (-not $attachedBusy) {
         # PowerPoint's standard window layer may reject Visible=0 while it is
         # held in another process context. Preserve the hidden-window contract
-        # on supported hosts; offscreen placement is a deterministic fallback
-        # for the same freshly activated automation instance.
+        # on supported hosts; minimize+offscreen placement is a deterministic
+        # fallback for the same freshly activated automation instance.
         try { $application.Visible = $(if ($Visible) { -1 } else { 0 }) } catch {
             if (-not $Visible) {
                 try {
@@ -456,9 +483,13 @@ function New-PowerPointApplication {
                 }
             }
         }
-    }
-    if (-not $Visible -and -not $hasOpenDocuments) {
-        try { $application.DisplayAlerts = 1 } catch { }
+        if (-not $Visible) {
+            # Belt-and-braces silent run for the automation-owned instance:
+            # minimized (taskbar only) and parked offscreen.
+            try { $application.WindowState = 2 } catch { }
+            try { $application.Left = -32000; $application.Top = -32000 } catch { }
+            try { $application.DisplayAlerts = 1 } catch { }
+        }
     }
     return $application
 }

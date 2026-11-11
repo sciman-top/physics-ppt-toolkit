@@ -474,7 +474,7 @@ foreach ($safetyRule in @('doNotMoveShapes', 'doNotResizeShapes', 'doNotModifyAn
         throw "Config rules.$safetyRule must be a boolean"
     }
 }
-if ($config.rules.disableAdvanceOnClick) { throw 'Config must preserve advance-on-click by default; use the explicit workflow switch for anti-misclick mode.' }
+if (-not $config.rules.disableAdvanceOnClick) { throw 'Config rules.disableAdvanceOnClick must default to true for classroom interaction misclick protection.' }
 if ($config.rules.allowTextBoxWidthExpansion) { throw 'Config must disable text-box width expansion by default.' }
 foreach ($requiredTrueRule in @('doNotMoveShapes', 'doNotResizeShapes', 'doNotModifyAnimations', 'doNotModifySlideTransitions')) {
     if (-not $config.rules.$requiredTrueRule) { throw "Config safety rule must default to true: $requiredTrueRule" }
@@ -883,6 +883,17 @@ foreach ($automationScript in @(Get-ChildItem -LiteralPath (Join-Path $root 'too
 # delivery runs, otherwise a failed COM save can leave an untracked artifact.
 foreach ($stageScript in @('tools\Apply-PptxBrandVisualRefresh.ps1', 'tools\Apply-PptxHighlightBoxStyle.ps1')) {
     $stageContent = Get-Content -LiteralPath (Join-Path $root $stageScript) -Raw -Encoding UTF8
+    # Standalone visual stages must receive an explicit input. A stale
+    # repository sample used to be injected when -PptxPath was omitted, so a
+    # removed sample silently turned every no-argument invocation into a
+    # confusing file-not-found error. The workflow caller already passes the
+    # path explicitly; keep the standalone contract equally explicit.
+    if ($stageContent -notmatch '(?s)\[Parameter\(Mandatory\s*=\s*\$true\)\].*?\[string\]\$PptxPath') {
+        throw "Standalone visual stage must make -PptxPath mandatory: $stageScript"
+    }
+    if ($stageContent -match '\$PptxPath\s*=\s*Join-Path\s+\$root') {
+        throw "Standalone visual stage must not inject a repository sample as -PptxPath: $stageScript"
+    }
     if ($stageContent -notmatch '(?s)if \(-not \[string\]::IsNullOrWhiteSpace\(\$OutputPath\)\).*?foreach \(\$dir in @\([^\)]*\$backupDir') {
         throw "Explicit output path must create the original backup directory: $stageScript"
     }
@@ -928,6 +939,34 @@ if ($mixedProbeFnAst.Extent.Text -notmatch [regex]::Escape('if ($null -eq $entri
     throw 'Test-TextRangeFontSizeEffectivelyMixed must treat an unresolvable per-run snapshot as mixed (return $true); returning $false lets a transient COM failure in the busy window open the lying-scalar flattening window again.'
 }
 
+# Mixed-family name write wiring probe (18.2 slide23 font-mosaic class): the
+# whole-range Font.Name + NameFarEast write pair on a mixed-family range
+# leaves the East-Asian family in the LATIN slot of letter/digit runs and is
+# nondeterministic per shape (COM probe evidence), while the layout guard and
+# the Applied report row cannot detect either. Both whole-range family write
+# paths must therefore route mixed ranges through the per-run
+# Get-TextRangeFontNameRunSnapshot snapshot, and the snapshot itself must
+# treat an unresolvable run as unresolved. Removing either wiring re-allows
+# the mosaic while the gate stays green.
+foreach ($fontFamilyFnName in @('Set-TextRangeStyle', 'Set-FormulaTextStyle', 'Set-AutoSizeTextFontSafely')) {
+    $fontFamilyFnAst = $normalizeFontSizeAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $fontFamilyFnName }, $true) | Select-Object -First 1
+    if ($null -eq $fontFamilyFnAst) { throw "$fontFamilyFnName function definition not found for the mixed-family wiring probe." }
+    $consultsFamilyHelper = @($fontFamilyFnAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Set-TextRangeFontFamilyCom' }, $true)).Count -gt 0
+    if (-not $consultsFamilyHelper) { throw "$fontFamilyFnName must write families through Set-TextRangeFontFamilyCom; removing the wiring re-allows the 18.2 slide23 font-mosaic (East-Asian family landing in the latin slot of letter/digit runs)." }
+}
+$familyHelperFnAst = $normalizeFontSizeAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Set-TextRangeFontFamilyCom' }, $true) | Select-Object -First 1
+if ($null -eq $familyHelperFnAst) { throw 'Set-TextRangeFontFamilyCom function definition not found for the write-order probe.' }
+$farEastWriteIndex = $familyHelperFnAst.Extent.Text.IndexOf('$Range.Font.NameFarEast')
+$nameWriteIndex = $familyHelperFnAst.Extent.Text.IndexOf('$Range.Font.Name =')
+if ($farEastWriteIndex -lt 0 -or $nameWriteIndex -lt 0 -or $farEastWriteIndex -gt $nameWriteIndex) {
+    throw 'Set-TextRangeFontFamilyCom must write Font.NameFarEast BEFORE Font.Name; the reverse order lands the East-Asian family in the latin slot of letter/digit runs (18.2 slide23 probe class).'
+}
+$nameSnapshotFnAst = $normalizeFontSizeAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-TextRangeFontNameRunSnapshot' }, $true) | Select-Object -First 1
+if ($null -eq $nameSnapshotFnAst) { throw 'Get-TextRangeFontNameRunSnapshot function definition not found for the unresolved-run probe.' }
+if ($nameSnapshotFnAst.Extent.Text -notmatch [regex]::Escape('if ([string]::IsNullOrWhiteSpace($runName) -or [string]::IsNullOrWhiteSpace($runFarEast)) { return $null }')) {
+    throw 'Get-TextRangeFontNameRunSnapshot must treat an unresolvable per-run name pair as unresolved (return $null); returning partial entries opens a partial family write with no lossless rollback.'
+}
+
 # Brand slide-level retry liveness: the divider/special-page write functions
 # run inside the slide-level Invoke-WithComRetry wrapper, so their per-shape
 # catch clauses must consult the retryability filter and rethrow retryable
@@ -950,6 +989,57 @@ if ($null -eq $zipTextFnAst) { throw 'Write-ZipEntryText function definition not
 if ($zipTextFnAst.Extent.Text -match '\.Delete\(') {
     throw 'Write-ZipEntryText must keep Update-mode in-place overwrite (entry.Open + write + SetLength); an entry.Delete() reintroduces the mid-failure corrupt-package window that the behavioral probe cannot detect.'
 }
+}
+
+# COM-collection-through-retry-wrapper probe (2026-11-05 17.1 v4 / 18.1 v1
+# incident class): `return & $Action` inside Invoke-WithComRetry unrolls an
+# enumerable COM collection into a 0-based object[], so a bare .Slides /
+# .Shapes / .Presentations / .GroupItems / .Runs() as the action's output
+# silently shifts every 1-based .Item(i) read off-by-one and dies with
+# "Index was outside the bounds of the array" on the last iteration. The
+# output must be wrapped: @(...) for intended array semantics, ,(...) to keep
+# the COM collection identity. Byte-identical happy paths hide this from
+# behavioral probes, so it is locked at the AST level. Validated against the
+# pre-fix highlight-box snapshot (flags exactly the bare $slide.Shapes site).
+$comCollectionMembers = 'Shapes|Slides|Presentations|GroupItems|Runs|ListParagraphs|Items'
+foreach ($probedTool in @(Get-ChildItem (Join-Path $root 'tools') -Filter '*.ps1')) {
+    $toolAst = [System.Management.Automation.Language.Parser]::ParseFile($probedTool.FullName, [ref]$null, [ref]$null)
+    $retryCalls = $toolAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.CommandElements.Count -ge 1 -and $node.CommandElements[0].Extent.Text -eq 'Invoke-WithComRetry' }, $true)
+    foreach ($retryCall in $retryCalls) {
+        for ($elemIndex = 1; $elemIndex -lt $retryCall.CommandElements.Count - 1; $elemIndex++) {
+            if ($retryCall.CommandElements[$elemIndex].Extent.Text -ne '-Action') { continue }
+            $actionArg = $retryCall.CommandElements[$elemIndex + 1]
+            $actionBlock = $null
+            if ($actionArg -is [System.Management.Automation.Language.ScriptBlockExpressionAst]) {
+                $actionBlock = $actionArg.ScriptBlock
+            } elseif ($actionArg -is [System.Management.Automation.Language.MemberExpressionAst]) {
+                $innerExpr = $actionArg.Expression
+                if ($innerExpr -is [System.Management.Automation.Language.ScriptBlockExpressionAst]) { $actionBlock = $innerExpr.ScriptBlock }
+            }
+            if ($null -eq $actionBlock) { break }
+            $blockText = $actionBlock.Extent.Text.Trim()
+            if ($blockText.EndsWith('.GetNewClosure()')) {
+                $blockText = $blockText.Substring(0, $blockText.Length - '.GetNewClosure()'.Length).Trim()
+            }
+            if (-not ($blockText.StartsWith('{') -and $blockText.EndsWith('}'))) { break }
+            $bodyText = $blockText.Substring(1, $blockText.Length - 2).Trim()
+            # Explicit arrays: a single-element pipeline result collapses to a
+            # scalar string and [-1] indexing would yield its last CHARACTER.
+            $allSegments = @($bodyText -split "(\r?\n|;)")
+            $segments = @($allSegments | Where-Object { $_ -notmatch '^(\r?\n|;)$' -and $_.Trim() -ne '' })
+            if ($segments.Count -eq 0) { break }
+            $tailSegment = ([string]$segments[$segments.Count - 1]).Trim()
+            $isBareCollectionOutput = $tailSegment -match ('\.\s*(' + $comCollectionMembers + ')\s*(\(\s*\))?\s*$') -and
+                $tailSegment -notmatch '^\s*@' -and
+                $tailSegment -notmatch '^\s*,' -and
+                $tailSegment -notmatch '\.\s*(Count|Item|GetEnumerator)\s*\(' -and
+                $tailSegment -notmatch '\|\s*(Where-Object|ForEach-Object|Select-Object|Out-Null)'
+            if ($isBareCollectionOutput) {
+                throw ("{0}:{1}: Invoke-WithComRetry -Action outputs a bare COM collection ('{2}'); the retry wrapper unrolls it into a 0-based object[]. Wrap in @(...) (intended array) or ,(...) (preserve collection) — see the 2026-11-05 highlight-box Shapes fix." -f $probedTool.Name, $actionBlock.Extent.StartLineNumber, $tailSegment)
+            }
+            break
+        }
+    }
 }
 
 # Intentional-geometry bucketing probe: the per-file table starts empty, so
@@ -1041,25 +1131,24 @@ try {
     Remove-Item -LiteralPath $zipProbePath -Force -ErrorAction SilentlyContinue
 }
 
-# Size-fit terminal gate probe: the overflow repair loop must track a clean
-# measurement state (seeded false, set true on the two no-overflow exits)
-# and keep a post-loop throw naming the still-overflowing shapes. The S1 fix
-# (silent Unfittable pass-through) has no pure function to probe, so the
+# Size-fit terminal gate probe: the display-fit step must end with a
+# PowerPoint re-measurement and a post-check throw naming the still-
+# overflowing shapes. The 2026-11-06 rewrite (measure-unwrapped → relocate/
+# grow the box → fit) replaced the old measurementsClean shrink loop, but the
 # structural lock below keeps a regression from quietly shipping clipped
-# formulas again.
+# formulas again: the step must still measure after fitting and must still
+# carry a terminal throw.
 $batchAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'tools\Invoke-FormulaOleBatch.ps1'), [ref]$null, [ref]$null)
-$cleanAssignments = @($batchAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -eq '$measurementsClean' }, $true))
-if ($cleanAssignments.Count -lt 3) { throw ("Size-fit loop must seed measurementsClean=false and mark it clean on the no-overflow exits; found only {0} assignment(s)." -f $cleanAssignments.Count) }
+$finalCheckCount = @($batchAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and ([string]$node.GetCommandName()) -eq 'Measure-FormulaOmmlRenderBounds' }, $true))
+if ($finalCheckCount.Count -lt 2) { throw ("Size-fit step must measure before fit and re-measure as the final guard; found only {0} Measure-FormulaOmmlRenderBounds invocation(s)." -f $finalCheckCount.Count) }
 function Get-EnclosingActionScriptBlock($Node) {
     $current = $Node.Parent
     while ($null -ne $current -and $current -isnot [System.Management.Automation.Language.ScriptBlockExpressionAst]) { $current = $current.Parent }
     return $current
 }
-$sizeFitActionBlock = Get-EnclosingActionScriptBlock $cleanAssignments[0]
-if ($null -eq $sizeFitActionBlock) { throw 'Size-fit measurementsClean assignments are not inside an -Action scriptblock; probe boundary lost.' }
-if ((Get-EnclosingActionScriptBlock $cleanAssignments[-1]) -ne $sizeFitActionBlock) { throw 'Size-fit clean assignments span multiple scriptblocks; probe boundary lost.' }
-$terminalThrows = @($sizeFitActionBlock.FindAll({ param($node) $node -is [System.Management.Automation.Language.ThrowStatementAst] }, $true) | Where-Object { $_.Extent.StartOffset -gt $cleanAssignments[-1].Extent.EndOffset })
-if ($terminalThrows.Count -eq 0) { throw 'Size-fit post-loop terminal throw (still-overflow batch failure) is missing after the last measurementsClean assignment.' }
+$sizeFitText = [string]$batchAst.Extent.Text
+if ($sizeFitText -notmatch 'FormulaOmml shapes still overflow (their box )?after (size|display) fit') { throw 'Size-fit terminal throw (still-overflow batch failure) text is missing from the fit step.' }
+if ($sizeFitText -notmatch 'FormulaOmml shapes could not be measured in PowerPoint') { throw 'Size-fit unmeasured-shape guard text is missing.' }
 $brandContent = Get-Content -LiteralPath (Join-Path $root 'tools\Apply-PptxBrandVisualRefresh.ps1') -Raw -Encoding UTF8
 if ($brandContent -notmatch '(?s)\$presentationToPublish\s*=.*?Copy-Item -LiteralPath \$PptxPath -Destination \$presentationToPublish.*?Presentations\.Open\(\$presentationToPublish.*?if \(-not \(Test-PptxPackageIntegrity -Path \$presentationToPublish\)\).*?Move-Item -LiteralPath \$presentationToPublish -Destination \$workingPptx') {
     throw 'Brand refresh must write a verified temporary copy and publish it only on success.'

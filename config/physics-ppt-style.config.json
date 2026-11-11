@@ -539,10 +539,10 @@
     },
     {
       "name": "电阻数值代入链3V0.49A",
-      "sourcePattern": "^R=U/I=3V/0\\.49A=6\\.1Ω$",
-      "targetUnicodeMath": "R=U/I=3V/0.49A=6.1Ω",
-      "targetTex": "R=\\frac{U}{I}=\\frac{3V}{0.49A}=6.1\\Omega",
-      "note": "电阻数值代入链；来源：17.4欧姆定律应用 OLE slide13（红 U/I 分式+黑结果，AccentTokens 双色保留；2026-11-05 用户验收要求转原生）。"
+      "sourcePattern": "^U/I=3V/0\\.49A=6\\.1Ω$",
+      "targetUnicodeMath": "U/I=3V/0.49A=6.1Ω",
+      "targetTex": "\\frac{U}{I}=\\frac{3V}{0.49A}=6.1\\Omega",
+      "note": "电阻数值代入链；来源：17.4欧姆定律应用 OLE slide13（本体不含 R=——R= 为相邻独立红色小形状 sh6；红 U/I 分式+黑结果，AccentTokens 双色保留；2026-11-05 用户验收要求转原生）。"
     },
     {
       "name": "电阻数值代入链3V0.24A",
@@ -607,7 +607,7 @@
     "allowTextBoxWidthExpansion": false,
     "doNotModifyAnimations": true,
     "doNotModifySlideTransitions": true,
-    "disableAdvanceOnClick": false,
+    "disableAdvanceOnClick": true,
     "formulaTextStyleDefault": true,
     "formulaConversionDefault": false,
     "videoSlideKeywords": ["视频", "播放", "观察视频"]

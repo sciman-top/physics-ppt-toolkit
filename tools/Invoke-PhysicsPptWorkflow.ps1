@@ -53,7 +53,11 @@
   Copy generated PPTX files and apply only deterministic layout fixes from the visual audit.
 
 .PARAMETER ApplyFormulaOmmlWhitelist
-  Generate editable OfficeMath/OMML copies for formula whitelist hits, then validate them with Open XML.
+  Generate editable OfficeMath/OMML copies for formula whitelist hits (text-carrier formulas only; OLE-carrier
+  conversion is the separate standalone formula batch), then validate them with Open XML. When a brand/highlight
+  chain ran, a Passed conversion is promoted to the chain final BEFORE the final PDF export and final visual audit,
+  so 01_交付物 ships the converted bytes; a non-Passed output keeps the unconverted chain final and the promotion
+  receipt records why.
 
 .PARAMETER FullChain
   Run the complete style chain: normalization -> brand refresh -> highlight-box styling -> final PDF export.
@@ -66,8 +70,10 @@
   Skip the initial report-only pass for NormalizeAndPdf/SafeNormalize runs. The normalize pass still writes the final report.
 
 .PARAMETER DisableAdvanceOnClick
-  Explicitly disable mouse-click slide advance on every slide. The default preserves
-  the source presentation's click behavior.
+  Explicitly disable mouse-click slide advance on every slide. Defaults to true via config rules.disableAdvanceOnClick.
+
+.PARAMETER KeepAdvanceOnClick
+  Preserve click-to-advance (disables anti-misclick mode).
 
 .PARAMETER FullSelfCheck
   Run the full repository self-check (Test-ToolkitFiles.ps1) before the run.
@@ -113,6 +119,7 @@ param(
     [string]$FormulaProcessingMode = '',
     [switch]$SkipPreflightReport,
     [switch]$DisableAdvanceOnClick,
+    [switch]$KeepAdvanceOnClick,
     [switch]$FullSelfCheck,
 
     [ValidateRange(1, 100)]
@@ -148,6 +155,24 @@ $script:FormulaProcessingMode = if ($script:FormulaProcessingModeExplicit) {
     [string]$script:FormulaProcessingConfig.defaultMode
 }
 $allowedFormulaModes = @($script:FormulaProcessingConfig.allowedModes | ForEach-Object { [string]$_ })
+$script:EffectiveDisableAdvanceOnClick = if ($KeepAdvanceOnClick) {
+    $false
+} elseif ($PSBoundParameters.ContainsKey('DisableAdvanceOnClick')) {
+    [bool]$DisableAdvanceOnClick
+} else {
+    $rulesConfig = $null
+    try {
+        $configPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'config\physics-ppt-style.config.json'
+        if (Test-Path -LiteralPath $configPath -PathType Leaf) {
+            $rulesConfig = (Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json).rules
+        }
+    } catch { }
+    if ($null -ne $rulesConfig -and $null -ne $rulesConfig.disableAdvanceOnClick) {
+        [bool]$rulesConfig.disableAdvanceOnClick
+    } else {
+        $true
+    }
+}
 if ($script:FormulaProcessingMode -notin $allowedFormulaModes) {
     throw "Formula processing mode is not allowed by config: $($script:FormulaProcessingMode)"
 }
@@ -1104,7 +1129,13 @@ function Get-FullChainDeliveryFailures {
             $failures.Add("${name}: highlight-box stage did not consume the brand-refresh output.") | Out-Null
         }
         $finalPptxPath = [string](Get-ObjectPropertyValue -Object $record -PropertyName 'finalPptx' -DefaultValue '')
-        if ([string]::IsNullOrWhiteSpace($highlightPath) -or $finalPptxPath -cne $highlightPath) {
+        # A promoted formula stage output legitimately replaces the highlight-box
+        # copy as the chain final; the highlight output must then be the recorded
+        # pre-formula final (promotedPreFormulaFinalPptx), which is exactly what
+        # the promotion rebind consumed. Without the promotion the original
+        # identity contract holds unchanged.
+        $promotedFrom = [string](Get-ObjectPropertyValue -Object $record -PropertyName 'promotedPreFormulaFinalPptx' -DefaultValue '')
+        if ([string]::IsNullOrWhiteSpace($highlightPath) -or ($finalPptxPath -cne $highlightPath -and $promotedFrom -cne $highlightPath)) {
             $failures.Add("${name}: final PPTX is not the highlight-box stage output.") | Out-Null
         }
         $expectedFinalPresentation = Join-Path (Split-Path -Parent $finalPptxPath) ([System.IO.Path]::GetFileName($inputPath))
@@ -1373,7 +1404,7 @@ function Write-Summary {
         $generatedCandidateCount = Get-ObjectPropertyValue -Object $formulaOmmlArtifacts -PropertyName 'generatedCandidateCount' -DefaultValue 0
         $lines.Add("- OMML 候选生成：$candidateStatus，$generatedCandidateCount / $candidateCount")
         $lines.Add("- 已生成可编辑公式副本：$formulaOmmlCopyCount")
-        $lines.Add("- 已写入 OMML 公式：$formulaOmmlInsertedCount")
+        $lines.Add("- 已写入 OMML 公式（文本白名单载体；OLE 载体走独立公式批次）：$formulaOmmlInsertedCount")
         $lines.Add("- OMML 写入需复核项：$formulaOmmlApplyIssueCount")
         $lines.Add("- OMML Open XML 错误：$formulaOmmlOpenXmlErrorCount")
         if ($formulaOmmlVisualAuditEnabled) {
@@ -1383,6 +1414,19 @@ function Write-Summary {
             $lines.Add("- OMML 副本视觉审查：已跳过（快速公式闭环）")
         }
         $lines.Add("- OMML 自动门禁通过/失败：$formulaOmmlGatePassedCount / $formulaOmmlGateFailedCount")
+        $promotionReceipt = Get-ObjectPropertyValue -Object $Manifest -PropertyName 'formulaOmmlPromotion' -DefaultValue $null
+        if ($null -ne $promotionReceipt) {
+            $promotedCount = [int](Get-ObjectPropertyValue -Object $promotionReceipt -PropertyName 'promoted' -DefaultValue 0)
+            $consideredCount = [int](Get-ObjectPropertyValue -Object $promotionReceipt -PropertyName 'considered' -DefaultValue 0)
+            if ([bool](Get-ObjectPropertyValue -Object $promotionReceipt -PropertyName 'enabled' -DefaultValue $false)) {
+                $lines.Add("- 公式写回进入交付件：${promotedCount} / ${consideredCount}（Passed 门禁的转换副本已回绑链 final，01_交付物 即转换后字节）")
+            } else {
+                $lines.Add("- 公式写回进入交付件：0 / ${consideredCount}（无品牌/强调框链，转换副本仅存 14_公式OMML副本）")
+            }
+            foreach ($promotionReason in @((Get-ObjectPropertyValue -Object $promotionReceipt -PropertyName 'reasons' -DefaultValue @()))) {
+                $lines.Add("- 公式写回未晋升：$promotionReason")
+            }
+        }
     }
     $lines.Add("- 疑似公式：$(Get-IssueCount -Index $rowIssueIndex -Issue 'FormulaCandidate')")
     $lines.Add("- 已归一低风险文本公式：$(Get-IssueCount -Index $rowIssueIndex -Issue 'FormulaTextStyleNormalized')")
@@ -1907,7 +1951,7 @@ function Invoke-BrandStageArtifacts {
             # Out-Host keeps the child's stdout on the console: anything left on
             # this function's output stream would pollute the returned result
             # object (pwsh unrolls function output into the caller's value).
-            & $stageHost -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'Apply-PptxBrandVisualRefresh.ps1') -PptxPath $current -OutputPath $brandPptx | Out-Host
+            & $stageHost -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'Apply-PptxBrandVisualRefresh.ps1') -PptxPath $current -OutputPath $brandPptx | Out-Host
             if ($LASTEXITCODE -ne 0) { throw "Brand refresh stage failed with exit code $LASTEXITCODE" }
             if (-not (Test-Path -LiteralPath $brandPptx)) { throw "Brand refresh produced no output: $brandPptx" }
             $record.brandPptx = $brandPptx
@@ -1918,7 +1962,7 @@ function Invoke-BrandStageArtifacts {
             $record.highlightSourcePptxSha256 = Get-FileSha256OrNull -Path $current
             $highlightPptx = Join-Path $DeliveryDir "$safeName.callout$extension"
             Write-Host "  highlight box -> $(Split-Path -Leaf $highlightPptx)"
-            & $stageHost -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'Apply-PptxHighlightBoxStyle.ps1') -PptxPath $current -OutputPath $highlightPptx | Out-Host
+            & $stageHost -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'Apply-PptxHighlightBoxStyle.ps1') -PptxPath $current -OutputPath $highlightPptx | Out-Host
             if ($LASTEXITCODE -ne 0) { throw "Highlight-box stage failed with exit code $LASTEXITCODE" }
             if (-not (Test-Path -LiteralPath $highlightPptx)) { throw "Highlight-box stage produced no output: $highlightPptx" }
             $record.highlightPptx = $highlightPptx
@@ -2118,8 +2162,20 @@ function Complete-FinalDeliveryPackaging {
                     $file | Add-Member -NotePropertyName pdf -NotePropertyValue $movedFile.new -Force
                 }
             }
+            foreach ($formulaItem in @((Get-ObjectPropertyValue -Object (Get-ObjectPropertyValue -Object $Manifest -PropertyName 'formulaOmmlArtifacts' -DefaultValue $null) -PropertyName 'files' -DefaultValue @()))) {
+                # A promoted formula output IS the final PPTX, so the Final move
+                # relocated it; keep the stage receipt's outputPptx pointing at
+                # the delivered bytes or the summary copy count and any later
+                # consumer would follow a stale path.
+                if ([string](Get-ObjectPropertyValue -Object $formulaItem -PropertyName 'outputPptx' -DefaultValue '') -eq $movedFile.old) {
+                    $formulaItem | Add-Member -NotePropertyName outputPptx -NotePropertyValue $movedFile.new -Force
+                }
+            }
             foreach ($record in @((Get-ObjectPropertyValue -Object (Get-ObjectPropertyValue -Object $Manifest -PropertyName 'brandStageArtifacts' -DefaultValue $null) -PropertyName 'files' -DefaultValue @()))) {
-                foreach ($name in @('brandSourcePptx', 'brandPptx', 'highlightSourcePptx', 'highlightPptx', 'finalPptx')) {
+                # promotedPreFormulaFinalPptx rides along so the delivery
+                # validator's promoted-final contract keeps comparing the
+                # highlight output at its post-move location.
+                foreach ($name in @('brandSourcePptx', 'brandPptx', 'highlightSourcePptx', 'highlightPptx', 'finalPptx', 'promotedPreFormulaFinalPptx')) {
                     if ([string](Get-ObjectPropertyValue -Object $record -PropertyName $name -DefaultValue '') -eq $movedFile.old) {
                         $record | Add-Member -NotePropertyName $name -NotePropertyValue $movedFile.new -Force
                     }
@@ -2633,7 +2689,7 @@ function Invoke-InvariantGate {
         [string]$NormalizedDir,
         $IdentityMap,
         [string]$Mode,
-        [bool]$AllowAdvanceOnClickDisable = $false
+        [bool]$AllowAdvanceOnClickDisable = $true
     )
 
     $gateRoot = Join-Path $OutputRoot '16_不可变快照'
@@ -2815,7 +2871,7 @@ if ($Mode -eq 'CheckOnly') {
         InputPath = $inputFullPath
         OutputDir = $normalizedDir
         Recurse = [bool]$Recurse
-        DisableAdvanceOnClick = [bool]$DisableAdvanceOnClick
+        DisableAdvanceOnClick = [bool]$script:EffectiveDisableAdvanceOnClick
         NoPdf = (($Mode -eq 'SafeNormalize') -or $BrandRefresh -or $HighlightBox)
         Force = ($Mode -eq 'ForceRebuild')
         FilePattern = $FilePattern
@@ -2895,7 +2951,7 @@ $manifest = New-Manifest -Files $files -InputFullPath $inputFullPath -OutputRoot
 $manifest | Add-Member -NotePropertyName fullChainEnabled -NotePropertyValue ([bool]$FullChain) -Force
 if ($FullChain) { $manifest | Add-Member -NotePropertyName fullChainStatus -NotePropertyValue 'Pending' -Force }
 
-$invariantGate = Invoke-InvariantGate -Files $files -OutputRoot $OutputRoot -NormalizedDir $normalizedDir -IdentityMap $identityMap -Mode $Mode -AllowAdvanceOnClickDisable ([bool]$DisableAdvanceOnClick)
+$invariantGate = Invoke-InvariantGate -Files $files -OutputRoot $OutputRoot -NormalizedDir $normalizedDir -IdentityMap $identityMap -Mode $Mode -AllowAdvanceOnClickDisable ([bool]$script:EffectiveDisableAdvanceOnClick)
 $manifest | Add-Member -NotePropertyName invariantGate -NotePropertyValue $invariantGate -Force
 $manifest | Add-Member -NotePropertyName deliveryBlocked -NotePropertyValue ([bool]($invariantGate.enabled -and $invariantGate.status -eq 'Blocked')) -Force
 $manifest | Add-Member -NotePropertyName deliveryStatus -NotePropertyValue $(if ($invariantGate.enabled -and $invariantGate.status -eq 'Blocked') { 'BlockedInvariantGate' } else { 'Pending' }) -Force
@@ -2936,6 +2992,78 @@ if ($BrandRefresh -or $HighlightBox) {
     $brandStageArtifacts = Invoke-BrandStageArtifacts -Manifest $manifest -DeliveryDir $normalizedDir -RunBrand ([bool]$BrandRefresh) -RunHighlight ([bool]$HighlightBox)
     $manifest | Add-Member -NotePropertyName brandStageEnabled -NotePropertyValue $true -Force
     $manifest | Add-Member -NotePropertyName brandStageArtifacts -NotePropertyValue $brandStageArtifacts -Force
+    if ($ApplyFormulaOmmlWhitelist) {
+        # The formula stage runs BEFORE the final-chain PDF export and the
+        # final visual audit so both bind to the converted bytes.
+        $currentStep++
+        Write-Host "Step ${currentStep}/${stepCount}: formula OMML whitelist copies"
+        $formulaOmmlArtifacts = Invoke-FormulaOmmlArtifacts -Manifest $manifest -FormulaReviewIndex $formulaReviewIndex -OutputRoot $OutputRoot -MaxItems $FormulaOmmlMaxItems -RunVisualAudit ([bool]$FormulaOmmlVisualAudit)
+        $manifest | Add-Member -NotePropertyName formulaOmmlEnabled -NotePropertyValue $true -Force
+        $manifest | Add-Member -NotePropertyName formulaOmmlMaxItems -NotePropertyValue $FormulaOmmlMaxItems -Force
+        $manifest | Add-Member -NotePropertyName formulaOmmlVisualAuditEnabled -NotePropertyValue ([bool]$FormulaOmmlVisualAudit) -Force
+        $manifest | Add-Member -NotePropertyName formulaOmmlArtifacts -NotePropertyValue $formulaOmmlArtifacts -Force
+        # Promotion: a Passed formula stage output becomes the chain final so
+        # the same-name deliverable, its final-chain PDF, and the final visual
+        # audit below all bind to the converted bytes. Without this rebind the
+        # conversion lands only in 14_公式OMML副本 while packaging still moves
+        # the unconverted callout copy into 01_交付物 (18.2 v2 shipped exactly
+        # that gap: the summary reported 9 written formulas and the delivered
+        # PPTX contained none). The pre-formula callout copy keeps its
+        # provenance role among the stage copies; 14_/15_ artifacts stay as
+        # batch evidence. Non-Passed or missing outputs keep the callout
+        # final, and the promotion receipt records why.
+        $formulaPromotion = [ordered]@{ enabled = $true; considered = 0; promoted = 0; skipped = 0; reasons = @() }
+        foreach ($formulaItem in @((Get-ObjectPropertyValue -Object $formulaOmmlArtifacts -PropertyName 'files' -DefaultValue @()))) {
+            if ([string](Get-ObjectPropertyValue -Object $formulaItem -PropertyName 'sourceKind' -DefaultValue '') -ne 'BrandChain') { continue }
+            $promotionReason = ''
+            $convertedPptx = [string](Get-ObjectPropertyValue -Object $formulaItem -PropertyName 'outputPptx' -DefaultValue '')
+            $gateStatus = [string](Get-ObjectPropertyValue -Object $formulaItem -PropertyName 'automationGateStatus' -DefaultValue '')
+            $chainRecord = @((Get-ObjectPropertyValue -Object $brandStageArtifacts -PropertyName 'files' -DefaultValue @()) | Where-Object {
+                [string](Get-ObjectPropertyValue -Object $_ -PropertyName 'file' -DefaultValue '') -eq [string](Get-ObjectPropertyValue -Object $formulaItem -PropertyName 'file' -DefaultValue '')
+            }) | Select-Object -First 1
+            if ($null -eq $chainRecord) {
+                $promotionReason = 'no brand-chain record for this file'
+            } elseif ($gateStatus -ne 'Passed') {
+                $promotionReason = "automation gate is $gateStatus"
+            } elseif ([string]::IsNullOrWhiteSpace($convertedPptx) -or -not (Test-Path -LiteralPath $convertedPptx -PathType Leaf)) {
+                $promotionReason = 'converted PPTX is missing'
+            } elseif ((Get-FileSha256OrNull -Path $convertedPptx) -ceq (Get-FileSha256OrNull -Path ([string](Get-ObjectPropertyValue -Object $chainRecord -PropertyName 'finalPptx' -DefaultValue '')))) {
+                # Nothing was actually rewritten relative to the chain final
+                # (e.g. an identity re-run); rebinding would be a no-op move.
+                $promotionReason = 'converted PPTX is byte-identical to the chain final'
+            }
+            $formulaPromotion.considered++
+            if ([string]::IsNullOrWhiteSpace($promotionReason)) {
+                # The converted copy must live beside the other stage copies:
+                # Complete-FinalDeliveryPackaging derives the delivery directory
+                # and the same-name final target from record.finalPptx's current
+                # location, so leaving it under 14_公式OMML副本 would make
+                # packaging treat that subdirectory as the delivery root and
+                # abort on the same-stem PDF receipt check (v4 rerun evidence).
+                $promotedPath = Join-Path $normalizedDir (Split-Path -Leaf $convertedPptx)
+                if (Test-Path -LiteralPath $promotedPath) { throw "Promotion target already exists: $promotedPath" }
+                Move-Item -LiteralPath $convertedPptx -Destination $promotedPath -ErrorAction Stop
+                $chainRecord | Add-Member -NotePropertyName promotedPreFormulaFinalPptx -NotePropertyValue ([string](Get-ObjectPropertyValue -Object $chainRecord -PropertyName 'finalPptx' -DefaultValue '')) -Force
+                $chainRecord | Add-Member -NotePropertyName finalPptx -NotePropertyValue $promotedPath -Force
+                $formulaItem | Add-Member -NotePropertyName promotedToChainFinal -NotePropertyValue $true -Force
+                $formulaItem | Add-Member -NotePropertyName outputPptx -NotePropertyValue $promotedPath -Force
+                $formulaPromotion.promoted++
+                Write-Host ("  formula OMML promoted to chain final: {0}" -f (Split-Path -Leaf $promotedPath))
+            } else {
+                $formulaItem | Add-Member -NotePropertyName promotedToChainFinal -NotePropertyValue $false -Force
+                $formulaItem | Add-Member -NotePropertyName promotionSkippedReason -NotePropertyValue $promotionReason -Force
+                $formulaPromotion.skipped++
+                $formulaPromotion.reasons += ("{0}: {1}" -f ([string](Get-ObjectPropertyValue -Object $formulaItem -PropertyName 'file' -DefaultValue '')), $promotionReason)
+                Write-Host ("  formula OMML promotion skipped: {0} ({1})" -f (Split-Path -Leaf ([string](Get-ObjectPropertyValue -Object $formulaItem -PropertyName 'file' -DefaultValue ''))), $promotionReason)
+            }
+        }
+        $manifest | Add-Member -NotePropertyName formulaOmmlPromotion -NotePropertyValue ([pscustomobject]$formulaPromotion) -Force
+    } else {
+        $manifest | Add-Member -NotePropertyName formulaOmmlEnabled -NotePropertyValue $false -Force
+        $manifest | Add-Member -NotePropertyName formulaOmmlMaxItems -NotePropertyValue $FormulaOmmlMaxItems -Force
+        $manifest | Add-Member -NotePropertyName formulaOmmlVisualAuditEnabled -NotePropertyValue ([bool]$FormulaOmmlVisualAudit) -Force
+        $manifest | Add-Member -NotePropertyName formulaOmmlArtifacts -NotePropertyValue $null -Force
+    }
     # The stage copies supersede the normalized copy as the classroom
     # deliverable, so the final-chain PDF is exported from the last stage copy
     # instead of the .normalized PDF Normalize skipped in this mode, and the
@@ -2999,23 +3127,27 @@ if ($BrandRefresh -or $HighlightBox) {
 } else {
     $manifest | Add-Member -NotePropertyName brandStageEnabled -NotePropertyValue $false -Force
     $manifest | Add-Member -NotePropertyName brandStageArtifacts -NotePropertyValue $null -Force
+    if ($ApplyFormulaOmmlWhitelist) {
+        # No brand chain ran, so there is no chain final to promote into: the
+        # conversion stays a 14_/15_ side artifact and the delivery layout is
+        # unchanged. The summary states this explicitly (公式写回进入交付件).
+        $currentStep++
+        Write-Host "Step ${currentStep}/${stepCount}: formula OMML whitelist copies"
+        $formulaOmmlArtifacts = Invoke-FormulaOmmlArtifacts -Manifest $manifest -FormulaReviewIndex $formulaReviewIndex -OutputRoot $OutputRoot -MaxItems $FormulaOmmlMaxItems -RunVisualAudit ([bool]$FormulaOmmlVisualAudit)
+        $manifest | Add-Member -NotePropertyName formulaOmmlEnabled -NotePropertyValue $true -Force
+        $manifest | Add-Member -NotePropertyName formulaOmmlMaxItems -NotePropertyValue $FormulaOmmlMaxItems -Force
+        $manifest | Add-Member -NotePropertyName formulaOmmlVisualAuditEnabled -NotePropertyValue ([bool]$FormulaOmmlVisualAudit) -Force
+        $manifest | Add-Member -NotePropertyName formulaOmmlArtifacts -NotePropertyValue $formulaOmmlArtifacts -Force
+        $manifest | Add-Member -NotePropertyName formulaOmmlPromotion -NotePropertyValue ([pscustomobject][ordered]@{ enabled = $false; considered = 0; promoted = 0; skipped = 0; reasons = @('no brand/highlight chain ran; deliverable layout unchanged') }) -Force
+    } else {
+        $manifest | Add-Member -NotePropertyName formulaOmmlEnabled -NotePropertyValue $false -Force
+        $manifest | Add-Member -NotePropertyName formulaOmmlMaxItems -NotePropertyValue $FormulaOmmlMaxItems -Force
+        $manifest | Add-Member -NotePropertyName formulaOmmlVisualAuditEnabled -NotePropertyValue ([bool]$FormulaOmmlVisualAudit) -Force
+        $manifest | Add-Member -NotePropertyName formulaOmmlArtifacts -NotePropertyValue $null -Force
+    }
         $manifest | Add-Member -NotePropertyName finalVisualAuditArtifacts -NotePropertyValue @() -Force
 }
 
-if ($ApplyFormulaOmmlWhitelist) {
-    $currentStep++
-    Write-Host "Step ${currentStep}/${stepCount}: formula OMML whitelist copies"
-    $formulaOmmlArtifacts = Invoke-FormulaOmmlArtifacts -Manifest $manifest -FormulaReviewIndex $formulaReviewIndex -OutputRoot $OutputRoot -MaxItems $FormulaOmmlMaxItems -RunVisualAudit ([bool]$FormulaOmmlVisualAudit)
-    $manifest | Add-Member -NotePropertyName formulaOmmlEnabled -NotePropertyValue $true -Force
-    $manifest | Add-Member -NotePropertyName formulaOmmlMaxItems -NotePropertyValue $FormulaOmmlMaxItems -Force
-    $manifest | Add-Member -NotePropertyName formulaOmmlVisualAuditEnabled -NotePropertyValue ([bool]$FormulaOmmlVisualAudit) -Force
-    $manifest | Add-Member -NotePropertyName formulaOmmlArtifacts -NotePropertyValue $formulaOmmlArtifacts -Force
-} else {
-    $manifest | Add-Member -NotePropertyName formulaOmmlEnabled -NotePropertyValue $false -Force
-    $manifest | Add-Member -NotePropertyName formulaOmmlMaxItems -NotePropertyValue $FormulaOmmlMaxItems -Force
-    $manifest | Add-Member -NotePropertyName formulaOmmlVisualAuditEnabled -NotePropertyValue ([bool]$FormulaOmmlVisualAudit) -Force
-    $manifest | Add-Member -NotePropertyName formulaOmmlArtifacts -NotePropertyValue $null -Force
-}
 $actualFormulaWriteCount = 0
 if ($ApplyFormulaOmmlWhitelist -and $null -ne $manifest.formulaOmmlArtifacts) {
     foreach ($formulaFile in @(Get-FormulaOmmlFiles -FormulaOmmlArtifacts $manifest.formulaOmmlArtifacts)) {

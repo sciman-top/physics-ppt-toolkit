@@ -7,8 +7,8 @@
   and saves normalized copies to an output folder. It does not change text content,
   animations, picture crops, video links, object geometry, or slide transitions.
   Text-box expansion and answer alignment/animation behaviors are disabled by default.
-  Click-to-advance is preserved by default; use -DisableAdvanceOnClick only for a
-  deliberate anti-misclick presentation mode.
+  Click-to-advance is disabled by default for interactive classroom anti-misclick protection;
+  use -KeepAdvanceOnClick to preserve original click-to-advance behavior.
 
 .PARAMETER InputPath
   Path to a .pptx/.pptm file or a directory containing PPT files.
@@ -29,8 +29,10 @@
   Skip exporting the normalized PPTX to a same-name PDF.
 
 .PARAMETER DisableAdvanceOnClick
-  Explicitly disable mouse-click slide advance on every slide. The default is to
-  preserve the source presentation's click behavior.
+  Explicitly disable mouse-click slide advance on every slide. Defaults to true via config rules.disableAdvanceOnClick.
+
+.PARAMETER KeepAdvanceOnClick
+  Preserve click-to-advance (disables anti-misclick mode).
 
 .EXAMPLE
   .\Normalize-PhysicsPpt.ps1 -InputPath "D:\课件" -OutputDir "D:\输出" -Recurse
@@ -54,6 +56,7 @@ param(
     [switch]$NoBackup,
     [switch]$NoPdf,
     [switch]$DisableAdvanceOnClick,
+    [switch]$KeepAdvanceOnClick,
     [switch]$Force,
     [switch]$FailOnError,
     [string]$ImageOutputDir,
@@ -292,7 +295,13 @@ $script:DoNotModifyAnimations = [bool](Get-ConfigValue 'rules' 'doNotModifyAnima
 # Guard anchor required by Test-ToolkitFiles: this tool never touches slide
 # transitions, so the flag is honored trivially; kept explicit for the contract.
 $script:DoNotModifySlideTransitions = [bool](Get-ConfigValue 'rules' 'doNotModifySlideTransitions' $true)
-$script:DisableAdvanceOnClick = [bool](Get-ConfigValue 'rules' 'disableAdvanceOnClick' $false) -or [bool]$DisableAdvanceOnClick
+$script:DisableAdvanceOnClick = if ($KeepAdvanceOnClick) {
+    $false
+} elseif ($PSBoundParameters.ContainsKey('DisableAdvanceOnClick')) {
+    [bool]$DisableAdvanceOnClick
+} else {
+    [bool](Get-ConfigValue 'rules' 'disableAdvanceOnClick' $true)
+}
 # Host font availability cannot change mid-run; the check result is cached so
 # large batches do not re-enumerate every installed family per file.
 $script:ConfiguredFontCheckCache = $null
@@ -416,7 +425,7 @@ function Get-NormalizeSignature {
         safeName = $SafeName
         noPdf = [bool]$NoPdf
         reportOnly = [bool]$ReportOnly
-        disableAdvanceOnClick = [bool]$DisableAdvanceOnClick
+        disableAdvanceOnClick = [bool]$(if ($null -ne $script:DisableAdvanceOnClick) { $script:DisableAdvanceOnClick } else { $DisableAdvanceOnClick })
         filePattern = [string]$FilePattern
         imageOutputDir = if ([string]::IsNullOrWhiteSpace($ImageOutputDir)) { '' } else { [System.IO.Path]::GetFullPath($ImageOutputDir) }
     }
@@ -927,8 +936,28 @@ function Set-FormulaTextStyle {
         try { $beforeAlignment = [string]$textRange.ParagraphFormat.Alignment } catch { }
         $beforeLayout = Get-TextRangeLineLayout -TextRange $textRange
 
-        $font.Name = $script:Style.FontMath
-        $font.NameFarEast = $script:Style.FontChinese
+        # Mixed-family runs must be written per run (see
+        # Get-TextRangeFontNameRunSnapshot): the whole-range pair below leaves
+        # the East-Asian family in the LATIN slot of letter/digit runs and is
+        # nondeterministic per shape, while the layout guard and this
+        # function's Applied report cannot detect either. An empty
+        # whole-range name read is the mixed signal, mirrored by an
+        # unresolvable per-run snapshot.
+        $fontNameSnapshot = $null
+        if ([string]::IsNullOrWhiteSpace($beforeName) -or [string]::IsNullOrWhiteSpace($beforeFarEast)) {
+            $fontNameSnapshot = Get-TextRangeFontNameRunSnapshot -TextRange $textRange
+            if ($null -eq $fontNameSnapshot) {
+                Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $Shape.Name -Issue 'FormulaStyleSkippedMixedFontFamily' `
+                    -Details 'Formula text mixes font families and the per-run name snapshot was unresolved; family, size, and alignment were preserved because a lossless rollback cannot be guaranteed.' `
+                    -RuleId 'STYLE.FORMULA.TEXT' -Property 'FontName/NameFarEast/Size/ParagraphAlignment' -RiskLevel 'R0' -Result 'Skipped'
+                return
+            }
+            foreach ($entry in $fontNameSnapshot) {
+                Set-TextRangeFontFamilyCom -Range $entry.Range -Latin $script:Style.FontMath -FarEast $script:Style.FontChinese
+            }
+        } else {
+            Set-TextRangeFontFamilyCom -Range $textRange -Latin $script:Style.FontMath -FarEast $script:Style.FontChinese
+        }
         $font.Size = $safeSize
         # Author bold and color carry teaching semantics (red derivation
         # formulas, bold display titles); only family/size/alignment normalize.
@@ -936,8 +965,15 @@ function Set-FormulaTextStyle {
 
         $afterLayout = Get-TextRangeLineLayout -TextRange $textRange
         if (-not (Test-TextRangeLayoutUnchanged -Before $beforeLayout -After $afterLayout -Shape $Shape)) {
-            $font.Name = $beforeName
-            $font.NameFarEast = $beforeFarEast
+            if ($null -ne $fontNameSnapshot) {
+                foreach ($entry in $fontNameSnapshot) {
+                    try {
+                        Set-TextRangeFontFamilyCom -Range $entry.Range -Latin $entry.Name -FarEast $entry.FarEast
+                    } catch { }
+                }
+            } else {
+                Set-TextRangeFontFamilyCom -Range $textRange -Latin $beforeName -FarEast $beforeFarEast
+            }
             $font.Size = $beforeSize
             try { $textRange.ParagraphFormat.Alignment = [int]$beforeAlignment } catch { }
             Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $Shape.Name -Issue 'FormulaStyleSkippedLineRelayout' `
@@ -1014,6 +1050,53 @@ function Test-TextRangeFontSizeEffectivelyMixed {
         if ([Math]::Abs([double]$entry.Size - [double]$rangeSize) -gt 0.01) { return $true }
     }
     return $false
+}
+
+function Get-TextRangeFontNameRunSnapshot {
+    # Per-run font-family capture. On a range whose runs mix families the
+    # whole-range Font.Name/NameFarEast reads resolve to "" (no mixed
+    # sentinel), and — measured with a live COM probe on 18.2 slide23 — the
+    # whole-range write pair Font.Name=math + Font.NameFarEast=chinese does
+    # NOT propagate the math family into the ASCII slot of runs containing
+    # letters/digits: those runs end with the East-Asian family in their
+    # LATIN slot (a:latin=微软雅黑) while symbol-only runs take both families
+    # correctly. The failure is also nondeterministic per shape (sibling
+    # answer lines in the same run came out fully normalized), and the line
+    # layout guard cannot see it because both families are metric-close at
+    # the same size — so mixed-family ranges must write and restore families
+    # per run through this snapshot instead of the whole-range pair. Returns
+    # $null when any run's name pair cannot be resolved (transient COM
+    # refusals cluster in the same busy windows; unresolvable counts as
+    # mixed so callers skip rather than risk a partial write).
+    param($TextRange)
+    try {
+        $entries = New-Object System.Collections.Generic.List[object]
+        foreach ($runRange in @($TextRange.Runs())) {
+            $runName = ''
+            $runFarEast = ''
+            try { $runName = [string]$runRange.Font.Name } catch { return $null }
+            try { $runFarEast = [string]$runRange.Font.NameFarEast } catch { return $null }
+            if ([string]::IsNullOrWhiteSpace($runName) -or [string]::IsNullOrWhiteSpace($runFarEast)) { return $null }
+            $entries.Add([pscustomobject]@{ Range = $runRange; Name = $runName; FarEast = $runFarEast }) | Out-Null
+        }
+        if ($entries.Count -eq 0) { return $null }
+        return $entries
+    } catch { return $null }
+}
+
+function Set-TextRangeFontFamilyCom {
+    # COM write-order contract (18.2 slide23 live probes, modes A-D): on any
+    # range whose runs contain letters/digits, writing Font.NameFarEast AFTER
+    # Font.Name lands the East-Asian family in the run's LATIN slot
+    # (a:latin=微软雅黑 while the intended family is lost) — at whole-range
+    # and single-run granularity alike — and neither the layout guard nor an
+    # Applied report row can detect it. Writing NameFarEast FIRST and Name
+    # LAST yields latin=<Latin> + ea=<FarEast> on every run deterministically
+    # (mixed-family ranges included). Every family write and family rollback
+    # in this tool must go through this helper so the order cannot drift back.
+    param($Range, [string]$Latin, [string]$FarEast)
+    $Range.Font.NameFarEast = $FarEast
+    $Range.Font.Name = $Latin
 }
 
 function Get-TextRangeBounds {
@@ -1351,8 +1434,29 @@ function Set-TextRangeStyle {
         $mixedFontSize = ((Test-TextRangeFontSizeEffectivelyMixed -TextRange $TextRange -KnownRangeSize $beforeSize -KnownEntries $fontSizeRunSnapshot) -and -not $ForceTargetSize)
         $safeSize = Resolve-SafeFontSize -TextRange $TextRange -TargetSize $Size -FileName $FileName -SlideNumber $SlideNumber -ShapeName $ShapeName -ForceTargetSize:$ForceTargetSize -MaxSize $MaxSize
         $beforeLayout = Get-TextRangeLineLayout -TextRange $TextRange
-        $font.Name = $script:Style.FontLatin
-        $font.NameFarEast = $script:Style.FontChinese
+        # Mixed-family runs must be written per run (see
+        # Get-TextRangeFontNameRunSnapshot): the whole-range pair leaves the
+        # East-Asian family in the LATIN slot of letter/digit runs and is
+        # nondeterministic per shape (18.2 slide23 COM probe), while the
+        # layout guard and the Applied report cannot detect either. An empty
+        # whole-range name read is the mixed signal, mirrored by an
+        # unresolvable per-run snapshot.
+        $fontNameSnapshot = $null
+        if ([string]::IsNullOrWhiteSpace($beforeName) -or [string]::IsNullOrWhiteSpace($beforeFarEast)) {
+            $fontNameSnapshot = Get-TextRangeFontNameRunSnapshot -TextRange $TextRange
+            if ($null -eq $fontNameSnapshot) {
+                Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $ShapeName -Issue 'TextStyleSkippedMixedFontFamily' `
+                    -Details 'Text range mixes font families and the per-run name snapshot was unresolved; family, size, and alignment were preserved because a lossless rollback cannot be guaranteed.' `
+                    -RuleId 'STYLE.TEXT.FONT' -Property 'FontName/NameFarEast/Size/Alignment' -Before "$beforeName|$beforeFarEast" -After "$beforeName|$beforeFarEast" `
+                    -RiskLevel 'R0' -Result 'Skipped'
+                return
+            }
+            foreach ($entry in $fontNameSnapshot) {
+                Set-TextRangeFontFamilyCom -Range $entry.Range -Latin $script:Style.FontLatin -FarEast $script:Style.FontChinese
+            }
+        } else {
+            Set-TextRangeFontFamilyCom -Range $TextRange -Latin $script:Style.FontLatin -FarEast $script:Style.FontChinese
+        }
         if (-not $mixedFontSize) {
             $font.Size = $safeSize
         } else {
@@ -1368,10 +1472,17 @@ function Set-TextRangeStyle {
         # sibling text shape; harmless metric changes without overlap can stay.
         $afterLayout = Get-TextRangeLineLayout -TextRange $TextRange
         if (-not (Test-TextRangeLayoutUnchanged -Before $beforeLayout -After $afterLayout -Shape $Shape)) {
-            $font.Name = $beforeName
-            $font.NameFarEast = $beforeFarEast
-            if (-not $mixedFontSize) {
-                if ($null -ne $beforeSize) { $font.Size = $beforeSize }
+            if ($null -ne $fontNameSnapshot) {
+                foreach ($entry in $fontNameSnapshot) {
+                    try {
+                        Set-TextRangeFontFamilyCom -Range $entry.Range -Latin $entry.Name -FarEast $entry.FarEast
+                    } catch { }
+                }
+            } else {
+                Set-TextRangeFontFamilyCom -Range $TextRange -Latin $beforeName -FarEast $beforeFarEast
+            }
+                if (-not $mixedFontSize) {
+                    if ($null -ne $beforeSize) { $font.Size = $beforeSize }
                 # Writing a mixed sentinel back flattens every run to one
                 # format (16.1 slide14: red+black runs all turned explicit
                 # black and adjacent runs merged), so mixed bold/color can
@@ -1399,7 +1510,11 @@ function Set-TextRangeStyle {
         $boldSnapshotUsable = $true
         try {
             foreach ($runRange in @($TextRange.Runs())) {
-                $runBold = try { [int]$runRange.Font.Bold } catch { 0 }
+                # Statement-form read: the assignment-RHS try form works, but
+                # keep every defensive read in the same statement style as the
+                # quantity sweep (hash/paren forms DO throw at runtime).
+                $runBold = 0
+                try { $runBold = [int]$runRange.Font.Bold } catch { $boldSnapshotUsable = $false; break }
                 if ($runBold -notin @(-1, 0)) { $boldSnapshotUsable = $false; break }
                 $boldRunSnapshot.Add([pscustomobject]@{ Range = $runRange; Bold = $runBold }) | Out-Null
             }
@@ -1769,24 +1884,30 @@ function Set-AutoSizeTextFontSafely {
         if ($null -ne $perRunBefore) {
             foreach ($entry in $perRunBefore) {
                 if ($Rollback) {
-                    $entry.Range.Font.Name = $entry.Name
-                    $entry.Range.Font.NameFarEast = $entry.FarEast
+                    Set-TextRangeFontFamilyCom -Range $entry.Range -Latin $entry.Name -FarEast $entry.FarEast
                 } else {
-                    $entry.Range.Font.Name = $Latin
-                    $entry.Range.Font.NameFarEast = $FarEast
+                    Set-TextRangeFontFamilyCom -Range $entry.Range -Latin $Latin -FarEast $FarEast
                 }
             }
         } elseif ($Rollback) {
-            $font.Name = $beforeName
-            $font.NameFarEast = $beforeFarEast
+            Set-TextRangeFontFamilyCom -Range $textRange -Latin $beforeName -FarEast $beforeFarEast
         } else {
-            $font.Name = $Latin
-            $font.NameFarEast = $FarEast
+            Set-TextRangeFontFamilyCom -Range $textRange -Latin $Latin -FarEast $FarEast
         }
     }
 
     try {
         $beforeFit = Test-TextRangeFitsShape -TextRange $textRange -ShapeWidth $width -ShapeHeight $height
+        # Page-edge capture (2026-11-10 20.6 s33): a shape may legally extend
+        # past the slide's right edge, so text that "fits the shape" can still
+        # clip at the visible page boundary once normalization widens the
+        # glyphs. Bound* values are slide-relative (the deferred geometry
+        # restore maps BoundLeft -> Shape.Left in the same space), so the
+        # absolute ink right edge is BoundLeft + BoundWidth.
+        $slideWidthPt = 0.0
+        try { $slideWidthPt = [double]$Shape.Parent.Parent.PageSetup.SlideWidth } catch { }
+        $beforeAbsRight = $null
+        try { $beforeAbsRight = [double]$textRange.BoundLeft + [double]$textRange.BoundWidth } catch { }
         $beforeLayout = Get-TextRangeLineLayout -TextRange $textRange
         & $setFontFamily $latinTarget $script:Style.FontChinese
         # Bold-everything policy (2026-11-05 user acceptance): AutoSize formula
@@ -1879,6 +2000,21 @@ function Set-AutoSizeTextFontSafely {
             )
         }
         $contentFitRisk = $targetOverflow -and ((-not $beforeFit.Available) -or (-not $beforeOverflow) -or $targetWorsensExistingOverflow)
+        # New page-edge clipping: the target layout reaches past the visible
+        # slide while the author's own layout did not. The shape-overflow
+        # check above cannot see this when the author box itself extends past
+        # the page (20.6 s33: two note-page lines grew past the right edge
+        # under the bold-everything policy and their last glyphs were cut at
+        # render time). Same remedy path: fitted size or full rollback.
+        $newPageEdgeClip = $false
+        if (-not $contentFitRisk -and $slideWidthPt -gt 0) {
+            $targetAbsRight = $null
+            try { $targetAbsRight = [double]$textRange.BoundLeft + [double]$textRange.BoundWidth } catch { }
+            if ($null -ne $targetAbsRight -and $targetAbsRight -gt ($slideWidthPt + 1.0)) {
+                $newPageEdgeClip = ($null -eq $beforeAbsRight) -or ($beforeAbsRight -le ($slideWidthPt + 1.0))
+            }
+            if ($newPageEdgeClip) { $contentFitRisk = $true }
+        }
         if ($contentFitRisk) {
             $beforeBoundsText = if ($beforeFit.Available) { "{0:N1}x{1:N1}" -f $beforeFit.Width, $beforeFit.Height } else { 'unavailable' }
             $targetBoundsText = if ($targetFit.Available) { "{0:N1}x{1:N1}" -f $targetFit.Width, $targetFit.Height } else { 'unavailable' }
@@ -1899,15 +2035,27 @@ function Set-AutoSizeTextFontSafely {
             $sizeEffectivelyMixed = Test-TextRangeFontSizeEffectivelyMixed -TextRange $textRange -KnownRangeSize $authorSize
             $fittedSize = $null
             if (-not $sizeEffectivelyMixed -and $null -ne $authorSize -and $targetFit.Available) {
+                # For a page-edge-only clip the text fits its shape, so fitting
+                # against the shape width would be a no-op; fit against the
+                # visible width instead so the search actually shrinks far
+                # enough to pull the tail back inside the slide.
+                $fittedShapeWidth = $width
+                if ($newPageEdgeClip -and $slideWidthPt -gt 0) {
+                    $fittedShapeWidth = [Math]::Max(50.0, $slideWidthPt - [double]$left - 6.0)
+                }
                 $fittedSize = Get-FittedOverflowFontSize -CurrentSize $authorSize -TargetWidth $targetFit.Width -TargetHeight $targetFit.Height `
-                    -ShapeWidth $width -ShapeHeight $height -MinimumSize $script:Style.SizeMinimum
+                    -ShapeWidth $fittedShapeWidth -ShapeHeight $height -MinimumSize $script:Style.SizeMinimum
             }
             $fittedKept = $false
             if ($null -ne $fittedSize) {
                 $textRange.Font.Size = $fittedSize
                 $fittedLayout = Get-TextRangeLineLayout -TextRange $textRange
                 $fittedFit = Test-TextRangeFitsShape -TextRange $textRange -ShapeWidth $width -ShapeHeight $height
-                if ($fittedFit.Fits -and (Test-TextRangeLayoutUnchanged -Before $beforeLayout -After $fittedLayout -Shape $Shape)) {
+                $fittedPageEdgeOk = $true
+                if ($newPageEdgeClip -and $slideWidthPt -gt 0) {
+                    try { $fittedPageEdgeOk = (([double]$textRange.BoundLeft + [double]$textRange.BoundWidth) -le ($slideWidthPt + 1.0)) } catch { $fittedPageEdgeOk = $false }
+                }
+                if ($fittedFit.Fits -and $fittedPageEdgeOk -and (Test-TextRangeLayoutUnchanged -Before $beforeLayout -After $fittedLayout -Shape $Shape)) {
                     $fittedKept = $true
                 }
             }
@@ -1924,9 +2072,10 @@ function Set-AutoSizeTextFontSafely {
                 $Shape.Top = [single]$top
                 $Shape.Width = [single]$width
                 $Shape.Height = [single]$height
+                $pageEdgeNote = if ($newPageEdgeClip) { ' Page-edge clipping: the widened text reached past the slide right edge while the author layout did not.' } else { '' }
                 Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName `
                     -Issue 'TextStyleSkippedContentFitRisk' `
-                    -Details ("Target font {0}/{1} produced text bounds {2} against protected shape {3:N1}x{4:N1}; original bounds were {5}. Font and geometry were rolled back.{6}" -f $latinTarget, $script:Style.FontChinese, $targetBoundsText, $width, $height, $beforeBoundsText, $rollbackFailure) `
+                    -Details ("Target font {0}/{1} produced text bounds {2} against protected shape {3:N1}x{4:N1}; original bounds were {5}. Font and geometry were rolled back.{6}{7}" -f $latinTarget, $script:Style.FontChinese, $targetBoundsText, $width, $height, $beforeBoundsText, $rollbackFailure, $pageEdgeNote) `
                     -RuleId 'SAFETY.GEOMETRY.AUTOSIZE' -Property 'FontName/NameFarEast' -Before $beforeSummary -After $beforeSummary `
                     -RiskLevel 'R0' -Result $(if ([string]::IsNullOrWhiteSpace($rollbackFailure)) { 'Skipped' } else { 'Failed' })
                 return
@@ -2657,7 +2806,7 @@ function Disable-SlideAdvanceOnClick {
         return
     }
     if (-not $script:DisableAdvanceOnClick) {
-        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName '(slide)' -Issue 'AdvanceOnClickPreserved' -Details 'Click-to-advance behavior preserved by default; use -DisableAdvanceOnClick for anti-misclick mode.' -RuleId 'SLIDE.TRANSITION.ADVANCE_ON_CLICK' -Property 'AdvanceOnClick' -RiskLevel 'R1' -Result 'Skipped'
+        Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName '(slide)' -Issue 'AdvanceOnClickPreserved' -Details 'Click-to-advance behavior preserved by caller request; anti-misclick mode skipped.' -RuleId 'SLIDE.TRANSITION.ADVANCE_ON_CLICK' -Property 'AdvanceOnClick' -RiskLevel 'R1' -Result 'Skipped'
         return
     }
     try {
@@ -2754,6 +2903,19 @@ function Invoke-NormalizeSlideShape {
     $shapeName = Get-ShapeName $Shape
     if ($Shape.Type -eq $script:MsoGroup) {
         Add-ReportRow -File $FileName -SlideNumber $SlideNumber -ShapeName $shapeName -Issue 'GroupShapeSkipped' -Details 'Grouped shapes are not modified to avoid layout damage.'
+        # The quantity-symbol font sweep is font-only (name/bold on matched
+        # letter runs) and carries none of the geometry risks the group
+        # invariant guards, so it still reaches symbols nested inside author
+        # groups (2026-11-06 user report: serif quantity letters survived
+        # inside grouped labels).
+        if (-not $ReportOnly) {
+            foreach ($groupChild in @($Shape.GroupItems)) {
+                try {
+                    if ($groupChild.TextFrame2.HasText -ne -1) { continue }
+                    Normalize-QuantitySymbolFont -Shape $groupChild -SlideNumber $SlideNumber -FileName $FileName
+                } catch { }
+            }
+        }
         return
     }
 
@@ -2871,17 +3033,22 @@ function Normalize-QuantitySymbolFont {
         foreach ($plan in $plans) {
             $charRange = $textRange.Characters($plan.Start, $plan.Length)
             $font = $charRange.Font
+            # A try keyword inside a hashtable value or a parenthesized
+            # condition is parsed as a bare command (runtime
+            # CommandNotFoundException), so the reads hoist to statements.
+            $matchBold = 0
+            try { $matchBold = [int]$font.Bold } catch { }
             $captured.Add([pscustomobject]@{
                 Range = $charRange
                 Name = [string]$font.Name
-                Bold = try { [int]$font.Bold } catch { 0 }
+                Bold = $matchBold
             }) | Out-Null
             $changedHere = $false
             if ([string]$font.Name -cne $script:Style.FontMath) {
                 $font.Name = $script:Style.FontMath
                 $changedHere = $true
             }
-            if ($null -ne $plan.TargetBold -and (try { [int]$font.Bold } catch { 0 }) -ne $plan.TargetBold) {
+            if ($null -ne $plan.TargetBold -and $matchBold -ne $plan.TargetBold) {
                 $font.Bold = $plan.TargetBold
                 $changedHere = $true
             }
@@ -3213,7 +3380,8 @@ if ($DegreeOfParallelism -gt 1 -and $files.Count -gt 1) {
         if ($ReportOnly)    { $childArgs += '-ReportOnly' }
         if ($NoBackup)      { $childArgs += '-NoBackup' }
         if ($NoPdf)         { $childArgs += '-NoPdf' }
-        if ($DisableAdvanceOnClick) { $childArgs += '-DisableAdvanceOnClick' }
+        if ($script:DisableAdvanceOnClick) { $childArgs += '-DisableAdvanceOnClick' }
+        if ($KeepAdvanceOnClick) { $childArgs += '-KeepAdvanceOnClick' }
         if ($Force)         { $childArgs += '-Force' }
         $childArgs += @('-FileRetryCount', [string]$FileRetryCount, '-FileRetryDelayMs', [string]$FileRetryDelayMs)
         if (-not [string]::IsNullOrWhiteSpace($ImageOutputDir)) {
@@ -3522,14 +3690,21 @@ try {
 # the other reports failure (e675660 alignment).
 $deferredFailedFiles = @()
 if ($script:ReportRows.Count -gt $preDeferredRestoreRowCount) {
-    foreach ($row in @($script:ReportRows)[$preDeferredRestoreRowCount..($script:ReportRows.Count - 1)]) {
+    # @() does NOT enumerate a List[object] (it binds the list itself), so
+    # @($list)[range] indexes the List with an int[] and the binder throws
+    # "Argument types do not match" (2026-11-05, first exercised when the
+    # deferred loop appended heal rows). List.ToArray() returns a real
+    # object[] that slices and pipelines safely.
+    $postDeferredRows = @($script:ReportRows.ToArray()) | Select-Object -Skip $preDeferredRestoreRowCount
+    foreach ($row in $postDeferredRows) {
         if (-not (Test-FileFailureShapedRow -Row $row)) { continue }
         $rowFile = [string]$row.FilePath
         if ([string]::IsNullOrWhiteSpace($rowFile)) { $rowFile = [string]$row.File }
         if ([string]::IsNullOrWhiteSpace($rowFile) -or $deferredFailedFiles -ccontains $rowFile) { continue }
         $alreadyCounted = $false
         if ($preDeferredRestoreRowCount -gt 0) {
-            foreach ($earlier in @($script:ReportRows)[0..($preDeferredRestoreRowCount - 1)]) {
+            $earlierRows = @($script:ReportRows.ToArray()) | Select-Object -First $preDeferredRestoreRowCount
+            foreach ($earlier in $earlierRows) {
                 $earlierFile = [string]$earlier.FilePath
                 if ([string]::IsNullOrWhiteSpace($earlierFile)) { $earlierFile = [string]$earlier.File }
                 if (([string]$earlierFile -ceq $rowFile) -and (Test-FileFailureShapedRow -Row $earlier)) { $alreadyCounted = $true; break }
